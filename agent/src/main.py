@@ -20,11 +20,21 @@ logger = logging.getLogger(__name__)
 
 async def main():
     """Main execution function."""
+    print("=" * 60)
+    print("GLITCH AGENT STARTUP")
+    print("=" * 60)
+    print(f"GLITCH_MODE env var: {os.getenv('GLITCH_MODE', 'NOT_SET')}")
+    print(f"Python version: {sys.version}")
+    print(f"Current working directory: {os.getcwd()}")
+    print("=" * 60)
+    
     logger.info("Starting Glitch agent...")
+    logger.info(f"GLITCH_MODE environment variable: {os.getenv('GLITCH_MODE', 'NOT_SET')}")
     
     telemetry = setup_telemetry(
         service_name="glitch-agent",
         enable_console=os.getenv("OTEL_CONSOLE_ENABLED", "false").lower() == "true",
+        enable_otlp=os.getenv("OTEL_OTLP_ENABLED", "true").lower() == "true",
     )
     
     agent = create_glitch_agent()
@@ -34,13 +44,19 @@ async def main():
     connectivity = await agent.check_connectivity()
     logger.info(f"Connectivity check: {connectivity}")
     
-    if os.getenv("GLITCH_MODE", "interactive") == "server":
-        logger.info("Starting in server mode (HTTP endpoint)")
+    mode = os.getenv("GLITCH_MODE", "server")
+    logger.info(f"Mode determined: {mode}")
+    print(f"Starting in {mode} mode")
+    
+    if mode == "interactive":
+        logger.warning("INTERACTIVE MODE - This will fail in containers without stdin!")
+        print("ERROR: Interactive mode requested but container has no stdin")
+        await interactive_mode(agent)
+    else:
+        logger.info("Starting HTTP server on 0.0.0.0:8080")
+        print("Starting HTTP server on 0.0.0.0:8080")
         from glitch.server import run_server
         await run_server(agent)
-    else:
-        logger.info("Starting in interactive mode")
-        await interactive_mode(agent)
 
 
 async def interactive_mode(agent):

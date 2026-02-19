@@ -69,7 +69,7 @@ GLITCH_TECHNICAL_CONTEXT = """
 **Routing Guidelines:**
 1. Assess task complexity and confidence before responding
 2. Use local models for straightforward tasks to reduce costs
-3. Escalate to Tier 2 (Sonnet 4.6) or Tier 3 (Opus 4.5) only when necessary
+3. Escalate to Tier 2 (Sonnet 4.5) or Tier 3 (Opus 4) only when necessary
 4. Maintain structured memory: facts, decisions, constraints, open questions
 """
 
@@ -161,7 +161,6 @@ class GlitchAgent:
             await self.memory_manager.create_event(
                 event_content=user_message,
                 event_type="user_message",
-                metadata={"source": "user"},
             )
             
             memory_context = self.memory_manager.get_summary_for_context()
@@ -173,7 +172,6 @@ class GlitchAgent:
             await self.memory_manager.create_event(
                 event_content=str(response),
                 event_type="agent_response",
-                metadata={"source": "glitch"},
             )
             
             self.model_router.reset_turn_counter()

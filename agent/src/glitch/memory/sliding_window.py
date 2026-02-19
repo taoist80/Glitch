@@ -1,12 +1,13 @@
-"""Sliding window memory manager with AgentCore Memory integration."""
+"""Sliding window memory manager with AgentCore Memory integration.
 
-from typing import Dict, List, Any, Optional
+Uses the official bedrock_agentcore.memory.MemoryClient SDK for all memory operations.
+"""
+
+from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 import json
 import logging
-import boto3
-from botocore.exceptions import ClientError
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,8 @@ class GlitchMemoryManager:
     """
     Three-layer memory manager for Glitch agent.
     
+    Uses the official bedrock_agentcore.memory.MemoryClient SDK.
+    
     Layers:
     1. Active Window: Recent raw conversation turns (handled by Strands)
     2. Structured Memory: JSON state with facts, decisions, constraints
@@ -83,20 +86,31 @@ class GlitchMemoryManager:
         region: str = "us-west-2",
         window_size: int = 20,
         compression_threshold_pct: float = 0.7,
+        actor_id: str = "glitch-agent",
     ):
         self.session_id = session_id
         self.memory_id = memory_id
         self.region = region
         self.window_size = window_size
         self.compression_threshold_pct = compression_threshold_pct
+        self.actor_id = actor_id
         
         self.structured_memory = StructuredMemory()
+        self.memory_client = None
         
         try:
-            self.agentcore_client = boto3.client("bedrock-agentcore", region_name=region)
+            from bedrock_agentcore.memory import MemoryClient
+            self.memory_client = MemoryClient(region_name=region)
+            logger.info(f"Initialized AgentCore MemoryClient for region {region}")
+        except ImportError:
+            logger.warning("bedrock_agentcore.memory not available, memory features disabled")
         except Exception as e:
-            logger.warning(f"Could not initialize AgentCore Memory client: {e}")
-            self.agentcore_client = None
+            logger.warning(f"Could not initialize AgentCore MemoryClient: {e}")
+    
+    @property
+    def agentcore_client(self):
+        """Backward compatibility property."""
+        return self.memory_client
     
     def get_structured_state(self) -> StructuredMemory:
         """Get the current structured memory state."""
@@ -113,37 +127,41 @@ class GlitchMemoryManager:
         self,
         event_content: str,
         event_type: str = "conversation",
-        metadata: Optional[Dict[str, str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
         """
         Create a short-term memory event in AgentCore Memory.
         
+        Uses the official MemoryClient.create_event() API.
+        
         Args:
             event_content: The content of the event (user/agent message)
             event_type: Type of event (conversation, tool_use, etc.)
-            metadata: Optional metadata tags for filtering
+            metadata: Optional metadata dict for filtering
         
         Returns:
             Event ID if successful, None otherwise
         """
-        if not self.agentcore_client:
-            logger.warning("AgentCore Memory client not available")
+        if not self.memory_client:
+            logger.warning("AgentCore MemoryClient not available, skipping event creation")
             return None
         
         try:
-            response = self.agentcore_client.create_event(
-                memoryId=self.memory_id,
-                sessionId=self.session_id,
-                eventContent=event_content,
-                eventType=event_type,
-                metadata=metadata or {},
+            role = "user" if event_type == "user_message" else "assistant"
+            messages: List[Tuple[str, str]] = [(event_content, role)]
+            
+            response = self.memory_client.create_event(
+                memory_id=self.memory_id,
+                actor_id=self.actor_id,
+                session_id=self.session_id,
+                messages=messages,
             )
             
-            event_id = response.get("eventId")
-            logger.info(f"Created event {event_id} in session {self.session_id}")
+            event_id = response.get("eventId") if isinstance(response, dict) else None
+            logger.info(f"Created event in session {self.session_id}")
             return event_id
             
-        except ClientError as e:
+        except Exception as e:
             logger.error(f"Failed to create event: {e}")
             return None
     
@@ -153,68 +171,72 @@ class GlitchMemoryManager:
         metadata_filter: Optional[Dict[str, str]] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Retrieve recent events from short-term memory.
+        Retrieve recent conversation turns from short-term memory.
+        
+        Uses the official MemoryClient.get_last_k_turns() API.
         
         Args:
-            max_results: Maximum number of events to retrieve
-            metadata_filter: Optional metadata filter
+            max_results: Maximum number of conversation turns to retrieve
+            metadata_filter: Optional metadata filter (not used in current SDK)
         
         Returns:
-            List of events
+            List of conversation turns
         """
-        if not self.agentcore_client:
+        if not self.memory_client:
             return []
         
         try:
-            params = {
-                "memoryId": self.memory_id,
-                "sessionId": self.session_id,
-                "maxResults": max_results,
-            }
+            turns = self.memory_client.get_last_k_turns(
+                memory_id=self.memory_id,
+                actor_id=self.actor_id,
+                session_id=self.session_id,
+                k=max_results,
+            )
             
-            if metadata_filter:
-                params["metadataFilter"] = metadata_filter
+            logger.info(f"Retrieved {len(turns) if turns else 0} turns from session {self.session_id}")
+            return turns if turns else []
             
-            response = self.agentcore_client.list_events(**params)
-            events = response.get("events", [])
-            
-            logger.info(f"Retrieved {len(events)} events from session {self.session_id}")
-            return events
-            
-        except ClientError as e:
-            logger.error(f"Failed to retrieve events: {e}")
+        except Exception as e:
+            logger.error(f"Failed to retrieve recent events: {e}")
             return []
     
     async def retrieve_long_term_memories(
         self,
         query: str,
         max_results: int = 5,
+        namespaces: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Retrieve relevant long-term memories using semantic search.
         
+        Uses the official MemoryClient.retrieve() API for semantic memory retrieval.
+        
         Args:
             query: Query to search for relevant memories
             max_results: Maximum number of memories to retrieve
+            namespaces: Optional list of namespaces to search in
         
         Returns:
             List of memory records
         """
-        if not self.agentcore_client:
+        if not self.memory_client:
             return []
         
         try:
-            response = self.agentcore_client.retrieve_memory_records(
-                memoryId=self.memory_id,
+            memories = self.memory_client.retrieve(
+                memory_id=self.memory_id,
                 query=query,
-                maxResults=max_results,
+                max_results=max_results,
+                namespaces=namespaces or ["/user/facts/", "/user/preferences/"],
             )
             
-            memories = response.get("memoryRecords", [])
-            logger.info(f"Retrieved {len(memories)} long-term memories for query: {query}")
-            return memories
+            logger.info(f"Retrieved {len(memories) if memories else 0} long-term memories for query: {query}")
+            return memories if memories else []
             
-        except ClientError as e:
+        except AttributeError:
+            logger.warning("MemoryClient.retrieve() not available in this SDK version")
+            return []
+        except Exception as e:
             logger.error(f"Failed to retrieve long-term memories: {e}")
             return []
     

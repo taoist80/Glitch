@@ -1,4 +1,8 @@
-"""Model routing and tier escalation logic for Glitch agent."""
+"""Model routing and tier escalation logic for Glitch agent.
+
+Model IDs use Bedrock cross-region inference profile format for optimal throughput.
+Reference: https://docs.aws.amazon.com/bedrock/latest/userguide/cross-region-inference.html
+"""
 
 from typing import Dict, List, Optional, Literal
 from dataclasses import dataclass
@@ -13,9 +17,9 @@ TaskCategory = Literal["chat", "coding", "vision", "tool_use", "mcp_use", "skill
 class CognitiveTier(Enum):
     """Cognitive tiers for model escalation."""
     LOCAL = 0
-    TIER_1 = 1  # Sonnet 4.5
-    TIER_2 = 2  # Sonnet 4.6
-    TIER_3 = 3  # Opus 4.5
+    TIER_1 = 1  # Sonnet 4
+    TIER_2 = 2  # Sonnet 4.5
+    TIER_3 = 3  # Opus 4
 
 
 @dataclass
@@ -33,15 +37,15 @@ class ModelConfig:
 ROUTING_CONFIG: Dict[TaskCategory, Dict[str, List[str]]] = {
     "chat": {
         "primary": "glitch",
-        "escalation": ["sonnet-4.6", "opus-4.5"],
+        "escalation": ["sonnet-4.5", "opus-4"],
     },
     "coding": {
         "primary": "glitch",
-        "escalation": ["sonnet-4.6", "opus-4.5"],
+        "escalation": ["sonnet-4.5", "opus-4"],
     },
     "vision": {
         "primary": "vision_agent",
-        "escalation": ["sonnet-4.6"],
+        "escalation": ["sonnet-4.5"],
     },
     "tool_use": {
         "primary": "tool_agent",
@@ -53,7 +57,7 @@ ROUTING_CONFIG: Dict[TaskCategory, Dict[str, List[str]]] = {
     },
     "skill_workflow": {
         "primary": "glitch",
-        "escalation": ["sonnet-4.6"],
+        "escalation": ["sonnet-4.5"],
     },
 }
 
@@ -62,22 +66,22 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         name="glitch",
         model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
         tier=CognitiveTier.TIER_1,
-        supports_vision=False,
+        supports_vision=True,
         supports_tools=True,
         max_context_tokens=200000,
         cost_per_million_tokens=3.0,
     ),
-    "sonnet-4.6": ModelConfig(
-        name="sonnet-4.6",
-        model_id="us.anthropic.claude-sonnet-4.6-20250514-v1:0",
+    "sonnet-4.5": ModelConfig(
+        name="sonnet-4.5",
+        model_id="us.anthropic.claude-sonnet-4-5-20250514-v1:0",
         tier=CognitiveTier.TIER_2,
         supports_vision=True,
         supports_tools=True,
         max_context_tokens=200000,
         cost_per_million_tokens=5.0,
     ),
-    "opus-4.5": ModelConfig(
-        name="opus-4.5",
+    "opus-4": ModelConfig(
+        name="opus-4",
         model_id="us.anthropic.claude-opus-4-20250514-v1:0",
         tier=CognitiveTier.TIER_3,
         supports_vision=True,
