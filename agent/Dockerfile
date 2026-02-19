@@ -16,9 +16,10 @@ RUN uv pip install aws-opentelemetry-distro==0.12.2
 RUN useradd -m -u 1000 bedrock_agentcore
 USER bedrock_agentcore
 
-COPY src/ /app/src/
+COPY src/glitch/ /app/glitch/
+COPY src/main.py /app/main.py
 COPY SOUL.md /app/SOUL.md
 
 EXPOSE 8080
 
-CMD ["opentelemetry-instrument", "python", "-m", "src.main"]
+CMD ["opentelemetry-instrument", "python", "-m", "main"]
