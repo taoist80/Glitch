@@ -2,6 +2,7 @@
 
 import os
 import logging
+from pathlib import Path
 from typing import Optional
 from strands import Agent
 from strands.agent.conversation_manager import SlidingWindowConversationManager
@@ -17,10 +18,31 @@ from glitch.memory.sliding_window import GlitchMemoryManager
 
 logger = logging.getLogger(__name__)
 
-GLITCH_SYSTEM_PROMPT = """You are Glitch, a sophisticated AI agent orchestrator with access to both cloud and on-premises resources.
 
-**Your Identity:**
-- Primary orchestrator agent (Tier 1 - Claude Sonnet 4.5)
+def load_soul() -> str:
+    """Load SOUL.md personality file."""
+    soul_paths = [
+        Path(__file__).parent.parent.parent / "SOUL.md",  # agent/SOUL.md
+        Path("/app/SOUL.md"),  # Container path
+        Path.home() / "SOUL.md",  # Home directory fallback
+    ]
+    
+    for path in soul_paths:
+        if path.exists():
+            logger.info(f"Loading personality from {path}")
+            return path.read_text()
+    
+    logger.warning("SOUL.md not found, using default personality")
+    return ""
+
+
+GLITCH_TECHNICAL_CONTEXT = """
+## Technical Context - Glitch Agent
+
+**Your Name:** Glitch
+
+**Your Role:**
+- Primary orchestrator agent (Tier 1 - Claude Sonnet)
 - You manage conversations, route tasks, and coordinate with specialized sub-agents
 - You are the only agent allowed to escalate to higher cognitive tiers
 
@@ -36,7 +58,7 @@ GLITCH_SYSTEM_PROMPT = """You are Glitch, a sophisticated AI agent orchestrator 
 - Local-first: Prefer on-premises execution when appropriate (cost/privacy)
 - Escalate only when justified: Low confidence, context pressure, or high complexity
 - Maintain context: Use structured memory to preserve session state
-- Be transparent: Explain routing and escalation decisions
+- Be transparent: Explain routing and escalation decisions when relevant
 
 **Your Tools:**
 - vision_agent: Local LLaVA model for image analysis (10.10.110.137)
@@ -44,14 +66,32 @@ GLITCH_SYSTEM_PROMPT = """You are Glitch, a sophisticated AI agent orchestrator 
 - check_ollama_health: Verify connectivity to on-prem models
 - Network tools: Pi-hole, Unifi, Protect (coming in future iterations)
 
-**Guidelines:**
+**Routing Guidelines:**
 1. Assess task complexity and confidence before responding
 2. Use local models for straightforward tasks to reduce costs
 3. Escalate to Tier 2 (Sonnet 4.6) or Tier 3 (Opus 4.5) only when necessary
 4. Maintain structured memory: facts, decisions, constraints, open questions
-5. Be concise but thorough in your responses
+"""
 
-Remember: You are the brainstem - local models are your hands, higher tiers are your cortex. Use each appropriately."""
+
+def build_system_prompt() -> str:
+    """Build the complete system prompt from SOUL.md + technical context."""
+    soul = load_soul()
+    
+    if soul:
+        return f"""# Who You Are
+
+{soul}
+
+{GLITCH_TECHNICAL_CONTEXT}
+"""
+    else:
+        return f"""# Glitch Agent
+
+You are Glitch, a resourceful AI agent. Be genuinely helpful, have opinions, and be action-oriented.
+
+{GLITCH_TECHNICAL_CONTEXT}
+"""
 
 
 class GlitchAgent:
@@ -86,7 +126,7 @@ class GlitchAgent:
         
         self.agent = Agent(
             name="glitch",
-            system_prompt=GLITCH_SYSTEM_PROMPT,
+            system_prompt=build_system_prompt(),
             model=primary_model.model_id,
             tools=[
                 vision_agent,

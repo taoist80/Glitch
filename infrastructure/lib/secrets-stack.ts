@@ -9,20 +9,17 @@ export class SecretsStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    this.tailscaleAuthKeySecret = new secretsmanager.Secret(this, 'TailscaleAuthKey', {
-      secretName: 'glitch/tailscale-auth-key',
-      description: 'Ephemeral Tailscale authentication key for EC2 connector',
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-    });
+    this.tailscaleAuthKeySecret = secretsmanager.Secret.fromSecretNameV2(
+      this,
+      'TailscaleAuthKey',
+      'glitch/tailscale-auth-key'
+    );
 
-    this.apiKeysSecret = new secretsmanager.Secret(this, 'ApiKeys', {
-      secretName: 'glitch/api-keys',
-      description: 'API keys for MCP integrations and external services',
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-      secretObjectValue: {
-        placeholder: cdk.SecretValue.unsafePlainText('{}'),
-      },
-    });
+    this.apiKeysSecret = secretsmanager.Secret.fromSecretNameV2(
+      this,
+      'ApiKeys',
+      'glitch/api-keys'
+    );
 
     new cdk.CfnOutput(this, 'TailscaleAuthKeySecretArn', {
       value: this.tailscaleAuthKeySecret.secretArn,

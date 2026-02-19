@@ -34,11 +34,13 @@ export class VpcStack extends cdk.Stack {
       enableDnsSupport: true,
     });
 
-    this.privateSubnets = this.vpc.privateSubnets;
+    this.privateSubnets = this.vpc.isolatedSubnets;
     this.publicSubnets = this.vpc.publicSubnets;
 
-    const singleAzSubnet = {
-      subnets: [this.vpc.privateSubnets[0]],
+    const singleAzSubnetSelection = {
+      subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
+      onePerAz: true,
+      availabilityZones: [this.vpc.availabilityZones[0]],
     };
 
     this.vpc.addGatewayEndpoint('S3Endpoint', {
@@ -49,31 +51,31 @@ export class VpcStack extends cdk.Stack {
     this.vpc.addInterfaceEndpoint('EcrDockerEndpoint', {
       service: ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
       privateDnsEnabled: true,
-      subnets: singleAzSubnet,
+      subnets: singleAzSubnetSelection,
     });
 
     this.vpc.addInterfaceEndpoint('EcrApiEndpoint', {
       service: ec2.InterfaceVpcEndpointAwsService.ECR,
       privateDnsEnabled: true,
-      subnets: singleAzSubnet,
+      subnets: singleAzSubnetSelection,
     });
 
     this.vpc.addInterfaceEndpoint('CloudWatchLogsEndpoint', {
       service: ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS,
       privateDnsEnabled: true,
-      subnets: singleAzSubnet,
+      subnets: singleAzSubnetSelection,
     });
 
     this.vpc.addInterfaceEndpoint('SecretsManagerEndpoint', {
       service: ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
       privateDnsEnabled: true,
-      subnets: singleAzSubnet,
+      subnets: singleAzSubnetSelection,
     });
 
     this.vpc.addInterfaceEndpoint('BedrockAgentCoreEndpoint', {
       service: ec2.InterfaceVpcEndpointAwsService.BEDROCK_AGENT_RUNTIME,
       privateDnsEnabled: true,
-      subnets: singleAzSubnet,
+      subnets: singleAzSubnetSelection,
     });
 
     new cdk.CfnOutput(this, 'VpcId', {

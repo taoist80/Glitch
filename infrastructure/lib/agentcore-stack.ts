@@ -1,6 +1,5 @@
 import * as cdk from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
-import * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from 'constructs';
@@ -12,7 +11,6 @@ export interface AgentCoreStackProps extends cdk.StackProps {
 }
 
 export class AgentCoreStack extends cdk.Stack {
-  public readonly ecrRepository: ecr.Repository;
   public readonly agentRuntimeRole: iam.Role;
   public readonly agentCoreSecurityGroup: ec2.SecurityGroup;
 
@@ -20,19 +18,6 @@ export class AgentCoreStack extends cdk.Stack {
     super(scope, id, props);
 
     const { vpc, tailscaleSecurityGroup, apiKeysSecret } = props;
-
-    this.ecrRepository = new ecr.Repository(this, 'GlitchAgentRepository', {
-      repositoryName: 'glitch-agent',
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-      imageScanOnPush: true,
-      imageTagMutability: ecr.TagMutability.MUTABLE,
-      lifecycleRules: [
-        {
-          description: 'Keep last 10 images',
-          maxImageCount: 10,
-        },
-      ],
-    });
 
     this.agentCoreSecurityGroup = new ec2.SecurityGroup(this, 'AgentCoreSecurityGroup', {
       vpc,
@@ -115,21 +100,9 @@ export class AgentCoreStack extends cdk.Stack {
       })
     );
 
-    new cdk.CfnOutput(this, 'EcrRepositoryUri', {
-      value: this.ecrRepository.repositoryUri,
-      description: 'ECR repository URI for Glitch agent',
-      exportName: 'GlitchEcrRepositoryUri',
-    });
-
-    new cdk.CfnOutput(this, 'EcrRepositoryName', {
-      value: this.ecrRepository.repositoryName,
-      description: 'ECR repository name',
-      exportName: 'GlitchEcrRepositoryName',
-    });
-
     new cdk.CfnOutput(this, 'AgentRuntimeRoleArn', {
       value: this.agentRuntimeRole.roleArn,
-      description: 'IAM role ARN for AgentCore Runtime',
+      description: 'IAM role ARN for AgentCore Runtime (use with agentcore configure --execution-role)',
       exportName: 'GlitchAgentRuntimeRoleArn',
     });
 
@@ -141,7 +114,7 @@ export class AgentCoreStack extends cdk.Stack {
 
     new cdk.CfnOutput(this, 'VpcConfigForAgentCore', {
       value: JSON.stringify({
-        subnets: vpc.privateSubnets.map(s => s.subnetId),
+        subnets: vpc.isolatedSubnets.map(s => s.subnetId),
         securityGroups: [this.agentCoreSecurityGroup.securityGroupId],
       }),
       description: 'VPC configuration for AgentCore Runtime (JSON)',

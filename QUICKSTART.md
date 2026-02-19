@@ -35,10 +35,10 @@ cd infrastructure
 pnpm install
 
 # Bootstrap CDK (first time only)
-npx cdk bootstrap aws://999776382415/us-west-2
+pnpm run cdk bootstrap aws://999776382415/us-west-2
 
 # Deploy all stacks
-pnpm deploy
+pnpm run deploy
 ```
 
 Wait for all 4 stacks to complete:
@@ -203,7 +203,7 @@ To remove everything:
 
 # 2. Delete CDK stacks
 cd infrastructure
-npx cdk destroy --all
+pnpm run cdk destroy --all
 
 # 3. Delete secrets (optional)
 aws secretsmanager delete-secret \

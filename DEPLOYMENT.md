@@ -47,8 +47,8 @@ Follow this checklist to deploy AgentCore Glitch infrastructure with full cost o
   - [ ] Node.js 18+
   - [ ] pnpm
   - [ ] AWS CDK CLI
-  - [ ] Python 3.12+
-  - [ ] Docker
+  - [ ] Python 3.10+
+  - [ ] (Optional) Docker - only needed for `--local` or `--local-build` modes
 
 ## Step 1: Store Secrets
 
@@ -76,18 +76,18 @@ pnpm build
 - [ ] TypeScript compiled successfully
 
 ```bash
-# Bootstrap (first time only)
-npx cdk bootstrap aws://999776382415/us-west-2
+# Bootstrap CDK (first time only)
+pnpm run cdk bootstrap aws://999776382415/us-west-2
 ```
 
 - [ ] CDK bootstrap complete (or already bootstrapped)
 
 ```bash
 # Review changes
-npx cdk diff --all
+pnpm run diff
 
 # Deploy all stacks
-pnpm deploy
+pnpm run deploy
 ```
 
 - [ ] GlitchVpcStack deployed
@@ -147,112 +147,141 @@ In Tailscale admin console:
 - [ ] Approve route: 10.10.110.137/32
 - [ ] Approve route: 10.10.100.70/32 (optional, for Pi-hole)
 
-## Step 5: Build and Push Agent Container
-
-```bash
-cd agent
-
-# Build
-docker build -t glitch-agent .
-```
-
-- [ ] Docker image built successfully
-
-```bash
-# Get ECR repository URI
-ECR_URI=$(aws cloudformation describe-stacks \
-    --stack-name GlitchAgentCoreStack \
-    --query 'Stacks[0].Outputs[?OutputKey==`EcrRepositoryUri`].OutputValue' \
-    --output text)
-
-echo "ECR URI: $ECR_URI"
-
-# Login to ECR
-aws ecr get-login-password --region us-west-2 | \
-    docker login --username AWS --password-stdin $ECR_URI
-
-# Tag and push
-docker tag glitch-agent:latest ${ECR_URI}:latest
-docker push ${ECR_URI}:latest
-```
-
-- [ ] Logged into ECR
-- [ ] Image pushed successfully
-- [ ] Verify in ECR console
-
-## Step 6: Test Agent Locally (Optional)
+## Step 5: Install AgentCore Starter Toolkit
 
 ```bash
 cd agent
 python -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+pip install --upgrade pip
+pip install bedrock-agentcore strands-agents bedrock-agentcore-starter-toolkit
 
-export AWS_REGION=us-west-2
-export GLITCH_MODE=interactive
-export OTEL_CONSOLE_ENABLED=false
-
-python -m src.main
+# Verify installation
+agentcore --help
 ```
 
-- [ ] Agent starts successfully
-- [ ] Can interact in CLI mode
-- [ ] Type `status` to see agent status
-- [ ] Try a simple query
+- [ ] Virtual environment created
+- [ ] Toolkit installed successfully
+- [ ] `agentcore --help` shows available commands
 
-## Step 7: Create AgentCore Runtime (Manual)
-
-Get VPC configuration:
+## Step 6: Configure Agent Project
 
 ```bash
-aws cloudformation describe-stacks \
-    --stack-name GlitchAgentCoreStack \
-    --query 'Stacks[0].Outputs' \
-    --output table
+# Create agent project with Strands framework
+agentcore create
 ```
 
-Copy these values:
-- [ ] `VpcConfigForAgentCore` (JSON with subnets and security groups)
-- [ ] `AgentRuntimeRoleArn`
-- [ ] `EcrRepositoryUri` with `:latest` tag
+When prompted:
+- Framework: **Strands Agents**
+- Project name: **glitch**
+- Configure additional options as needed
 
-### Via AWS Console:
+This generates:
+- Agent code with Strands framework
+- `.bedrock_agentcore.yaml` configuration file
+- `requirements.txt` with dependencies
 
-1. Go to Bedrock → AgentCore → Runtimes
-2. Create Runtime:
-   - Name: `glitch-runtime`
-   - Container image: `{EcrRepositoryUri}:latest`
-   - Execution role: `{AgentRuntimeRoleArn}`
-   - Network: VPC mode
-   - Subnets: (from VpcConfigForAgentCore)
-   - Security groups: (from VpcConfigForAgentCore)
+- [ ] Project created successfully
+- [ ] `.bedrock_agentcore.yaml` exists
 
-- [ ] Runtime created
-- [ ] Status: READY
-- [ ] Note the Runtime ARN
-
-### Via CLI (Alternative):
+## Step 7: Test Agent Locally (Optional)
 
 ```bash
-# Parse VPC config
-VPC_CONFIG=$(aws cloudformation describe-stacks \
-    --stack-name GlitchAgentCoreStack \
-    --query 'Stacks[0].Outputs[?OutputKey==`VpcConfigForAgentCore`].OutputValue' \
-    --output text)
+# Start local development server
+agentcore dev
+```
 
+In a separate terminal:
+
+```bash
+# Test locally
+agentcore invoke --dev "Hello, Glitch!"
+```
+
+- [ ] Local server starts on http://localhost:8080
+- [ ] Agent responds to test invocation
+- [ ] No errors in console
+
+## Step 8: Configure Custom Execution Role (Optional)
+
+If you want to use the CDK-managed IAM role with additional permissions:
+
+```bash
+# Get the role ARN from CDK stack
 ROLE_ARN=$(aws cloudformation describe-stacks \
     --stack-name GlitchAgentCoreStack \
     --query 'Stacks[0].Outputs[?OutputKey==`AgentRuntimeRoleArn`].OutputValue' \
     --output text)
 
-# Create runtime (adjust API call based on latest AgentCore API)
-# Note: Check AgentCore documentation for exact API structure
+echo "Role ARN: $ROLE_ARN"
+
+# Configure toolkit to use custom role
+agentcore configure -e src/glitch/agent.py --execution-role $ROLE_ARN
 ```
 
-- [ ] Runtime creation command executed
-- [ ] Runtime ARN obtained
+- [ ] Role ARN retrieved
+- [ ] Toolkit configured with custom role
 
-## Step 8: Test On-Prem UI Direct Access
+## Step 9: Deploy to AgentCore Runtime
+
+```bash
+# Deploy agent (builds container via CodeBuild, pushes to ECR, creates runtime)
+agentcore launch
+```
+
+This command automatically:
+1. Builds ARM64 container using AWS CodeBuild (no local Docker required)
+2. Creates ECR repository (`bedrock-agentcore-glitch`)
+3. Pushes container to ECR
+4. Creates AgentCore Runtime
+5. Configures CloudWatch logging
+
+- [ ] CodeBuild started
+- [ ] Container built successfully
+- [ ] ECR repository created
+- [ ] Runtime deployed
+- [ ] Note the **Agent Runtime ARN** from output
+
+### Deployment Options
+
+```bash
+# Default: CodeBuild + Cloud Runtime (recommended, no Docker needed)
+agentcore launch
+
+# Local build + Cloud Runtime (requires Docker)
+agentcore launch --local-build
+
+# Fully local (requires Docker, for development only)
+agentcore launch --local
+```
+
+## Step 10: Verify Deployment
+
+```bash
+# Check deployment status
+agentcore status
+
+# Test deployed agent
+agentcore invoke '{"prompt": "Hello, Glitch! Check your status."}'
+```
+
+- [ ] Status shows runtime is READY
+- [ ] Agent responds to invocation
+- [ ] Check CloudWatch Logs for traces
+
+### Find Your Resources
+
+After deployment, view your resources in the AWS Console:
+
+| Resource | Location |
+|----------|----------|
+| **Agent Logs** | CloudWatch → Log groups → `/aws/bedrock-agentcore/runtimes/{agent-id}-DEFAULT` |
+| **Container Images** | ECR → Repositories → `bedrock-agentcore-glitch` |
+| **Build Logs** | CodeBuild → Build history |
+| **IAM Role** | IAM → Roles → Search for "BedrockAgentCore" |
+| **Agent Config** | `.bedrock_agentcore.yaml` in your project |
+
+## Step 11: Test On-Prem UI Direct Access
 
 From your on-premises machine (connected via Tailscale):
 
@@ -272,23 +301,45 @@ ping <tailscale-ec2-private-ip>
 - [ ] Tailscale routing allows access to VPC private IPs
 - [ ] No nginx proxy needed (simplified architecture)
 
-## Step 9: Test AgentCore Runtime
+## Step 12: Invoke Agent Programmatically
+
+Get the Agent ARN from `.bedrock_agentcore.yaml` or the `agentcore launch` output:
 
 ```bash
-# Invoke runtime
-RUNTIME_ARN="arn:aws:bedrock-agentcore:us-west-2:999776382415:runtime/glitch-runtime"
+# Using agentcore CLI
+agentcore invoke '{"prompt": "Hello, Glitch! Check connectivity to Ollama."}'
+```
 
-aws bedrock-agentcore invoke-agent-runtime \
-    --runtime-arn $RUNTIME_ARN \
-    --session-id "test-session-$(date +%s)" \
-    --input-text "Hello, Glitch! Check connectivity to Ollama."
+Or programmatically with boto3:
+
+```python
+import json
+import uuid
+import boto3
+
+agent_arn = "YOUR_AGENT_ARN"  # From agentcore launch output
+prompt = "Hello, Glitch! Check connectivity to Ollama."
+
+client = boto3.client('bedrock-agentcore')
+
+response = client.invoke_agent_runtime(
+    agentRuntimeArn=agent_arn,
+    runtimeSessionId=str(uuid.uuid4()),
+    payload=json.dumps({"prompt": prompt}).encode(),
+    qualifier="DEFAULT"
+)
+
+content = []
+for chunk in response.get("response", []):
+    content.append(chunk.decode('utf-8'))
+print(json.loads(''.join(content)))
 ```
 
 - [ ] Runtime responds
 - [ ] Check CloudWatch Logs for traces
 - [ ] Verify connectivity check passes
 
-## Step 10: Verify Cost Savings
+## Step 13: Verify Cost Savings
 
 After 24-48 hours, check billing:
 
@@ -311,9 +362,8 @@ Expected charges:
 
 - [ ] All CloudFormation stacks in CREATE_COMPLETE status
 - [ ] EC2 instance running and connected to Tailscale
-- [ ] ECR repository contains latest image
-- [ ] AgentCore Runtime in READY state
-- [ ] Can invoke runtime successfully
+- [ ] `agentcore status` shows runtime is READY
+- [ ] Can invoke runtime successfully via `agentcore invoke`
 - [ ] CloudWatch Logs showing agent activity
 - [ ] No errors in logs
 
@@ -322,11 +372,13 @@ Expected charges:
 To tear down the infrastructure:
 
 ```bash
-# Delete AgentCore Runtime first (manual in console or via API)
+# Delete AgentCore resources (runtime, ECR, IAM)
+cd agent
+agentcore destroy
 
 # Then delete CDK stacks
-cd infrastructure
-npx cdk destroy --all
+cd ../infrastructure
+pnpm run cdk destroy --all
 
 # Delete secrets (optional, they have retention)
 aws secretsmanager delete-secret \
@@ -406,5 +458,5 @@ cd infrastructure
 # - Remove associatePublicIpAddress
 
 pnpm build
-pnpm deploy
+npx cdk deploy --all
 ```
