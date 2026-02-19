@@ -2,9 +2,14 @@
 
 Model IDs use Bedrock cross-region inference profile format for optimal throughput.
 Reference: https://docs.aws.amazon.com/bedrock/latest/userguide/cross-region-inference.html
+
+Dataflow:
+    TaskCategory -> get_primary_model() -> ModelConfig
+    (confidence, context, complexity) -> should_escalate() -> EscalationReason
+    EscalationReason -> escalate() -> ModelConfig (next tier)
 """
 
-from typing import Dict, List, Optional, Literal
+from typing import Dict, List, Optional, Literal, TypedDict
 from dataclasses import dataclass
 from enum import Enum
 import logging
@@ -12,19 +17,37 @@ import logging
 logger = logging.getLogger(__name__)
 
 TaskCategory = Literal["chat", "coding", "vision", "tool_use", "mcp_use", "skill_workflow"]
+EscalationTrigger = Literal["confidence", "context", "complexity", "manual"]
 
 
 class CognitiveTier(Enum):
-    """Cognitive tiers for model escalation."""
+    """Cognitive tiers for model escalation.
+    
+    Values:
+        LOCAL: On-premises models (Ollama)
+        TIER_1: Primary cloud model (Sonnet 4)
+        TIER_2: Enhanced cloud model (Sonnet 4.5)
+        TIER_3: Premium cloud model (Opus 4)
+    """
     LOCAL = 0
-    TIER_1 = 1  # Sonnet 4
-    TIER_2 = 2  # Sonnet 4.5
-    TIER_3 = 3  # Opus 4
+    TIER_1 = 1
+    TIER_2 = 2
+    TIER_3 = 3
 
 
 @dataclass
 class ModelConfig:
-    """Configuration for a specific model."""
+    """Configuration for a specific model.
+    
+    Attributes:
+        name: Human-readable model name
+        model_id: Bedrock model ID or local model identifier
+        tier: Cognitive tier for escalation ordering
+        supports_vision: Whether model supports image input
+        supports_tools: Whether model supports tool calling
+        max_context_tokens: Maximum context window size
+        cost_per_million_tokens: Cost in USD per million tokens
+    """
     name: str
     model_id: str
     tier: CognitiveTier
@@ -34,7 +57,37 @@ class ModelConfig:
     cost_per_million_tokens: float = 0.0
 
 
-ROUTING_CONFIG: Dict[TaskCategory, Dict[str, List[str]]] = {
+class RoutingRule(TypedDict):
+    """Routing rule for a task category."""
+    primary: str
+    escalation: List[str]
+
+
+@dataclass
+class RouterConfig:
+    """Configuration for ModelRouter.
+    
+    Attributes:
+        confidence_threshold: Minimum confidence before escalation (0.0-1.0)
+        context_threshold_pct: Context usage threshold for escalation (0.0-1.0)
+        max_escalations_per_turn: Maximum escalations allowed per turn
+        max_escalations_per_session: Maximum escalations allowed per session
+    """
+    confidence_threshold: float = 0.7
+    context_threshold_pct: float = 0.7
+    max_escalations_per_turn: int = 1
+    max_escalations_per_session: int = 2
+
+
+class RouterStats(TypedDict):
+    """Statistics from ModelRouter."""
+    session_escalations: int
+    turn_escalations: int
+    max_escalations_per_turn: int
+    max_escalations_per_session: int
+
+
+ROUTING_CONFIG: Dict[TaskCategory, RoutingRule] = {
     "chat": {
         "primary": "glitch",
         "escalation": ["sonnet-4.5", "opus-4"],
@@ -112,15 +165,36 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
 
 @dataclass
 class EscalationReason:
-    """Reason for escalating to a higher tier."""
-    trigger: Literal["confidence", "context", "complexity", "manual"]
+    """Reason for escalating to a higher tier.
+    
+    Attributes:
+        trigger: What triggered the escalation
+        description: Human-readable description
+        current_tier: Tier being escalated from
+        target_tier: Tier being escalated to
+    """
+    trigger: EscalationTrigger
     description: str
     current_tier: CognitiveTier
     target_tier: CognitiveTier
 
 
 class ModelRouter:
-    """Routes tasks to appropriate models and manages tier escalation."""
+    """Routes tasks to appropriate models and manages tier escalation.
+    
+    Dataflow:
+        1. get_primary_model(category) -> ModelConfig for initial routing
+        2. should_escalate(confidence, context, complexity) -> EscalationReason?
+        3. escalate(current, category, reason) -> ModelConfig (next tier)
+    
+    Attributes:
+        confidence_threshold: Minimum confidence before escalation
+        context_threshold_pct: Context usage threshold for escalation
+        max_escalations_per_turn: Maximum escalations per turn
+        max_escalations_per_session: Maximum escalations per session
+        session_escalation_count: Current session escalation count
+        turn_escalation_count: Current turn escalation count
+    """
     
     def __init__(
         self,
@@ -129,6 +203,14 @@ class ModelRouter:
         max_escalations_per_turn: int = 1,
         max_escalations_per_session: int = 2,
     ):
+        """Initialize ModelRouter.
+        
+        Args:
+            confidence_threshold: Minimum confidence before escalation (0.0-1.0)
+            context_threshold_pct: Context usage threshold for escalation (0.0-1.0)
+            max_escalations_per_turn: Maximum escalations allowed per turn
+            max_escalations_per_session: Maximum escalations allowed per session
+        """
         self.confidence_threshold = confidence_threshold
         self.context_threshold_pct = context_threshold_pct
         self.max_escalations_per_turn = max_escalations_per_turn
@@ -137,13 +219,44 @@ class ModelRouter:
         self.session_escalation_count = 0
         self.turn_escalation_count = 0
     
+    @classmethod
+    def from_config(cls, config: RouterConfig) -> "ModelRouter":
+        """Create ModelRouter from RouterConfig.
+        
+        Args:
+            config: RouterConfig instance
+        
+        Returns:
+            Configured ModelRouter instance
+        """
+        return cls(
+            confidence_threshold=config.confidence_threshold,
+            context_threshold_pct=config.context_threshold_pct,
+            max_escalations_per_turn=config.max_escalations_per_turn,
+            max_escalations_per_session=config.max_escalations_per_session,
+        )
+    
     def get_primary_model(self, category: TaskCategory) -> ModelConfig:
-        """Get the primary model for a task category."""
+        """Get the primary model for a task category.
+        
+        Args:
+            category: Task category (chat, coding, vision, etc.)
+        
+        Returns:
+            ModelConfig for the primary model
+        """
         primary_name = ROUTING_CONFIG[category]["primary"]
         return MODEL_REGISTRY[primary_name]
     
     def get_escalation_chain(self, category: TaskCategory) -> List[ModelConfig]:
-        """Get the escalation chain for a task category."""
+        """Get the escalation chain for a task category.
+        
+        Args:
+            category: Task category
+        
+        Returns:
+            List of ModelConfig in escalation order
+        """
         escalation_names = ROUTING_CONFIG[category]["escalation"]
         return [MODEL_REGISTRY[name] for name in escalation_names]
     
@@ -153,8 +266,13 @@ class ModelRouter:
         context_usage_pct: Optional[float] = None,
         complexity_flag: bool = False,
     ) -> Optional[EscalationReason]:
-        """
-        Determine if escalation is needed based on various factors.
+        """Determine if escalation is needed based on various factors.
+        
+        Checks in order:
+        1. Session/turn escalation limits
+        2. Manual complexity flag
+        3. Confidence below threshold
+        4. Context usage above threshold
         
         Args:
             confidence: Model's confidence score (0.0 to 1.0)
@@ -204,8 +322,7 @@ class ModelRouter:
         category: TaskCategory,
         reason: EscalationReason,
     ) -> Optional[ModelConfig]:
-        """
-        Escalate to the next tier model for the given category.
+        """Escalate to the next tier model for the given category.
         
         Args:
             current_model: The current model being used
@@ -213,7 +330,7 @@ class ModelRouter:
             reason: Reason for escalation
         
         Returns:
-            Next tier model or None if no escalation available
+            Next tier ModelConfig, or None if no escalation available
         """
         escalation_chain = self.get_escalation_chain(category)
         
@@ -235,15 +352,19 @@ class ModelRouter:
         logger.info(f"Already at highest tier for category {category}")
         return None
     
-    def reset_turn_counter(self):
+    def reset_turn_counter(self) -> None:
         """Reset the per-turn escalation counter."""
         self.turn_escalation_count = 0
     
-    def get_stats(self) -> Dict[str, int]:
-        """Get routing statistics."""
-        return {
-            "session_escalations": self.session_escalation_count,
-            "turn_escalations": self.turn_escalation_count,
-            "max_escalations_per_turn": self.max_escalations_per_turn,
-            "max_escalations_per_session": self.max_escalations_per_session,
-        }
+    def get_stats(self) -> RouterStats:
+        """Get routing statistics.
+        
+        Returns:
+            RouterStats with current escalation counts and limits
+        """
+        return RouterStats(
+            session_escalations=self.session_escalation_count,
+            turn_escalations=self.turn_escalation_count,
+            max_escalations_per_turn=self.max_escalations_per_turn,
+            max_escalations_per_session=self.max_escalations_per_session,
+        )

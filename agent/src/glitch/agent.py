@@ -1,4 +1,17 @@
-"""Glitch - Primary orchestrator agent for AgentCore hybrid system."""
+"""Glitch - Primary orchestrator agent for AgentCore hybrid system.
+
+Dataflow:
+    User Message -> process_message() -> Strands Agent -> AgentResult
+                                              |
+                                              v
+                                    InvocationResponse (with metrics)
+
+The GlitchAgent orchestrates:
+1. Memory management (AgentCore Memory API)
+2. Model routing (tier escalation)
+3. Tool execution (local Ollama, network tools)
+4. Metrics collection (via Strands telemetry)
+"""
 
 import os
 import logging
@@ -13,18 +26,38 @@ from glitch.tools.network_tools import (
     check_unifi_network,
     query_protect_cameras,
 )
-from glitch.routing.model_router import ModelRouter, MODEL_REGISTRY
+from glitch.routing.model_router import ModelRouter
 from glitch.memory.sliding_window import GlitchMemoryManager
+from glitch.telemetry import extract_metrics_from_result, log_invocation_metrics
+from glitch.types import (
+    AgentConfig,
+    InvocationResponse,
+    InvocationMetrics,
+    AgentStatus,
+    ConnectivityStatus,
+    EventType,
+    create_empty_metrics,
+    create_error_response,
+)
 
 logger = logging.getLogger(__name__)
 
 
 def load_soul() -> str:
-    """Load SOUL.md personality file."""
+    """Load SOUL.md personality file.
+    
+    Searches for SOUL.md in multiple locations:
+    1. agent/SOUL.md (development)
+    2. /app/SOUL.md (container)
+    3. ~/SOUL.md (fallback)
+    
+    Returns:
+        Contents of SOUL.md or empty string if not found
+    """
     soul_paths = [
-        Path(__file__).parent.parent.parent / "SOUL.md",  # agent/SOUL.md
-        Path("/app/SOUL.md"),  # Container path
-        Path.home() / "SOUL.md",  # Home directory fallback
+        Path(__file__).parent.parent.parent / "SOUL.md",
+        Path("/app/SOUL.md"),
+        Path.home() / "SOUL.md",
     ]
     
     for path in soul_paths:
@@ -75,7 +108,11 @@ GLITCH_TECHNICAL_CONTEXT = """
 
 
 def build_system_prompt() -> str:
-    """Build the complete system prompt from SOUL.md + technical context."""
+    """Build the complete system prompt from SOUL.md + technical context.
+    
+    Returns:
+        Combined system prompt string
+    """
     soul = load_soul()
     
     if soul:
@@ -95,24 +132,32 @@ You are Glitch, a resourceful AI agent. Be genuinely helpful, have opinions, and
 
 
 class GlitchAgent:
-    """Main Glitch orchestrator agent."""
+    """Main Glitch orchestrator agent.
     
-    def __init__(
-        self,
-        session_id: str,
-        memory_id: str,
-        region: str = "us-west-2",
-        window_size: int = 20,
-    ):
-        self.session_id = session_id
-        self.memory_id = memory_id
-        self.region = region
+    Attributes:
+        session_id: Unique session identifier
+        memory_id: Memory store identifier
+        region: AWS region for AgentCore services
+        memory_manager: GlitchMemoryManager instance
+        model_router: ModelRouter for tier escalation
+        agent: Strands Agent instance
+    """
+    
+    def __init__(self, config: AgentConfig):
+        """Initialize GlitchAgent with configuration.
+        
+        Args:
+            config: AgentConfig with session_id, memory_id, region, window_size
+        """
+        self.session_id = config.session_id
+        self.memory_id = config.memory_id
+        self.region = config.region
         
         self.memory_manager = GlitchMemoryManager(
-            session_id=session_id,
-            memory_id=memory_id,
-            region=region,
-            window_size=window_size,
+            session_id=config.session_id,
+            memory_id=config.memory_id,
+            region=config.region,
+            window_size=config.window_size,
         )
         
         self.model_router = ModelRouter(
@@ -136,94 +181,128 @@ class GlitchAgent:
                 check_unifi_network,
                 query_protect_cameras,
             ],
-            conversation_manager=SlidingWindowConversationManager(window_size=window_size),
+            conversation_manager=SlidingWindowConversationManager(
+                window_size=config.window_size
+            ),
             trace_attributes={
                 "agent.role": "orchestrator",
                 "agent.tier": "1",
-                "session.id": session_id,
-                "memory.id": memory_id,
+                "session.id": config.session_id,
+                "memory.id": config.memory_id,
             },
         )
         
-        logger.info(f"Initialized Glitch agent for session {session_id}")
+        logger.info(f"Initialized Glitch agent for session {config.session_id}")
     
-    async def process_message(self, user_message: str) -> str:
-        """
-        Process a user message through the Glitch orchestrator.
+    async def process_message(self, user_message: str) -> InvocationResponse:
+        """Process a user message through the Glitch orchestrator.
+        
+        Dataflow:
+            user_message -> Memory (store) -> Strands Agent -> AgentResult
+                                                    |
+                                                    v
+                                        extract_metrics_from_result()
+                                                    |
+                                                    v
+                                            InvocationResponse
         
         Args:
-            user_message: User's input message
+            user_message: The user's input message
         
         Returns:
-            Agent's response
+            InvocationResponse containing message, metrics, and session info
         """
         try:
             await self.memory_manager.create_event(
                 event_content=user_message,
-                event_type="user_message",
+                event_type=EventType.USER_MESSAGE.value,
             )
             
             memory_context = self.memory_manager.get_summary_for_context()
-            
             enriched_message = f"{user_message}\n\n[Structured Memory:\n{memory_context}]"
             
-            response = self.agent(enriched_message)
+            result = self.agent(enriched_message)
+            
+            metrics: InvocationMetrics = extract_metrics_from_result(result)
+            
+            log_invocation_metrics(
+                metrics=metrics,
+                user_message=user_message[:100],
+                response_preview=str(result)[:200],
+                session_id=self.session_id,
+            )
             
             await self.memory_manager.create_event(
-                event_content=str(response),
-                event_type="agent_response",
+                event_content=str(result),
+                event_type=EventType.AGENT_RESPONSE.value,
             )
             
             self.model_router.reset_turn_counter()
             
-            return str(response)
+            return InvocationResponse(
+                message=str(result),
+                session_id=self.session_id,
+                memory_id=self.memory_id,
+                metrics=metrics,
+            )
             
         except Exception as e:
             logger.error(f"Error processing message: {e}")
-            return f"I encountered an error processing your request: {str(e)}"
+            return create_error_response(
+                error=str(e),
+                session_id=self.session_id,
+                memory_id=self.memory_id,
+            )
     
-    def get_status(self) -> dict:
-        """Get agent status and statistics."""
-        return {
-            "session_id": self.session_id,
-            "memory_id": self.memory_id,
-            "routing_stats": self.model_router.get_stats(),
-            "structured_memory": self.memory_manager.structured_memory.to_dict(),
-        }
+    def get_status(self) -> AgentStatus:
+        """Get agent status and statistics.
+        
+        Returns:
+            AgentStatus with session info, routing stats, and memory state
+        """
+        return AgentStatus(
+            session_id=self.session_id,
+            memory_id=self.memory_id,
+            routing_stats=self.model_router.get_stats(),
+            structured_memory=self.memory_manager.structured_memory.to_dict(),
+        )
     
-    async def check_connectivity(self) -> dict:
-        """Check connectivity to all integrated services."""
-        results = {
-            "ollama_health": await check_ollama_health(),
-            "agentcore_memory": self.memory_manager.agentcore_client is not None,
-        }
-        return results
+    async def check_connectivity(self) -> ConnectivityStatus:
+        """Check connectivity to all integrated services.
+        
+        Returns:
+            ConnectivityStatus with health check results
+        """
+        return ConnectivityStatus(
+            ollama_health=await check_ollama_health(),
+            agentcore_memory=self.memory_manager.agentcore_client is not None,
+        )
 
 
 def create_glitch_agent(
     session_id: Optional[str] = None,
     memory_id: Optional[str] = None,
     region: Optional[str] = None,
+    window_size: int = 20,
 ) -> GlitchAgent:
-    """
-    Factory function to create a Glitch agent instance.
+    """Factory function to create a Glitch agent instance.
     
     Args:
-        session_id: Session identifier (defaults to env or generated)
+        session_id: Session identifier (defaults to env or generated UUID)
         memory_id: Memory identifier (defaults to env or generated)
         region: AWS region (defaults to env or us-west-2)
+        window_size: Sliding window size for conversation history
     
     Returns:
         Configured GlitchAgent instance
     """
     import uuid
     
-    session_id = session_id or os.getenv("GLITCH_SESSION_ID", str(uuid.uuid4()))
-    memory_id = memory_id or os.getenv("GLITCH_MEMORY_ID", f"glitch-memory-{uuid.uuid4()}")
-    region = region or os.getenv("AWS_REGION", "us-west-2")
-    
-    return GlitchAgent(
-        session_id=session_id,
-        memory_id=memory_id,
-        region=region,
+    config = AgentConfig(
+        session_id=session_id or os.getenv("GLITCH_SESSION_ID", str(uuid.uuid4())),
+        memory_id=memory_id or os.getenv("GLITCH_MEMORY_ID", f"glitch-memory-{uuid.uuid4()}"),
+        region=region or os.getenv("AWS_REGION", "us-west-2"),
+        window_size=window_size,
     )
+    
+    return GlitchAgent(config)

@@ -1,6 +1,11 @@
 """Sliding window memory manager with AgentCore Memory integration.
 
 Uses the official bedrock_agentcore.memory.MemoryClient SDK for all memory operations.
+
+Dataflow:
+    User Message -> create_event() -> AgentCore Memory (short-term)
+    Query -> retrieve_long_term_memories() -> AgentCore Memory (semantic search)
+    Context Request -> get_summary_for_context() -> StructuredMemory -> String
 """
 
 from typing import Dict, List, Any, Optional, Tuple
@@ -9,12 +14,39 @@ from datetime import datetime
 import json
 import logging
 
+from glitch.types import EventType
+
 logger = logging.getLogger(__name__)
 
 
 @dataclass
+class Decision:
+    """A recorded decision with rationale and timestamp."""
+    decision: str
+    rationale: str
+    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+
+
+@dataclass
+class ToolResult:
+    """Summary of a tool execution result."""
+    tool: str
+    summary: str
+    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+
+
+@dataclass
 class StructuredMemory:
-    """Structured memory state for the agent."""
+    """Structured memory state for the agent.
+    
+    Maintains session context including:
+    - Session goal
+    - Accumulated facts
+    - Constraints to respect
+    - Decisions made with rationale
+    - Open questions to address
+    - Tool execution summaries
+    """
     session_goal: str = ""
     facts: List[str] = field(default_factory=list)
     constraints: List[str] = field(default_factory=list)
@@ -36,20 +68,20 @@ class StructuredMemory:
         """Create from dictionary."""
         return cls(**data)
     
-    def add_fact(self, fact: str):
-        """Add a fact to memory."""
+    def add_fact(self, fact: str) -> None:
+        """Add a fact to memory (deduplicates)."""
         if fact not in self.facts:
             self.facts.append(fact)
             self.last_updated = datetime.utcnow().isoformat()
     
-    def add_constraint(self, constraint: str):
-        """Add a constraint to memory."""
+    def add_constraint(self, constraint: str) -> None:
+        """Add a constraint to memory (deduplicates)."""
         if constraint not in self.constraints:
             self.constraints.append(constraint)
             self.last_updated = datetime.utcnow().isoformat()
     
-    def add_decision(self, decision: str, rationale: str):
-        """Add a decision to memory."""
+    def add_decision(self, decision: str, rationale: str) -> None:
+        """Add a decision with rationale to memory."""
         self.decisions.append({
             "decision": decision,
             "rationale": rationale,
@@ -57,8 +89,8 @@ class StructuredMemory:
         })
         self.last_updated = datetime.utcnow().isoformat()
     
-    def add_tool_result(self, tool_name: str, summary: str):
-        """Add a tool result summary."""
+    def add_tool_result(self, tool_name: str, summary: str) -> None:
+        """Add a tool result summary to memory."""
         self.tool_results_summary.append({
             "tool": tool_name,
             "summary": summary,
@@ -67,9 +99,40 @@ class StructuredMemory:
         self.last_updated = datetime.utcnow().isoformat()
 
 
-class GlitchMemoryManager:
+@dataclass
+class MemoryConfig:
+    """Configuration for GlitchMemoryManager.
+    
+    Attributes:
+        session_id: Unique session identifier
+        memory_id: Memory store identifier
+        region: AWS region for AgentCore Memory
+        window_size: Sliding window size for conversation history
+        compression_threshold_pct: Context usage threshold for compression (0.0-1.0)
+        actor_id: Actor identifier for memory events
     """
-    Three-layer memory manager for Glitch agent.
+    session_id: str
+    memory_id: str
+    region: str = "us-west-2"
+    window_size: int = 20
+    compression_threshold_pct: float = 0.7
+    actor_id: str = "glitch-agent"
+
+
+@dataclass
+class MemoryCapsule:
+    """Compressed memory for escalation to higher tier.
+    
+    Contains essential context for a higher-tier model to continue
+    the conversation without full history.
+    """
+    session_id: str
+    structured_memory: Dict[str, Any]
+    compression_timestamp: str
+
+
+class GlitchMemoryManager:
+    """Three-layer memory manager for Glitch agent.
     
     Uses the official bedrock_agentcore.memory.MemoryClient SDK.
     
@@ -77,6 +140,16 @@ class GlitchMemoryManager:
     1. Active Window: Recent raw conversation turns (handled by Strands)
     2. Structured Memory: JSON state with facts, decisions, constraints
     3. Archive: Long-term memory in AgentCore Memory (short-term + long-term)
+    
+    Attributes:
+        session_id: Unique session identifier
+        memory_id: Memory store identifier
+        region: AWS region
+        window_size: Sliding window size
+        compression_threshold_pct: Threshold for triggering compression
+        actor_id: Actor identifier for memory events
+        structured_memory: Current StructuredMemory state
+        memory_client: AgentCore MemoryClient instance (or None)
     """
     
     def __init__(
@@ -88,6 +161,16 @@ class GlitchMemoryManager:
         compression_threshold_pct: float = 0.7,
         actor_id: str = "glitch-agent",
     ):
+        """Initialize GlitchMemoryManager.
+        
+        Args:
+            session_id: Unique session identifier
+            memory_id: Memory store identifier
+            region: AWS region for AgentCore Memory
+            window_size: Sliding window size for conversation history
+            compression_threshold_pct: Context usage threshold for compression
+            actor_id: Actor identifier for memory events
+        """
         self.session_id = session_id
         self.memory_id = memory_id
         self.region = region
@@ -107,17 +190,44 @@ class GlitchMemoryManager:
         except Exception as e:
             logger.warning(f"Could not initialize AgentCore MemoryClient: {e}")
     
+    @classmethod
+    def from_config(cls, config: MemoryConfig) -> "GlitchMemoryManager":
+        """Create GlitchMemoryManager from MemoryConfig.
+        
+        Args:
+            config: MemoryConfig instance
+        
+        Returns:
+            Configured GlitchMemoryManager instance
+        """
+        return cls(
+            session_id=config.session_id,
+            memory_id=config.memory_id,
+            region=config.region,
+            window_size=config.window_size,
+            compression_threshold_pct=config.compression_threshold_pct,
+            actor_id=config.actor_id,
+        )
+    
     @property
     def agentcore_client(self):
-        """Backward compatibility property."""
+        """Backward compatibility property for memory_client."""
         return self.memory_client
     
     def get_structured_state(self) -> StructuredMemory:
-        """Get the current structured memory state."""
+        """Get the current structured memory state.
+        
+        Returns:
+            Current StructuredMemory instance
+        """
         return self.structured_memory
     
-    def update_structured_state(self, updates: Dict[str, Any]):
-        """Update structured memory with new information."""
+    def update_structured_state(self, updates: Dict[str, Any]) -> None:
+        """Update structured memory with new information.
+        
+        Args:
+            updates: Dictionary of field names to new values
+        """
         for key, value in updates.items():
             if hasattr(self.structured_memory, key):
                 setattr(self.structured_memory, key, value)
@@ -129,15 +239,17 @@ class GlitchMemoryManager:
         event_type: str = "conversation",
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
-        """
-        Create a short-term memory event in AgentCore Memory.
+        """Create a short-term memory event in AgentCore Memory.
         
         Uses the official MemoryClient.create_event() API.
         
+        Dataflow:
+            event_content -> MemoryClient.create_event() -> AgentCore Memory
+        
         Args:
             event_content: The content of the event (user/agent message)
-            event_type: Type of event (conversation, tool_use, etc.)
-            metadata: Optional metadata dict for filtering
+            event_type: Type of event (user_message, agent_response, etc.)
+            metadata: Optional metadata dict (not used in current SDK)
         
         Returns:
             Event ID if successful, None otherwise
@@ -147,7 +259,7 @@ class GlitchMemoryManager:
             return None
         
         try:
-            role = "user" if event_type == "user_message" else "assistant"
+            role = "user" if event_type == EventType.USER_MESSAGE.value else "assistant"
             messages: List[Tuple[str, str]] = [(event_content, role)]
             
             response = self.memory_client.create_event(
@@ -170,8 +282,7 @@ class GlitchMemoryManager:
         max_results: int = 10,
         metadata_filter: Optional[Dict[str, str]] = None,
     ) -> List[Dict[str, Any]]:
-        """
-        Retrieve recent conversation turns from short-term memory.
+        """Retrieve recent conversation turns from short-term memory.
         
         Uses the official MemoryClient.get_last_k_turns() API.
         
@@ -180,7 +291,7 @@ class GlitchMemoryManager:
             metadata_filter: Optional metadata filter (not used in current SDK)
         
         Returns:
-            List of conversation turns
+            List of conversation turns as dictionaries
         """
         if not self.memory_client:
             return []
@@ -206,8 +317,7 @@ class GlitchMemoryManager:
         max_results: int = 5,
         namespaces: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
-        """
-        Retrieve relevant long-term memories using semantic search.
+        """Retrieve relevant long-term memories using semantic search.
         
         Uses the official MemoryClient.retrieve() API for semantic memory retrieval.
         
@@ -217,7 +327,7 @@ class GlitchMemoryManager:
             namespaces: Optional list of namespaces to search in
         
         Returns:
-            List of memory records
+            List of memory records as dictionaries
         """
         if not self.memory_client:
             return []
@@ -240,25 +350,26 @@ class GlitchMemoryManager:
             logger.error(f"Failed to retrieve long-term memories: {e}")
             return []
     
-    def compress_for_escalation(self) -> Dict[str, Any]:
-        """
-        Compress memory for escalation to higher tier.
+    def compress_for_escalation(self) -> MemoryCapsule:
+        """Compress memory for escalation to higher tier.
+        
+        Creates a MemoryCapsule containing essential context for a higher-tier
+        model to continue the conversation.
         
         Returns:
-            Compressed memory capsule
+            MemoryCapsule with compressed memory state
         """
-        capsule = {
-            "session_id": self.session_id,
-            "structured_memory": self.structured_memory.to_dict(),
-            "compression_timestamp": datetime.utcnow().isoformat(),
-        }
+        capsule = MemoryCapsule(
+            session_id=self.session_id,
+            structured_memory=self.structured_memory.to_dict(),
+            compression_timestamp=datetime.utcnow().isoformat(),
+        )
         
-        logger.info(f"Compressed memory for escalation: {len(json.dumps(capsule))} bytes")
+        logger.info(f"Compressed memory for escalation: {len(json.dumps(asdict(capsule)))} bytes")
         return capsule
     
     def calculate_context_usage(self, current_tokens: int, max_tokens: int) -> float:
-        """
-        Calculate context window usage percentage.
+        """Calculate context window usage percentage.
         
         Args:
             current_tokens: Current token count
@@ -270,11 +381,22 @@ class GlitchMemoryManager:
         return current_tokens / max_tokens if max_tokens > 0 else 0.0
     
     def should_compress(self, context_usage: float) -> bool:
-        """Check if compression/sliding should occur."""
+        """Check if compression/sliding should occur.
+        
+        Args:
+            context_usage: Current context usage percentage (0.0 to 1.0)
+        
+        Returns:
+            True if compression should be triggered
+        """
         return context_usage >= self.compression_threshold_pct
     
     def get_summary_for_context(self) -> str:
-        """Get a text summary of structured memory for context."""
+        """Get a text summary of structured memory for context injection.
+        
+        Returns:
+            Human-readable summary of current memory state
+        """
         summary_parts = []
         
         if self.structured_memory.session_goal:

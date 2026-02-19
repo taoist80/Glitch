@@ -1,13 +1,30 @@
-"""Main entry point for Glitch agent."""
+"""Main entry point for Glitch agent.
+
+Dataflow:
+    Environment Variables -> TelemetryConfig, AgentConfig, ServerConfig
+                                    |
+                                    v
+                            setup_telemetry()
+                                    |
+                                    v
+                            create_glitch_agent()
+                                    |
+                                    v
+                            run_server_async() or interactive_mode()
+"""
 
 import asyncio
 import logging
 import os
 import sys
-from typing import Optional
 
-from glitch.agent import create_glitch_agent
+from glitch.agent import create_glitch_agent, GlitchAgent
 from glitch.telemetry import setup_telemetry
+from glitch.types import (
+    TelemetryConfig,
+    ServerConfig,
+    InvocationResponse,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -18,8 +35,47 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-async def main():
-    """Main execution function."""
+def get_telemetry_config() -> TelemetryConfig:
+    """Build TelemetryConfig from environment variables.
+    
+    Environment Variables:
+        OTEL_CONSOLE_ENABLED: Enable console exporter (default: false)
+        OTEL_OTLP_ENABLED: Enable OTLP exporter (default: true)
+        OTEL_EXPORTER_OTLP_ENDPOINT: OTLP endpoint URL
+    
+    Returns:
+        TelemetryConfig instance
+    """
+    return TelemetryConfig(
+        service_name="glitch-agent",
+        enable_console=os.getenv("OTEL_CONSOLE_ENABLED", "false").lower() == "true",
+        enable_otlp=os.getenv("OTEL_OTLP_ENABLED", "true").lower() == "true",
+    )
+
+
+def get_server_config() -> ServerConfig:
+    """Build ServerConfig from environment variables.
+    
+    Environment Variables:
+        GLITCH_HOST: Host to bind to (default: 0.0.0.0)
+        GLITCH_PORT: Port to bind to (default: 8080)
+        GLITCH_DEBUG: Enable debug mode (default: false)
+    
+    Returns:
+        ServerConfig instance
+    """
+    return ServerConfig(
+        host=os.getenv("GLITCH_HOST", "0.0.0.0"),
+        port=int(os.getenv("GLITCH_PORT", "8080")),
+        debug=os.getenv("GLITCH_DEBUG", "false").lower() == "true",
+    )
+
+
+async def main() -> None:
+    """Main execution function.
+    
+    Initializes telemetry, creates agent, and starts server or interactive mode.
+    """
     print("=" * 60)
     print("GLITCH AGENT STARTUP")
     print("=" * 60)
@@ -31,11 +87,8 @@ async def main():
     logger.info("Starting Glitch agent...")
     logger.info(f"GLITCH_MODE environment variable: {os.getenv('GLITCH_MODE', 'NOT_SET')}")
     
-    telemetry = setup_telemetry(
-        service_name="glitch-agent",
-        enable_console=os.getenv("OTEL_CONSOLE_ENABLED", "false").lower() == "true",
-        enable_otlp=os.getenv("OTEL_OTLP_ENABLED", "true").lower() == "true",
-    )
+    telemetry_config = get_telemetry_config()
+    setup_telemetry(telemetry_config)
     
     agent = create_glitch_agent()
     
@@ -53,21 +106,27 @@ async def main():
         print("ERROR: Interactive mode requested but container has no stdin")
         await interactive_mode(agent)
     else:
-        logger.info("Starting HTTP server on 0.0.0.0:8080")
-        print("Starting HTTP server on 0.0.0.0:8080")
-        from glitch.server import run_server
-        await run_server(agent)
+        logger.info("Starting HTTP server")
+        server_config = get_server_config()
+        print(f"Starting HTTP server on {server_config.host}:{server_config.port}")
+        
+        from glitch.server import run_server_async
+        await run_server_async(agent, server_config)
 
 
-async def interactive_mode(agent):
-    """Run agent in interactive CLI mode."""
-    print("\n" + "="*60)
+async def interactive_mode(agent: GlitchAgent) -> None:
+    """Run agent in interactive CLI mode.
+    
+    Args:
+        agent: GlitchAgent instance to interact with
+    """
+    print("\n" + "=" * 60)
     print("Glitch Agent - Interactive Mode")
-    print("="*60)
+    print("=" * 60)
     print(f"Session ID: {agent.session_id}")
     print(f"Memory ID: {agent.memory_id}")
     print("\nType 'quit' or 'exit' to stop, 'status' for agent status.")
-    print("="*60 + "\n")
+    print("=" * 60 + "\n")
     
     while True:
         try:
@@ -85,8 +144,16 @@ async def interactive_mode(agent):
                 print(f"\n{status}")
                 continue
             
-            response = await agent.process_message(user_input)
-            print(f"\nGlitch: {response}")
+            response: InvocationResponse = await agent.process_message(user_input)
+            print(f"\nGlitch: {response.get('message', '')}")
+            
+            metrics = response.get("metrics")
+            if metrics:
+                token_usage = metrics.get("token_usage", {})
+                print(
+                    f"\n[Tokens: {token_usage.get('input_tokens', 0)}in/"
+                    f"{token_usage.get('output_tokens', 0)}out]"
+                )
             
         except KeyboardInterrupt:
             print("\n\nInterrupted. Shutting down...")
