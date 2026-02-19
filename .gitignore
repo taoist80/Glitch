@@ -4,6 +4,18 @@ infrastructure/cdk.out/
 infrastructure/*.js
 infrastructure/*.d.ts
 infrastructure/.cdk.staging/
+cdk.context.json
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+.npm/
+package-lock.json
+yarn.lock
 
 # Python
 agent/__pycache__/
@@ -15,6 +27,9 @@ agent/.venv/
 agent/*.egg-info/
 agent/dist/
 agent/build/
+.python-version
+*.pyo
+*.pyd
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -177,3 +192,70 @@ temp/
 # Secrets
 *.pem
 *.key
+*.p12
+*.pfx
+.env.production
+.env.staging
+credentials.json
+secrets.json
+**/secrets/
+.aws/
+
+# Docker
+*.tar
+docker-compose.override.yml
+.docker/
+
+# AWS
+.aws-sam/
+samconfig.toml
+**/.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+
+# AgentCore
+.bedrock_agentcore_cache/
+agentcore-logs/
+
+# Coverage and profiling
+.coverage
+.coverage.*
+htmlcov/
+prof/
+*.prof
+*.lprof
+
+# Jupyter/IPython
+*.ipynb
+!notebooks/*.ipynb
+.ipynb_checkpoints/
+
+# Local development
+local/
+.local/
+scratch/
+*.local.py
+*.local.json
+*.local.yaml
+
+# Binary files
+*.exe
+*.dll
+*.dylib
+*.bin
+*.o
+*.a
+*.lib
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Misc
+.history/
+.vscode-server/
+.remote-containers/
+*.bak
+*.orig
