@@ -5,6 +5,7 @@ import { Construct } from 'constructs';
 export class SecretsStack extends cdk.Stack {
   public readonly tailscaleAuthKeySecret: secretsmanager.ISecret;
   public readonly apiKeysSecret: secretsmanager.ISecret;
+  public readonly telegramBotTokenSecret: secretsmanager.ISecret;
 
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
@@ -21,6 +22,12 @@ export class SecretsStack extends cdk.Stack {
       'glitch/api-keys'
     );
 
+    this.telegramBotTokenSecret = secretsmanager.Secret.fromSecretNameV2(
+      this,
+      'TelegramBotToken',
+      'glitch/telegram-bot-token'
+    );
+
     new cdk.CfnOutput(this, 'TailscaleAuthKeySecretArn', {
       value: this.tailscaleAuthKeySecret.secretArn,
       description: 'ARN of Tailscale auth key secret',
@@ -31,6 +38,12 @@ export class SecretsStack extends cdk.Stack {
       value: this.apiKeysSecret.secretArn,
       description: 'ARN of API keys secret',
       exportName: 'GlitchApiKeysArn',
+    });
+
+    new cdk.CfnOutput(this, 'TelegramBotTokenSecretArn', {
+      value: this.telegramBotTokenSecret.secretArn,
+      description: 'ARN of Telegram bot token secret',
+      exportName: 'GlitchTelegramBotTokenArn',
     });
   }
 }

@@ -10,7 +10,7 @@ Dataflow:
                             create_glitch_agent()
                                     |
                                     v
-                    Telegram Channel (if bot token present)
+                    Telegram Channel (if bot token in Secrets Manager)
                                     |
                                     v
                             run_server_async() or interactive_mode()
@@ -20,7 +20,9 @@ import asyncio
 import logging
 import os
 import sys
+import boto3
 from pathlib import Path
+from typing import Optional
 
 from glitch.agent import create_glitch_agent, GlitchAgent
 from glitch.telemetry import setup_telemetry
@@ -42,6 +44,34 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+
+def get_telegram_bot_token() -> Optional[str]:
+    """Retrieve Telegram bot token from AWS Secrets Manager.
+    
+    Returns:
+        Bot token string if available, None otherwise
+    """
+    secret_name = os.getenv("GLITCH_TELEGRAM_SECRET_NAME", "glitch/telegram-bot-token")
+    region = os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "us-west-2"))
+    
+    try:
+        session = boto3.session.Session()
+        client = session.client(service_name="secretsmanager", region_name=region)
+        
+        response = client.get_secret_value(SecretId=secret_name)
+        
+        if "SecretString" in response:
+            return response["SecretString"]
+        else:
+            logger.warning(f"Secret {secret_name} does not contain a string value")
+            return None
+    except client.exceptions.ResourceNotFoundException:
+        logger.info(f"Telegram bot token secret not found: {secret_name}")
+        return None
+    except Exception as e:
+        logger.warning(f"Failed to retrieve Telegram bot token from Secrets Manager: {e}")
+        return None
 
 
 def get_telemetry_config() -> TelemetryConfig:
@@ -107,13 +137,13 @@ async def main() -> None:
     connectivity = await agent.check_connectivity()
     logger.info(f"Connectivity check: {connectivity}")
     
-    # Initialize Telegram channel if bot token is provided
+    # Initialize Telegram channel if bot token is in Secrets Manager
     telegram_channel = None
-    telegram_token = os.getenv("GLITCH_TELEGRAM_BOT_TOKEN")
+    telegram_token = get_telegram_bot_token()
     
     if telegram_token:
         try:
-            logger.info("Telegram bot token found, initializing Telegram channel...")
+            logger.info("Telegram bot token retrieved from Secrets Manager, initializing Telegram channel...")
             
             # Get config directory (allow override)
             config_dir = os.getenv("GLITCH_CONFIG_DIR")
@@ -141,7 +171,7 @@ async def main() -> None:
             logger.error(f"Failed to initialize Telegram channel: {e}", exc_info=True)
             # Continue without Telegram if it fails
     else:
-        logger.info("No Telegram bot token found (GLITCH_TELEGRAM_BOT_TOKEN), skipping Telegram channel")
+        logger.info("No Telegram bot token found in Secrets Manager (glitch/telegram-bot-token), skipping Telegram channel")
     
     mode = os.getenv("GLITCH_MODE", "server")
     logger.info(f"Mode determined: {mode}")

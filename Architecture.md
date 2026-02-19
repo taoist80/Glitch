@@ -260,10 +260,11 @@ python -m glitch.cli status --verbose
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `GLITCH_TELEGRAM_BOT_TOKEN` | Yes* | None | Bot token from @BotFather |
+| `GLITCH_TELEGRAM_SECRET_NAME` | No | `glitch/telegram-bot-token` | Secrets Manager secret name for bot token |
 | `GLITCH_CONFIG_DIR` | No | `~/.glitch` | Configuration directory |
+| `AWS_REGION` | No | `us-west-2` | AWS region for Secrets Manager |
 
-\* Required only if Telegram channel is desired
+**Note**: Bot token is retrieved from AWS Secrets Manager, not environment variables.
 
 ## Agent Architecture
 
@@ -677,6 +678,7 @@ Enums
 ### Secrets Management
 - `glitch/tailscale-auth-key`: Ephemeral Tailscale auth key
 - `glitch/api-keys`: API credentials (if needed)
+- `glitch/telegram-bot-token`: Telegram bot token from @BotFather
 - All secrets in AWS Secrets Manager with rotation support
 
 ## Project Structure
@@ -743,22 +745,23 @@ pnpm install && pnpm build
 pnpm run cdk bootstrap aws://999776382415/us-west-2
 pnpm run deploy
 
-# 2. Create Telegram bot (optional)
+# 2. Create Telegram bot and store token in Secrets Manager
 # - Message @BotFather on Telegram
 # - Create new bot with /newbot
-# - Save the bot token
+# - Store the bot token in Secrets Manager:
+aws secretsmanager create-secret \
+  --name glitch/telegram-bot-token \
+  --secret-string "your-bot-token" \
+  --region us-west-2
 
 # 3. Deploy agent
 cd ../agent
 python -m venv venv && source venv/bin/activate
 pip install bedrock-agentcore-starter-toolkit
 
-# Set Telegram token (optional)
-export GLITCH_TELEGRAM_BOT_TOKEN="your-bot-token"
-
 agentcore launch
 
-# 4. Claim Telegram bot (if configured)
+# 4. Claim Telegram bot
 # - Check startup logs for pairing code
 # - Send code to your bot on Telegram
 # - Bot confirms ownership

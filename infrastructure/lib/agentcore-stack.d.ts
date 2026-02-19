@@ -7,6 +7,7 @@ export interface AgentCoreStackProps extends cdk.StackProps {
     readonly vpc: ec2.IVpc;
     readonly tailscaleSecurityGroup: ec2.ISecurityGroup;
     readonly apiKeysSecret: secretsmanager.ISecret;
+    readonly telegramBotTokenSecret: secretsmanager.ISecret;
 }
 export declare class AgentCoreStack extends cdk.Stack {
     readonly agentRuntimeRole: iam.Role;

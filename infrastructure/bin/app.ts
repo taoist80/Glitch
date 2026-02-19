@@ -37,6 +37,7 @@ const agentCoreStack = new AgentCoreStack(app, 'GlitchAgentCoreStack', {
   vpc: vpcStack.vpc,
   tailscaleSecurityGroup: tailscaleStack.securityGroup,
   apiKeysSecret: secretsStack.apiKeysSecret,
+  telegramBotTokenSecret: secretsStack.telegramBotTokenSecret,
   description: 'AgentCore Runtime resources',
 });
 agentCoreStack.addDependency(vpcStack);

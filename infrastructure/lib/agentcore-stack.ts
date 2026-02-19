@@ -8,6 +8,7 @@ export interface AgentCoreStackProps extends cdk.StackProps {
   readonly vpc: ec2.IVpc;
   readonly tailscaleSecurityGroup: ec2.ISecurityGroup;
   readonly apiKeysSecret: secretsmanager.ISecret;
+  readonly telegramBotTokenSecret: secretsmanager.ISecret;
 }
 
 export class AgentCoreStack extends cdk.Stack {
@@ -17,7 +18,7 @@ export class AgentCoreStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: AgentCoreStackProps) {
     super(scope, id, props);
 
-    const { vpc, tailscaleSecurityGroup, apiKeysSecret } = props;
+    const { vpc, tailscaleSecurityGroup, apiKeysSecret, telegramBotTokenSecret } = props;
 
     this.agentCoreSecurityGroup = new ec2.SecurityGroup(this, 'AgentCoreSecurityGroup', {
       vpc,
@@ -84,6 +85,7 @@ export class AgentCoreStack extends cdk.Stack {
     );
 
     apiKeysSecret.grantRead(this.agentRuntimeRole);
+    telegramBotTokenSecret.grantRead(this.agentRuntimeRole);
 
     this.agentRuntimeRole.addToPolicy(
       new iam.PolicyStatement({
