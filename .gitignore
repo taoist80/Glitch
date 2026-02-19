@@ -1,0 +1,47 @@
+# CDK
+infrastructure/node_modules/
+infrastructure/cdk.out/
+infrastructure/*.js
+infrastructure/*.d.ts
+infrastructure/.cdk.staging/
+
+# Python
+agent/__pycache__/
+agent/**/__pycache__/
+agent/**/*.pyc
+agent/.pytest_cache/
+agent/venv/
+agent/.venv/
+agent/*.egg-info/
+agent/dist/
+agent/build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.local
+*.pem
+*.key
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary
+tmp/
+temp/
+*.tmp
+
+# Build artifacts
+*.zip
+*.tar.gz

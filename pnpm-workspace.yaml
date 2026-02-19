@@ -1,0 +1,16 @@
+packages:
+  - 'infrastructure'
+  - 'agent'
+
+catalog:
+  # CDK Dependencies
+  aws-cdk-lib: ^2.238.0
+  constructs: ^10.5.0
+  
+  # TypeScript Dev Dependencies
+  typescript: ^5.9.0
+  '@types/node': ^20.19.0
+  ts-node: ^10.9.2
+  
+  # Python Agent Dependencies (for reference)
+  # Actual installation will be via requirements.txt
