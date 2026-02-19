@@ -59,6 +59,212 @@ A hybrid AI agent system combining AWS AgentCore Runtime with on-premises Ollama
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
+## Communication Channels
+
+### Telegram Channel Architecture
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                      Telegram Integration                           │
+└────────────────────────────────────────────────────────────────────┘
+
+        User sends message
+              │
+              ▼
+    ┌──────────────────┐
+    │  Telegram API    │
+    └────────┬─────────┘
+             │ Polling/Webhook
+             ▼
+    ┌──────────────────┐
+    │ TelegramChannel  │
+    │  (ChannelAdapter)│
+    └────────┬─────────┘
+             │
+    ┌────────┴────────┬──────────────┐
+    │                 │              │
+    ▼                 ▼              ▼
+┌─────────┐  ┌────────────┐  ┌──────────────┐
+│Bootstrap│  │  Access    │  │   Command    │
+│ (pairing│  │  Control   │  │   Handler    │
+│  codes) │  │ (policies) │  │  (/config)   │
+└─────┬───┘  └──────┬─────┘  └──────┬───────┘
+      │             │               │
+      └─────────────┴───────────────┘
+                    │
+                    ▼
+          ┌──────────────────┐
+          │   GlitchAgent    │
+          │ .process_message │
+          └──────────────────┘
+```
+
+### Telegram-First Configuration
+
+**Bootstrap Process**:
+1. Set `GLITCH_TELEGRAM_BOT_TOKEN` environment variable
+2. Start Glitch agent
+3. Pairing code generated and logged (e.g., `ABC12345`)
+4. First user to send code becomes owner
+5. Owner configures bot via `/config` commands in Telegram
+
+**Configuration Storage**:
+- Location: `~/.glitch/config.json`
+- Auto-saves on all changes
+- Permissions: 600 (owner read/write only)
+
+**Session Isolation**:
+- DM: `telegram:dm:{user_id}`
+- Group: `telegram:group:{chat_id}`
+- Forum Topic: `telegram:group:{chat_id}:topic:{thread_id}`
+
+### Access Control Policies
+
+**DM Policies**:
+- `pairing` (default): Unknown users receive pairing instructions
+- `allowlist`: Only approved user IDs can message
+- `open`: Anyone can message
+- `disabled`: All DMs rejected
+
+**Group Policies**:
+- `allowlist` (default): Only approved group IDs
+- `open`: Any group (respects mention requirement)
+- `disabled`: All groups rejected
+
+**Mention Requirement** (groups):
+- When enabled, bot must be @mentioned to respond
+- Default: `true`
+
+### Telegram Commands
+
+**Owner Commands**:
+| Command | Description |
+|---------|-------------|
+| `/config show` | Display current configuration |
+| `/config dm <policy>` | Set DM policy |
+| `/config group <policy>` | Set group policy |
+| `/config mention <on\|off>` | Toggle mention requirement |
+| `/config allow <user_id>` | Add user to DM allowlist |
+| `/config deny <user_id>` | Remove user from allowlist |
+| `/config allowgroup <chat_id>` | Add group to allowlist |
+| `/config denygroup <chat_id>` | Remove group from allowlist |
+| `/config lock` | Lock configuration |
+| `/config unlock` | Unlock configuration |
+| `/config transfer <user_id>` | Transfer ownership |
+| `/status` | Show bot health and status |
+| `/help` | Show available commands |
+
+**User Commands**:
+| Command | Description |
+|---------|-------------|
+| `/new` | Start new conversation (clear session) |
+| `/status` | Show bot status |
+| `/help` | Show help message |
+
+### Vision Integration
+
+**Image Processing**:
+1. User sends image via Telegram (photo or document)
+2. Channel downloads image (max 5MB by default)
+3. Converts to base64
+4. Routes to agent with prompt:
+   - If caption provided: `[Image attached] {caption}`
+   - If no caption: `[Image attached] Please describe this image in detail.`
+5. Agent invokes `vision_agent` tool with LLaVA model
+6. Response sent back to user
+
+**Supported Formats**: JPEG, PNG, GIF, WebP
+
+### Telegram Message Flow
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                    Telegram Message Processing                      │
+└────────────────────────────────────────────────────────────────────┘
+
+User sends message
+      │
+      ▼
+┌─────────────┐
+│  Unclaimed? │
+├─────────────┤
+│ Yes: Check  │──► Valid pairing code? ──► Claim ownership
+│     pairing │                        ──► Invalid? Reject
+│             │
+│ No: Check   │──► Owner? ──► Always allowed
+│     access  │           ──► User allowed? ──► Process
+│     policy  │                            ──► Denied? Reject
+└─────────────┘
+      │
+      ▼
+┌─────────────┐
+│  Command?   │
+├─────────────┤
+│ Yes: Route  │──► /config ──► Owner check ──► Execute
+│     to      │──► /status ──► Execute
+│     handler │──► /help   ──► Execute
+│             │
+│ No: Message │──► Extract text/media
+│             │──► Generate session_id
+│             │──► Download images (if present)
+│             │──► Call agent.process_message()
+└─────────────┘
+      │
+      ▼
+┌─────────────┐
+│   Chunk     │──► Split if > 4000 chars
+│  response   │──► Send all chunks
+└─────────────┘
+```
+
+### Configuration File Schema
+
+```json
+{
+  "version": 1,
+  "owner": {
+    "telegram_id": 123456789,
+    "claimed_at": "2026-02-19T10:30:00Z"
+  },
+  "channels": {
+    "telegram": {
+      "owner_id": 123456789,
+      "dm_policy": "pairing",
+      "dm_allowlist": [123456789, 987654321],
+      "group_policy": "allowlist",
+      "group_allowlist": [-1001234567890],
+      "require_mention": true,
+      "mode": "polling",
+      "text_chunk_limit": 4000,
+      "media_max_mb": 5
+    }
+  },
+  "locked": false
+}
+```
+
+### CLI Management
+
+```bash
+# Show status
+python -m glitch.cli status
+
+# Show configuration
+python -m glitch.cli config
+
+# Show detailed status
+python -m glitch.cli status --verbose
+```
+
+### Environment Variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `GLITCH_TELEGRAM_BOT_TOKEN` | Yes* | None | Bot token from @BotFather |
+| `GLITCH_CONFIG_DIR` | No | `~/.glitch` | Configuration directory |
+
+\* Required only if Telegram channel is desired
+
 ## Agent Architecture
 
 ### Tiered Model System
@@ -494,6 +700,15 @@ AgentCore-Glitch/
 │   │       ├── agent.py        # GlitchAgent orchestrator
 │   │       ├── server.py       # HTTP server
 │   │       ├── telemetry.py    # OpenTelemetry setup
+│   │       ├── cli.py          # CLI commands
+│   │       ├── channels/       # Communication channels
+│   │       │   ├── __init__.py
+│   │       │   ├── base.py              # ChannelAdapter ABC
+│   │       │   ├── types.py             # Channel types
+│   │       │   ├── config_manager.py    # Config persistence
+│   │       │   ├── bootstrap.py         # Owner pairing codes
+│   │       │   ├── telegram.py          # Telegram channel
+│   │       │   └── telegram_commands.py # /config handlers
 │   │       ├── memory/
 │   │       │   └── sliding_window.py
 │   │       ├── routing/
@@ -517,6 +732,7 @@ AgentCore-Glitch/
 - Node.js 18+, pnpm, Python 3.10+
 - Tailscale subnet router at 10.10.100.230
 - Ollama hosts accessible on local network
+- Telegram bot token (optional, from @BotFather)
 
 ### Quick Start
 
@@ -527,14 +743,43 @@ pnpm install && pnpm build
 pnpm run cdk bootstrap aws://999776382415/us-west-2
 pnpm run deploy
 
-# 2. Deploy agent
+# 2. Create Telegram bot (optional)
+# - Message @BotFather on Telegram
+# - Create new bot with /newbot
+# - Save the bot token
+
+# 3. Deploy agent
 cd ../agent
 python -m venv venv && source venv/bin/activate
 pip install bedrock-agentcore-starter-toolkit
+
+# Set Telegram token (optional)
+export GLITCH_TELEGRAM_BOT_TOKEN="your-bot-token"
+
 agentcore launch
 
-# 3. Test
+# 4. Claim Telegram bot (if configured)
+# - Check startup logs for pairing code
+# - Send code to your bot on Telegram
+# - Bot confirms ownership
+
+# 5. Test
 agentcore invoke '{"prompt": "Hello, Glitch!"}'
+
+# Or test via Telegram
+# - Send message to your bot
+```
+
+### Telegram Configuration
+
+After claiming the bot, configure access policies via Telegram:
+
+```
+/config dm pairing          # Set DM policy to pairing mode
+/config group allowlist     # Only allow specific groups
+/config mention on          # Require @mention in groups
+/config allow 987654321     # Add user to allowlist
+/config show                # View current configuration
 ```
 
 ### Verify Deployment
@@ -542,6 +787,9 @@ agentcore invoke '{"prompt": "Hello, Glitch!"}'
 ```bash
 # Check agent status
 agentcore status
+
+# Check Telegram configuration (if enabled)
+python -m glitch.cli status --verbose
 
 # View logs
 aws logs tail /aws/bedrock-agentcore/runtimes/{agent-id}-DEFAULT --follow

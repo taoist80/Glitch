@@ -10,6 +10,9 @@ Dataflow:
                             create_glitch_agent()
                                     |
                                     v
+                    Telegram Channel (if bot token present)
+                                    |
+                                    v
                             run_server_async() or interactive_mode()
 """
 
@@ -17,6 +20,7 @@ import asyncio
 import logging
 import os
 import sys
+from pathlib import Path
 
 from glitch.agent import create_glitch_agent, GlitchAgent
 from glitch.telemetry import setup_telemetry
@@ -24,6 +28,11 @@ from glitch.types import (
     TelemetryConfig,
     ServerConfig,
     InvocationResponse,
+)
+from glitch.channels import (
+    ConfigManager,
+    OwnerBootstrap,
+    TelegramChannel,
 )
 
 logging.basicConfig(
@@ -75,6 +84,7 @@ async def main() -> None:
     """Main execution function.
     
     Initializes telemetry, creates agent, and starts server or interactive mode.
+    Optionally starts Telegram channel if bot token is provided.
     """
     print("=" * 60)
     print("GLITCH AGENT STARTUP")
@@ -97,21 +107,66 @@ async def main() -> None:
     connectivity = await agent.check_connectivity()
     logger.info(f"Connectivity check: {connectivity}")
     
+    # Initialize Telegram channel if bot token is provided
+    telegram_channel = None
+    telegram_token = os.getenv("GLITCH_TELEGRAM_BOT_TOKEN")
+    
+    if telegram_token:
+        try:
+            logger.info("Telegram bot token found, initializing Telegram channel...")
+            
+            # Get config directory (allow override)
+            config_dir = os.getenv("GLITCH_CONFIG_DIR")
+            config_path = Path(config_dir) if config_dir else None
+            
+            # Initialize config manager
+            config_manager = ConfigManager(config_dir=config_path)
+            config = config_manager.load(bot_token=telegram_token)
+            
+            # Initialize bootstrap system
+            bootstrap = OwnerBootstrap(config_manager)
+            
+            # Create Telegram channel
+            telegram_channel = TelegramChannel(
+                config_manager=config_manager,
+                bootstrap=bootstrap,
+                agent=agent,
+            )
+            
+            # Start Telegram channel in background
+            await telegram_channel.start()
+            
+            logger.info("Telegram channel started successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize Telegram channel: {e}", exc_info=True)
+            # Continue without Telegram if it fails
+    else:
+        logger.info("No Telegram bot token found (GLITCH_TELEGRAM_BOT_TOKEN), skipping Telegram channel")
+    
     mode = os.getenv("GLITCH_MODE", "server")
     logger.info(f"Mode determined: {mode}")
     print(f"Starting in {mode} mode")
     
-    if mode == "interactive":
-        logger.warning("INTERACTIVE MODE - This will fail in containers without stdin!")
-        print("ERROR: Interactive mode requested but container has no stdin")
-        await interactive_mode(agent)
-    else:
-        logger.info("Starting HTTP server")
-        server_config = get_server_config()
-        print(f"Starting HTTP server on {server_config.host}:{server_config.port}")
-        
-        from glitch.server import run_server_async
-        await run_server_async(agent, server_config)
+    try:
+        if mode == "interactive":
+            logger.warning("INTERACTIVE MODE - This will fail in containers without stdin!")
+            print("ERROR: Interactive mode requested but container has no stdin")
+            await interactive_mode(agent)
+        else:
+            logger.info("Starting HTTP server")
+            server_config = get_server_config()
+            print(f"Starting HTTP server on {server_config.host}:{server_config.port}")
+            
+            from glitch.server import run_server_async
+            await run_server_async(agent, server_config)
+    finally:
+        # Clean up Telegram channel on shutdown
+        if telegram_channel:
+            logger.info("Shutting down Telegram channel...")
+            try:
+                await telegram_channel.stop()
+            except Exception as e:
+                logger.error(f"Error stopping Telegram channel: {e}")
 
 
 async def interactive_mode(agent: GlitchAgent) -> None:
