@@ -29,7 +29,7 @@ The GlitchAgent orchestrates:
 import os
 import logging
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, AsyncIterator
 from strands import Agent
 from strands.agent.conversation_manager import SlidingWindowConversationManager
 
@@ -451,7 +451,74 @@ class GlitchAgent:
                 session_id=self.session_id,
                 memory_id=self.memory_id,
             )
-    
+
+    async def process_message_stream(self, user_message: str) -> AsyncIterator[Dict[str, Any]]:
+        """Process a user message with streaming events (AgentCore best practice).
+
+        Yields Strands stream events (e.g. content deltas, tool use, final result).
+        Caller can send chunks progressively (e.g. to Telegram) or consume the
+        final event for metrics. Memory and telemetry are applied after the stream
+        completes (on the final result event).
+
+        Args:
+            user_message: The user's input message.
+
+        Yields:
+            Stream events (dicts with "data", "complete", "result", etc.).
+            Final event contains "result" (AgentResult) for metrics.
+        """
+        try:
+            await self.memory_manager.create_event(
+                event_content=user_message,
+                event_type=EventType.USER_MESSAGE.value,
+            )
+
+            prompt_with_skills = self._select_and_inject_skills(
+                user_message, self._current_model_name
+            )
+            self.agent.system_prompt = prompt_with_skills
+
+            memory_context = self.memory_manager.get_summary_for_context()
+            enriched_message = f"{user_message}\n\n[Structured Memory:\n{memory_context}]"
+
+            max_turns = int(os.getenv("GLITCH_MAX_TURNS", "3"))
+            invocation_state = {} if max_turns <= 0 else {"max_turns": max_turns}
+
+            accumulated_text: str = ""
+            last_result = None
+
+            async for event in self.agent.stream_async(
+                enriched_message, invocation_state=invocation_state
+            ):
+                if isinstance(event, dict):
+                    if "data" in event:
+                        accumulated_text += event.get("data") or ""
+                    if "result" in event:
+                        last_result = event["result"]
+                    yield event
+
+            if last_result is not None:
+                set_last_agent_result(last_result)
+                append_telemetry(last_result)
+                metrics: InvocationMetrics = extract_metrics_from_result(last_result)
+                skill_info = self._get_skill_telemetry()
+                log_invocation_metrics(
+                    metrics=metrics,
+                    user_message=user_message[:100],
+                    response_preview=(accumulated_text or str(last_result))[:200],
+                    session_id=self.session_id,
+                    extra=skill_info,
+                )
+                await self.memory_manager.create_event(
+                    event_content=accumulated_text or str(last_result),
+                    event_type=EventType.AGENT_RESPONSE.value,
+                )
+                self.model_router.reset_turn_counter()
+
+        except Exception as e:
+            logger.error("Error in process_message_stream: %s", e)
+            yield {"error": str(e), "message": str(e)}
+
     def _get_skill_telemetry(self) -> Dict[str, Any]:
         """Get skill selection info for telemetry logging.
         

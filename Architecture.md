@@ -905,6 +905,21 @@ curl http://10.10.110.202:11434/api/tags
 
 A React + DaisyUI dashboard for monitoring and interacting with Glitch.
 
+### Quick Start
+
+```bash
+# 1. Find your agent's endpoint and get tunnel instructions
+cd ui
+pnpm find-endpoint
+
+# 2. Follow the instructions to set up SSH tunnel (in separate terminal)
+
+# 3. Start the UI
+pnpm dev
+
+# 4. Access at http://localhost:5173
+```
+
 ### Features
 
 | Tab | Description |

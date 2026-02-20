@@ -23,7 +23,7 @@ Dataflow:
 """
 
 import logging
-from typing import Optional
+from typing import Optional, AsyncIterator
 
 from bedrock_agentcore.runtime import BedrockAgentCoreApp, RequestContext
 
@@ -32,6 +32,7 @@ from glitch.types import (
     InvocationResponse,
     ServerConfig,
     create_error_response,
+    create_keepalive_response,
 )
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,83 @@ _agent: Optional[GlitchAgentType] = None
 
 # Create the AgentCore app
 app = BedrockAgentCoreApp()
+
+
+async def _handle_ui_api_request(api_request: dict) -> dict:
+    """Handle UI API requests routed through invocations.
+
+    This allows the UI to access API endpoints when connecting via agentcore invoke
+    (proxy mode) instead of direct HTTP to the container.
+
+    Args:
+        api_request: Dict with path, method, and optional body
+
+    Returns:
+        API response as a dict
+    """
+    # Import the handler functions directly from the router module
+    from glitch.api.router import (
+        get_status,
+        get_telegram_config,
+        update_telegram_config,
+        get_ollama_health,
+        get_memory_summary,
+        get_mcp_servers,
+        get_skills,
+        toggle_skill,
+    )
+
+    path = api_request.get("path", "")
+    method = api_request.get("method", "GET").upper()
+    body = api_request.get("body")
+
+    logger.info(f"UI API request: {method} {path}")
+
+    try:
+        # Route to the appropriate handler
+        if path == "/status" and method == "GET":
+            result = await get_status()
+            return result.model_dump()
+
+        elif path == "/telegram/config" and method == "GET":
+            result = await get_telegram_config()
+            return result.model_dump()
+
+        elif path == "/telegram/config" and method == "POST":
+            from glitch.api.types import TelegramConfigUpdate
+            update = TelegramConfigUpdate(**(body or {}))
+            result = await update_telegram_config(update)
+            return result.model_dump()
+
+        elif path == "/ollama/health" and method == "GET":
+            result = await get_ollama_health()
+            return result.model_dump()
+
+        elif path == "/memory/summary" and method == "GET":
+            result = await get_memory_summary()
+            return result.model_dump()
+
+        elif path == "/mcp/servers" and method == "GET":
+            result = await get_mcp_servers()
+            return result.model_dump()
+
+        elif path == "/skills" and method == "GET":
+            result = await get_skills()
+            return result.model_dump()
+            
+        elif path.startswith("/skills/") and path.endswith("/toggle") and method == "POST":
+            skill_id = path.split("/")[2]
+            from glitch.api.types import SkillToggleRequest
+            toggle_req = SkillToggleRequest(**(body or {}))
+            result = await toggle_skill(skill_id, toggle_req)
+            return result.model_dump()
+            
+        else:
+            return {"error": f"Unknown API endpoint: {method} {path}"}
+            
+    except Exception as e:
+        logger.error(f"UI API request error: {e}", exc_info=True)
+        return {"error": str(e)}
 
 
 def _setup_api_routes() -> None:
@@ -77,10 +155,28 @@ async def invoke(payload: InvocationRequest, context: RequestContext) -> Invocat
     
     Returns:
         InvocationResponse with message, metrics, and session info
+    
+    Special payloads:
+        - {"_ui_api_request": {"path": "/status", "method": "GET"}} - Handle UI API requests
     """
     global _agent
+    
+    # Handle UI API requests (for proxy mode)
+    if "_ui_api_request" in payload:
+        return await _handle_ui_api_request(payload["_ui_api_request"])
+    
     prompt_preview = (payload.get("prompt") or "")[:80]
     logger.info("Received invocation: prompt=%s session_id=%s", repr(prompt_preview), payload.get("session_id"))
+
+    # Keepalive from scheduled Lambda to avoid idleRuntimeSessionTimeout (default 15 min).
+    session_id = payload.get("session_id") or ""
+    if session_id == "system:keepalive":
+        prompt = (payload.get("prompt") or "").strip().lower()
+        if prompt in ("", "ping", "keepalive"):
+            logger.debug("Keepalive received, skipping agent")
+            sid = _agent.session_id if _agent else ""
+            mid = _agent.memory_id if _agent else ""
+            return create_keepalive_response(session_id=sid, memory_id=mid)
 
     if _agent is None:
         return create_error_response(
@@ -98,10 +194,21 @@ async def invoke(payload: InvocationRequest, context: RequestContext) -> Invocat
             memory_id=_agent.memory_id,
         )
     
+    # Optional streaming: when payload has "stream": true, yield events (AgentCore best practice).
+    if payload.get("stream"):
+        async def stream_events() -> AsyncIterator[dict]:
+            try:
+                async for event in _agent.process_message_stream(prompt):
+                    yield event
+            except Exception as e:
+                logger.error("Error in streaming invocation: %s", e, exc_info=True)
+                yield {"error": str(e)}
+        return stream_events()
+
     try:
         response: InvocationResponse = await _agent.process_message(prompt)
         return response
-        
+
     except Exception as e:
         logger.error(f"Error processing invocation: {e}", exc_info=True)
         return create_error_response(

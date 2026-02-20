@@ -1,5 +1,7 @@
 import * as cdk from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
@@ -83,6 +85,29 @@ export class TelegramWebhookStack extends cdk.Stack {
     });
 
     this.webhookUrl = functionUrl.url;
+
+    // Keepalive Lambda: invokes runtime every 10 min so idleRuntimeSessionTimeout (15 min default) does not tear down the session.
+    const keepaliveFunction = new lambda.Function(this, 'AgentCoreKeepaliveFunction', {
+      functionName: 'glitch-agentcore-keepalive',
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'index.handler',
+      code: lambda.Code.fromInline(this.getKeepaliveLambdaCode()),
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 128,
+      environment: { AGENTCORE_RUNTIME_ARN: agentCoreRuntimeArn },
+    });
+    keepaliveFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['bedrock-agentcore:InvokeAgentRuntime'],
+        resources: [agentCoreRuntimeArn, `${agentCoreRuntimeArn}/*`],
+      })
+    );
+    new events.Rule(this, 'AgentCoreKeepaliveSchedule', {
+      schedule: events.Schedule.rate(cdk.Duration.minutes(10)),
+      targets: [new targets.LambdaFunction(keepaliveFunction)],
+      description: 'Invoke AgentCore runtime keepalive every 10 min to avoid session termination',
+    });
 
     // S3 bucket for persistent SOUL.md (personality) so Telegram and chat agents can read/write it.
     this.soulBucket = new s3.Bucket(this, 'GlitchSoulBucket', {
@@ -687,6 +712,9 @@ def invoke_agent(prompt: str, session_id: str):
             logger.info("Invoke agent success: has_message=%s", bool(isinstance(result, dict) and result.get('message')))
             return result if isinstance(result, dict) else str(result)
     except Exception as e:
+        is_timeout = "timed out" in str(e).lower() or "timeout" in str(e).lower()
+        if is_timeout:
+            logger.warning("Invoke agent failed (timeout): type=%s msg=%s", type(e).__name__, str(e)[:200])
         logger.error(f"Failed to invoke agent: {e}", exc_info=True)
         return f"Error: {e}"
 
@@ -844,6 +872,53 @@ def handler(event, context):
             pass
     
     return {'statusCode': 200, 'body': 'OK'}
+`;
+  }
+
+  private getKeepaliveLambdaCode(): string {
+    return `
+import json
+import os
+import urllib.request
+from urllib.parse import quote
+import boto3
+from botocore.auth import SigV4Auth
+from botocore.awsrequest import AWSRequest
+
+def get_data_plane_endpoint(region):
+    return f"https://bedrock-agentcore.{region}.amazonaws.com"
+
+def parse_runtime_arn(arn):
+    parts = arn.split(':')
+    if len(parts) != 6 or not (parts[5] or '').startswith('runtime/'):
+        raise ValueError(f"Invalid runtime ARN: {arn}")
+    return {'region': parts[3], 'account_id': parts[4], 'runtime_id': parts[5].split('/', 1)[1]}
+
+def handler(event, context):
+    arn = os.environ.get('AGENTCORE_RUNTIME_ARN', '')
+    if not arn:
+        return
+    try:
+        parts = parse_runtime_arn(arn)
+        region = parts['region']
+        endpoint = get_data_plane_endpoint(region)
+        encoded_arn = quote(arn, safe='')
+        url = f"{endpoint}/runtimes/{encoded_arn}/invocations"
+        payload = {"prompt": "ping", "session_id": "system:keepalive"}
+        body = json.dumps(payload).encode('utf-8')
+        headers = {'Content-Type': 'application/json', 'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id': 'system:keepalive'}
+        session = boto3.Session()
+        creds = session.get_credentials()
+        if creds:
+            req = AWSRequest(method='POST', url=url, data=body, headers=headers)
+            SigV4Auth(creds, 'bedrock-agentcore', region).add_auth(req)
+            headers = dict(req.headers)
+        req = urllib.request.Request(url, data=body, headers=headers, method='POST')
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            resp.read()
+    except Exception as e:
+        import logging
+        logging.getLogger().warning("Keepalive invoke failed: %s", e)
 `;
   }
 }

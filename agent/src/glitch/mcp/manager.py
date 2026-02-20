@@ -5,7 +5,7 @@ creating MCPClient instances and providing them to the agent.
 """
 
 import logging
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from pathlib import Path
 
 from mcp import stdio_client, StdioServerParameters
@@ -38,18 +38,38 @@ class MCPServerManager:
     def _initialize_clients(self) -> None:
         """Create MCPClient instances for all enabled servers."""
         enabled_servers = self.config.get_enabled_servers()
-        
+
         if not enabled_servers:
             logger.info("No enabled MCP servers found")
             return
-        
+
         for server in enabled_servers:
             try:
                 client = self._create_client(server)
                 self.clients[server.name] = client
-                logger.info(f"Initialized MCP client: {server.name}")
+                logger.info("Initialized MCP client: %s", server.name)
+            except ValueError as e:
+                # Invalid config (e.g. unsupported transport, missing command): fail fast
+                logger.error(
+                    "Invalid MCP config for '%s': %s. Fix mcp_servers.yaml and restart.",
+                    server.name,
+                    e,
+                )
+                raise
+            except (OSError, TimeoutError) as e:
+                # Recoverable: server not reachable or slow to start
+                logger.warning(
+                    "MCP server '%s' connection failed (will not be available): %s",
+                    server.name,
+                    e,
+                )
             except Exception as e:
-                logger.error(f"Failed to create MCP client for '{server.name}': {e}")
+                logger.error(
+                    "Failed to create MCP client for '%s': %s",
+                    server.name,
+                    e,
+                    exc_info=True,
+                )
     
     def _create_client(self, config: MCPServerConfig) -> MCPClient:
         """Create an MCPClient for the given server configuration.
@@ -126,9 +146,9 @@ class MCPServerManager:
         """
         return list(self.clients.keys())
     
-    def get_status(self) -> dict[str, any]:
+    def get_status(self) -> Dict[str, Any]:
         """Get status information about MCP servers.
-        
+
         Returns:
             Dictionary with server status information
         """
@@ -138,3 +158,44 @@ class MCPServerManager:
             "connected_clients": len(self.clients),
             "server_names": self.get_server_names(),
         }
+
+    def start_clients(self) -> None:
+        """Start all MCP clients (ensure connections are ready).
+
+        Clients are created in _initialize_clients; Strands Agent typically
+        uses MCPClient as context manager when invoking tools. This method
+        can be used to eagerly start connections if needed.
+        """
+        for name, client in self.clients.items():
+            try:
+                if hasattr(client, "start") and callable(client.start):
+                    client.start()
+                    logger.debug("Started MCP client: %s", name)
+            except Exception as e:
+                logger.warning("Failed to start MCP client '%s': %s", name, e)
+
+    def stop_clients(self) -> None:
+        """Gracefully shut down all MCP clients."""
+        for name, client in list(self.clients.items()):
+            try:
+                if hasattr(client, "stop") and callable(client.stop):
+                    client.stop(None, None, None)
+                    logger.debug("Stopped MCP client: %s", name)
+            except Exception as e:
+                logger.warning("Error stopping MCP client '%s': %s", name, e)
+            finally:
+                self.clients.pop(name, None)
+
+    def health_check(self, server_name: str) -> bool:
+        """Check if an MCP server has an active client.
+
+        Does not verify liveness of the subprocess; use get_tool_providers()
+        and tool invocation for that.
+
+        Args:
+            server_name: Name of the server from config.
+
+        Returns:
+            True if the server has a connected client.
+        """
+        return server_name in self.clients

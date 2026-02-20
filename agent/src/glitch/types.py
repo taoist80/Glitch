@@ -239,3 +239,13 @@ def create_error_response(error: str, session_id: str = "", memory_id: str = "")
         metrics=create_empty_metrics(),
         error=error,
     )
+
+
+def create_keepalive_response(session_id: str = "", memory_id: str = "") -> InvocationResponse:
+    """Minimal success response for keepalive pings (avoids session termination)."""
+    return InvocationResponse(
+        message="ok",
+        session_id=session_id,
+        memory_id=memory_id,
+        metrics=create_empty_metrics(),
+    )

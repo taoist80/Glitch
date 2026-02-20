@@ -30,6 +30,44 @@ from glitch.channels.telegram_commands import TelegramCommandHandler
 
 logger = logging.getLogger(__name__)
 
+# Minimum chunk size before sending a Telegram message when streaming (AgentCore best practice).
+_STREAM_CHUNK_MIN_CHARS = 400
+
+
+async def _consume_stream_and_send(
+    send_message_fn,
+    session_id: str,
+    stream,
+    update,
+    reply_error_fn,
+) -> None:
+    """Consume process_message_stream events; send chunks to Telegram; handle errors."""
+    buffer = ""
+    try:
+        async for event in stream:
+            if isinstance(event, dict) and "error" in event:
+                await reply_error_fn(f"❌ Error: {event['error']}")
+                return
+            if isinstance(event, dict) and "data" in event:
+                buffer += event.get("data") or ""
+                while len(buffer) >= _STREAM_CHUNK_MIN_CHARS or (
+                    "\n" in buffer and buffer.strip()
+                ):
+                    idx = buffer.find("\n", 0, _STREAM_CHUNK_MIN_CHARS + 1)
+                    if idx < 0:
+                        idx = min(_STREAM_CHUNK_MIN_CHARS, len(buffer))
+                    else:
+                        idx += 1
+                    chunk = buffer[:idx].rstrip() if idx < len(buffer) else buffer[:idx]
+                    buffer = buffer[idx:]
+                    if chunk:
+                        await send_message_fn(session_id, chunk)
+        if buffer.strip():
+            await send_message_fn(session_id, buffer.strip())
+    except Exception as e:
+        logger.error("Error consuming stream: %s", e, exc_info=True)
+        await reply_error_fn(f"❌ Error: {e}")
+
 
 class TelegramChannel(ChannelAdapter):
     """Telegram channel adapter.
@@ -373,8 +411,18 @@ class TelegramChannel(ChannelAdapter):
         agent = self._get_agent(session_id)
         if agent:
             try:
+                # Use streaming when supported (GlitchAgent; AgentCore best practice)
+                if hasattr(agent, "process_message_stream"):
+                    stream = agent.process_message_stream(message_text)
+                    await _consume_stream_and_send(
+                        self.send_message,
+                        session_id,
+                        stream,
+                        update,
+                        lambda msg: update.message.reply_text(msg),
+                    )
+                    return
                 response = await agent.process_message(message_text)
-                
                 # Send response (InvocationResponse uses "message" key)
                 if isinstance(response, dict):
                     text = response.get("message") or response.get("response")
@@ -386,10 +434,10 @@ class TelegramChannel(ChannelAdapter):
                 elif isinstance(response, str):
                     await self.send_message(session_id, response)
                 else:
-                    logger.error(f"Unexpected response type: {type(response)}")
+                    logger.error("Unexpected response type: %s", type(response))
                     await update.message.reply_text("❌ Internal error processing message")
             except Exception as e:
-                logger.error(f"Error processing message: {e}", exc_info=True)
+                logger.error("Error processing message: %s", e, exc_info=True)
                 await update.message.reply_text(f"❌ Error: {e}")
         else:
             await update.message.reply_text("⚠️ Agent not configured")
@@ -499,9 +547,17 @@ class TelegramChannel(ChannelAdapter):
         agent = self._get_agent(session_id)
         if agent:
             try:
+                if hasattr(agent, "process_message_stream"):
+                    stream = agent.process_message_stream(prompt)
+                    await _consume_stream_and_send(
+                        self.send_message,
+                        session_id,
+                        stream,
+                        update,
+                        lambda msg: update.message.reply_text(msg),
+                    )
+                    return
                 response = await agent.process_message(prompt)
-                
-                # Send response (InvocationResponse uses "message" key)
                 if isinstance(response, dict):
                     text = response.get("message") or response.get("response")
                     if text is not None:
@@ -512,10 +568,10 @@ class TelegramChannel(ChannelAdapter):
                 elif isinstance(response, str):
                     await self.send_message(session_id, response)
                 else:
-                    logger.error(f"Unexpected response type: {type(response)}")
+                    logger.error("Unexpected response type: %s", type(response))
                     await update.message.reply_text("❌ Internal error processing image")
             except Exception as e:
-                logger.error(f"Error processing media message: {e}", exc_info=True)
+                logger.error("Error processing media message: %s", e, exc_info=True)
                 await update.message.reply_text(f"❌ Error: {e}")
         else:
             await update.message.reply_text("⚠️ Agent not configured")

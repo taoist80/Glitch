@@ -54,34 +54,112 @@ def _get_agent() -> "GlitchAgent":
     return _agent
 
 
+def _sanitize_for_json(obj: object) -> object:
+    """Convert to JSON-serializable types (avoid 500 from Pydantic/Starlette)."""
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return {str(k): _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_for_json(x) for x in obj]
+    if isinstance(obj, (str, int, float, bool)):
+        return obj
+    if isinstance(obj, (int, float)) and (obj != obj or abs(obj) == float("inf")):
+        return 0
+    return str(obj)
+
+
 @router.get("/status", response_model=StatusResponse)
 async def get_status() -> StatusResponse:
     """Get overall agent status."""
-    agent = _get_agent()
-    status = agent.get_status()
-    mcp_status = agent.mcp_manager.get_status()
+    try:
+        agent = _get_agent()
+    except HTTPException:
+        raise
+    try:
+        status = agent.get_status()
+        mcp_status = agent.mcp_manager.get_status()
+    except Exception as e:
+        logger.exception("get_status failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Agent status error: {e}")
+    
+    routing = status.get("routing_stats") or {}
+    memory = status.get("structured_memory") or {}
     
     return StatusResponse(
-        session_id=status["session_id"],
-        memory_id=status["memory_id"],
+        session_id=str(status.get("session_id", "")),
+        memory_id=str(status.get("memory_id", "")),
         connected=True,
-        skills_loaded=status.get("skills_loaded", len(agent.skill_registry)),
-        mcp_servers_connected=mcp_status.get("connected_clients", 0),
-        routing_stats=status.get("routing_stats", {}),
-        structured_memory=status.get("structured_memory", {}),
+        skills_loaded=int(status.get("skills_loaded", len(agent.skill_registry))),
+        mcp_servers_connected=int(mcp_status.get("connected_clients", 0)),
+        routing_stats=_sanitize_for_json(routing) if isinstance(routing, dict) else {},
+        structured_memory=_sanitize_for_json(memory) if isinstance(memory, dict) else {},
     )
+
+
+def _load_telegram_config_for_api():
+    """Load Telegram config using same backend as main (DynamoDB in AWS, file locally)."""
+    import os
+    import boto3
+    from botocore.exceptions import ClientError
+
+    has_token = bool(
+        os.environ.get("GLITCH_TELEGRAM_BOT_TOKEN") or
+        os.environ.get("GLITCH_TELEGRAM_SECRET_NAME")
+    )
+    if not has_token:
+        return None, has_token
+
+    config_table = os.getenv("GLITCH_CONFIG_TABLE", "").strip()
+    webhook_url_env = os.getenv("GLITCH_TELEGRAM_WEBHOOK_URL", "").strip()
+    if config_table or webhook_url_env:
+        try:
+            table_name = config_table or "glitch-telegram-config"
+            dynamodb = boto3.resource("dynamodb")
+            table = dynamodb.Table(table_name)
+            response = table.get_item(Key={"pk": "CONFIG", "sk": "telegram"})
+            if "Item" in response:
+                item = response["Item"]
+                return {
+                    "owner_id": item.get("owner_id"),
+                    "dm_policy": item.get("dm_policy", "pairing"),
+                    "group_policy": item.get("group_policy", "allowlist"),
+                    "require_mention": item.get("require_mention", True),
+                    "dm_allowlist": item.get("dm_allowlist", []) or [],
+                    "group_allowlist": item.get("group_allowlist", []) or [],
+                    "webhook_url": item.get("webhook_url"),
+                    "mode": item.get("mode", "webhook"),
+                }, True
+        except ClientError as e:
+            logger.warning("DynamoDB Telegram config load failed: %s", e)
+        except Exception as e:
+            logger.warning("DynamoDB Telegram config load failed: %s", e)
+    try:
+        from glitch.channels.config_manager import ConfigManager
+        cm = ConfigManager()
+        config = cm.load()
+        if config.telegram:
+            t = config.telegram
+            return {
+                "bot_username": getattr(t, "bot_username", None),
+                "owner_id": getattr(t, "owner_id", None),
+                "dm_policy": getattr(t, "dm_policy", "pairing"),
+                "group_policy": getattr(t, "group_policy", "allowlist"),
+                "require_mention": getattr(t, "require_mention", True),
+                "dm_allowlist": getattr(t, "dm_allowlist", []) or [],
+                "group_allowlist": getattr(t, "group_allowlist", []) or [],
+                "webhook_url": getattr(t, "webhook_url", None),
+                "mode": getattr(t, "mode", "polling"),
+            }, True
+    except Exception as e:
+        logger.warning("File Telegram config load failed: %s", e)
+    return None, has_token
 
 
 @router.get("/telegram/config", response_model=TelegramConfigResponse)
 async def get_telegram_config() -> TelegramConfigResponse:
     """Get Telegram bot configuration."""
-    import os
-    
-    has_token = bool(
-        os.environ.get("GLITCH_TELEGRAM_BOT_TOKEN") or
-        os.environ.get("GLITCH_TELEGRAM_SECRET_NAME")
-    )
-    
+    data, has_token = _load_telegram_config_for_api()
     if not has_token:
         return TelegramConfigResponse(
             enabled=False,
@@ -89,168 +167,177 @@ async def get_telegram_config() -> TelegramConfigResponse:
             group_policy="allowlist",
             require_mention=True,
         )
-    
-    try:
-        from glitch.channels.config_manager import ConfigManager
-        config_manager = ConfigManager()
-        config = config_manager.load()
-        
-        telegram_config = config.get("channels", {}).get("telegram", {})
-        
+    if not data:
         return TelegramConfigResponse(
             enabled=True,
-            bot_username=telegram_config.get("bot_username"),
-            owner_id=telegram_config.get("owner_id"),
-            dm_policy=telegram_config.get("dm_policy", "pairing"),
-            group_policy=telegram_config.get("group_policy", "allowlist"),
-            require_mention=telegram_config.get("require_mention", True),
-            dm_allowlist=telegram_config.get("dm_allowlist", []),
-            group_allowlist=telegram_config.get("group_allowlist", []),
-            webhook_url=telegram_config.get("webhook_url"),
-            mode=telegram_config.get("mode", "polling"),
-        )
-    except Exception as e:
-        logger.warning(f"Failed to load Telegram config: {e}")
-        return TelegramConfigResponse(
-            enabled=has_token,
             dm_policy="pairing",
             group_policy="allowlist",
             require_mention=True,
         )
+    return TelegramConfigResponse(
+        enabled=True,
+        bot_username=data.get("bot_username"),
+        owner_id=data.get("owner_id"),
+        dm_policy=data.get("dm_policy", "pairing"),
+        group_policy=data.get("group_policy", "allowlist"),
+        require_mention=data.get("require_mention", True),
+        dm_allowlist=data.get("dm_allowlist") or [],
+        group_allowlist=data.get("group_allowlist") or [],
+        webhook_url=data.get("webhook_url"),
+        mode=data.get("mode", "polling"),
+    )
 
 
 @router.post("/telegram/config", response_model=TelegramConfigResponse)
 async def update_telegram_config(update: TelegramConfigUpdate) -> TelegramConfigResponse:
-    """Update Telegram bot configuration."""
+    """Update Telegram bot configuration (file backend only; DynamoDB not updated via API)."""
+    import os
     try:
         from glitch.channels.config_manager import ConfigManager
+        if os.environ.get("GLITCH_CONFIG_TABLE") or os.environ.get("GLITCH_TELEGRAM_WEBHOOK_URL"):
+            raise HTTPException(
+                status_code=501,
+                detail="Telegram config updates are not supported when using DynamoDB backend",
+            )
         config_manager = ConfigManager()
         config = config_manager.load()
-        
-        if "channels" not in config:
-            config["channels"] = {}
-        if "telegram" not in config["channels"]:
-            config["channels"]["telegram"] = {}
-        
-        telegram_config = config["channels"]["telegram"]
-        
+        if not config.telegram:
+            raise HTTPException(status_code=400, detail="Telegram not configured")
+        kwargs = {}
         if update.dm_policy is not None:
-            telegram_config["dm_policy"] = update.dm_policy
+            kwargs["dm_policy"] = update.dm_policy
         if update.group_policy is not None:
-            telegram_config["group_policy"] = update.group_policy
+            kwargs["group_policy"] = update.group_policy
         if update.require_mention is not None:
-            telegram_config["require_mention"] = update.require_mention
+            kwargs["require_mention"] = update.require_mention
         if update.dm_allowlist is not None:
-            telegram_config["dm_allowlist"] = update.dm_allowlist
+            kwargs["dm_allowlist"] = update.dm_allowlist
         if update.group_allowlist is not None:
-            telegram_config["group_allowlist"] = update.group_allowlist
-        
-        config_manager.save(config)
-        
+            kwargs["group_allowlist"] = update.group_allowlist
+        if kwargs:
+            config_manager.update_telegram(**kwargs)
         return await get_telegram_config()
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Failed to update Telegram config: {e}")
+        logger.exception("Failed to update Telegram config: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/ollama/health", response_model=OllamaHealthResponse)
 async def get_ollama_health() -> OllamaHealthResponse:
     """Get Ollama hosts health status."""
-    from glitch.tools.ollama_tools import _check_single_host, DEFAULT_CONFIG
-    
-    config = DEFAULT_CONFIG
-    hosts = []
-    
-    for name, host in [("Chat", config.chat_host), ("Vision", config.vision_host)]:
-        result = await _check_single_host(name, host, config)
-        hosts.append(OllamaHostHealth(
-            name=result.name,
-            host=result.host,
-            healthy=result.healthy,
-            models=result.models,
-            error=result.error,
-        ))
-    
-    return OllamaHealthResponse(
-        hosts=hosts,
-        all_healthy=all(h.healthy for h in hosts),
-    )
+    try:
+        from glitch.tools.ollama_tools import _check_single_host, DEFAULT_CONFIG
+        config = DEFAULT_CONFIG
+        hosts = []
+        for name, host in [("Chat", config.chat_host), ("Vision", config.vision_host)]:
+            result = await _check_single_host(name, host, config)
+            hosts.append(OllamaHostHealth(
+                name=result.name,
+                host=result.host,
+                healthy=result.healthy,
+                models=getattr(result, "models", []) or [],
+                error=result.error,
+            ))
+        return OllamaHealthResponse(
+            hosts=hosts,
+            all_healthy=all(h.healthy for h in hosts),
+        )
+    except Exception as e:
+        logger.exception("get_ollama_health failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/memory/summary", response_model=MemorySummaryResponse)
 async def get_memory_summary() -> MemorySummaryResponse:
     """Get memory state summary."""
-    agent = _get_agent()
-    
-    return MemorySummaryResponse(
-        session_id=agent.session_id,
-        memory_id=agent.memory_id,
-        window_size=agent.memory_manager.window_size,
-        structured_memory=agent.memory_manager.structured_memory.to_dict(),
-        agentcore_connected=agent.memory_manager.agentcore_client is not None,
-    )
+    try:
+        agent = _get_agent()
+        sm = agent.memory_manager.structured_memory
+        raw = sm.to_dict() if hasattr(sm, "to_dict") and callable(sm.to_dict) else {}
+        return MemorySummaryResponse(
+            session_id=agent.session_id,
+            memory_id=agent.memory_id,
+            window_size=getattr(agent.memory_manager, "window_size", 20),
+            structured_memory=_sanitize_for_json(raw) if isinstance(raw, dict) else {},
+            agentcore_connected=agent.memory_manager.agentcore_client is not None,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("get_memory_summary failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/mcp/servers", response_model=MCPServersResponse)
 async def get_mcp_servers() -> MCPServersResponse:
     """Get MCP servers status."""
-    agent = _get_agent()
-    mcp_status = agent.mcp_manager.get_status()
-    
-    servers = []
-    total_tools = 0
-    
-    for server_name in mcp_status.get("server_names", []):
-        server_config = agent.mcp_manager.config.servers.get(server_name)
-        client = agent.mcp_manager.clients.get(server_name)
-        
-        tools = []
-        if client:
-            try:
-                tool_providers = agent.mcp_manager.get_tool_providers()
-                for provider in tool_providers:
-                    if hasattr(provider, 'tools'):
-                        tools.extend([t.name for t in provider.tools if hasattr(t, 'name')])
-            except Exception:
-                pass
-        
-        servers.append(MCPServerInfo(
-            name=server_name,
-            enabled=server_config.enabled if server_config else False,
-            connected=client is not None,
-            transport=server_config.transport if server_config else "unknown",
-            tools=tools,
-        ))
-        total_tools += len(tools)
-    
-    return MCPServersResponse(
-        servers=servers,
-        total_tools=total_tools,
-    )
+    try:
+        agent = _get_agent()
+        mcp_status = agent.mcp_manager.get_status() or {}
+        server_names = mcp_status.get("server_names") or []
+        servers = []
+        total_tools = 0
+        config_servers = getattr(agent.mcp_manager, "config", None)
+        config_servers = config_servers.servers if config_servers else {}
+        clients = getattr(agent.mcp_manager, "clients", {}) or {}
+        for server_name in server_names:
+            server_config = config_servers.get(server_name)
+            client = clients.get(server_name)
+            tools = []
+            if client:
+                try:
+                    for provider in agent.mcp_manager.get_tool_providers():
+                        if hasattr(provider, "tools"):
+                            tools.extend([getattr(t, "name", str(t)) for t in provider.tools])
+                except Exception:
+                    pass
+            servers.append(MCPServerInfo(
+                name=server_name,
+                enabled=getattr(server_config, "enabled", False) if server_config else False,
+                connected=client is not None,
+                transport=getattr(server_config, "transport", "unknown") if server_config else "unknown",
+                tools=tools,
+            ))
+            total_tools += len(tools)
+        return MCPServersResponse(servers=servers, total_tools=total_tools)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("get_mcp_servers failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/skills", response_model=SkillsResponse)
 async def get_skills() -> SkillsResponse:
     """Get all registered skills."""
-    agent = _get_agent()
-    
-    skills = []
-    for skill_id, skill in agent.skill_registry._skills.items():
-        metadata = skill.metadata
-        skills.append(SkillInfo(
-            id=skill_id,
-            name=metadata.name,
-            description=metadata.description,
-            enabled=skill_id not in _disabled_skills,
-            triggers=metadata.triggers,
-            model_hints=metadata.model_hints,
-            usage_count=0,
-        ))
-    
-    return SkillsResponse(
-        skills=skills,
-        total=len(skills),
-    )
+    try:
+        agent = _get_agent()
+        skills_list = []
+        reg = getattr(agent, "skill_registry", None)
+        if reg is None:
+            return SkillsResponse(skills=[], total=0)
+        items = getattr(reg, "_skills", {}) or {}
+        for skill_id, skill in items.items():
+            metadata = getattr(skill, "metadata", None)
+            if not metadata:
+                continue
+            skills_list.append(SkillInfo(
+                id=skill_id,
+                name=getattr(metadata, "name", skill_id),
+                description=getattr(metadata, "description", ""),
+                enabled=skill_id not in _disabled_skills,
+                triggers=getattr(metadata, "triggers", []) or [],
+                model_hints=getattr(metadata, "model_hints", []) or [],
+                usage_count=0,
+            ))
+        return SkillsResponse(skills=skills_list, total=len(skills_list))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("get_skills failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/skills/{skill_id}/toggle", response_model=SkillToggleResponse)

@@ -20,6 +20,10 @@ import asyncio
 import json
 import logging
 import os
+
+# Strands SDK: allow non-interactive tool execution (required for AgentCore/serverless).
+# Set before any Strands/glitch.agent imports.
+os.environ.setdefault("BYPASS_TOOL_CONSENT", "true")
 import sys
 import time
 import boto3
