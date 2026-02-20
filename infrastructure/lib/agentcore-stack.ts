@@ -45,7 +45,7 @@ export class AgentCoreStack extends cdk.Stack {
     );
 
     this.agentRuntimeRole = new iam.Role(this, 'AgentRuntimeRole', {
-      assumedBy: new iam.ServicePrincipal('bedrock.amazonaws.com'),
+      assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
       description: 'IAM role for AgentCore Runtime',
       roleName: 'GlitchAgentCoreRuntimeRole',
     });
@@ -63,6 +63,31 @@ export class AgentCoreStack extends cdk.Stack {
           `arn:aws:bedrock:${this.region}::foundation-model/anthropic.claude-sonnet-4.6*`,
           `arn:aws:bedrock:${this.region}::foundation-model/anthropic.claude-opus-4*`,
         ],
+      })
+    );
+
+    this.agentRuntimeRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ECRImageAccess',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'ecr:BatchGetImage',
+          'ecr:GetDownloadUrlForLayer',
+        ],
+        resources: [
+          `arn:aws:ecr:${this.region}:${this.account}:repository/bedrock-agentcore-*`,
+        ],
+      })
+    );
+
+    this.agentRuntimeRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ECRTokenAccess',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'ecr:GetAuthorizationToken',
+        ],
+        resources: ['*'],
       })
     );
 

@@ -279,6 +279,16 @@ class GlitchAgent:
         )
 
 
+def _default_memory_id() -> str:
+    """Generate a memory_id that satisfies AgentCore CreateEvent pattern: [a-zA-Z][a-zA-Z0-9-_]{0,99}-[a-zA-Z0-9]{10}."""
+    import secrets
+    suffix = "".join(
+        secrets.choice("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+        for _ in range(10)
+    )
+    return f"glitch-memory-{suffix}"
+
+
 def create_glitch_agent(
     session_id: Optional[str] = None,
     memory_id: Optional[str] = None,
@@ -289,7 +299,7 @@ def create_glitch_agent(
     
     Args:
         session_id: Session identifier (defaults to env or generated UUID)
-        memory_id: Memory identifier (defaults to env or generated)
+        memory_id: Memory identifier (defaults to env or generated; must match [a-zA-Z][a-zA-Z0-9-_]{{0,99}}-[a-zA-Z0-9]{{10}})
         region: AWS region (defaults to env or us-west-2)
         window_size: Sliding window size for conversation history
     
@@ -297,12 +307,12 @@ def create_glitch_agent(
         Configured GlitchAgent instance
     """
     import uuid
-    
+
     config = AgentConfig(
         session_id=session_id or os.getenv("GLITCH_SESSION_ID", str(uuid.uuid4())),
-        memory_id=memory_id or os.getenv("GLITCH_MEMORY_ID", f"glitch-memory-{uuid.uuid4()}"),
+        memory_id=memory_id or os.getenv("GLITCH_MEMORY_ID", _default_memory_id()),
         region=region or os.getenv("AWS_REGION", "us-west-2"),
         window_size=window_size,
     )
-    
+
     return GlitchAgent(config)

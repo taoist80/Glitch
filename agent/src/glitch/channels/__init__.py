@@ -12,6 +12,7 @@ from glitch.channels.types import (
     TelegramMediaMessage,
 )
 from glitch.channels.config_manager import ConfigManager, OwnerConfig, GlitchConfig
+from glitch.channels.dynamodb_config import DynamoDBConfigManager
 from glitch.channels.bootstrap import OwnerBootstrap
 from glitch.channels.telegram_commands import TelegramCommandHandler
 from glitch.channels.telegram import TelegramChannel
@@ -25,6 +26,7 @@ __all__ = [
     "OwnerConfig",
     "GlitchConfig",
     "ConfigManager",
+    "DynamoDBConfigManager",
     "OwnerBootstrap",
     "TelegramCommandHandler",
     "TelegramChannel",

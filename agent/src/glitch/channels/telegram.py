@@ -8,9 +8,11 @@ access controls, and media handling.
 import base64
 import logging
 import io
+import os
 from typing import Optional
 
 from telegram import Update, Bot
+from telegram.error import Conflict
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -98,25 +100,45 @@ class TelegramChannel(ChannelAdapter):
     
     async def start(self) -> None:
         """Start the Telegram bot.
-        
+
         Initializes the bot and begins receiving messages via polling or webhook.
+        Only one instance may poll getUpdates per bot token; use
+        GLITCH_TELEGRAM_POLLING_ENABLED=false on extra replicas or catch Conflict.
         """
         try:
-            # Initialize the bot
             await self.application.initialize()
             await self.application.start()
-            
+
             if self.config.mode == "polling":
+                polling_enabled = os.getenv("GLITCH_TELEGRAM_POLLING_ENABLED", "true").lower() in ("true", "1", "yes")
+                if not polling_enabled:
+                    logger.info(
+                        "Telegram polling disabled by GLITCH_TELEGRAM_POLLING_ENABLED; "
+                        "only one instance should poll in multi-instance deployments."
+                    )
+                    return
                 logger.info("Starting Telegram bot in polling mode")
-                await self.application.updater.start_polling(
-                    allowed_updates=Update.ALL_TYPES,
-                    drop_pending_updates=True,
-                )
+                try:
+                    await self.application.updater.start_polling(
+                        allowed_updates=Update.ALL_TYPES,
+                        drop_pending_updates=True,
+                    )
+                except Conflict:
+                    logger.warning(
+                        "Telegram getUpdates conflict: another instance is already polling. "
+                        "Skipping Telegram polling on this instance (only one bot instance should poll)."
+                    )
+                    await self.application.updater.stop()
+                    return
             else:
-                # Webhook mode
+                # Webhook mode: either this process serves the webhook, or an external endpoint (e.g. Lambda) does
                 if not self.config.webhook_url:
-                    raise ValueError("webhook_url required for webhook mode")
-                
+                    logger.info(
+                        "Telegram webhook mode but no webhook_url set; Lambda or external endpoint will receive updates. "
+                        "Skipping local webhook server."
+                    )
+                    return
+
                 logger.info(f"Starting Telegram bot in webhook mode: {self.config.webhook_url}")
                 await self.application.updater.start_webhook(
                     listen="0.0.0.0",
@@ -125,7 +147,7 @@ class TelegramChannel(ChannelAdapter):
                     webhook_url=self.config.webhook_url,
                     secret_token=self.config.webhook_secret,
                 )
-            
+
             logger.info("Telegram bot started successfully")
         except Exception as e:
             logger.error(f"Failed to start Telegram bot: {e}", exc_info=True)
@@ -256,8 +278,16 @@ class TelegramChannel(ChannelAdapter):
         if not self.bootstrap.is_claimed():
             message_text = update.message.text.strip()
             user_id = update.effective_user.id
-            
-            if self.bootstrap.validate_code(message_text, user_id):
+            logger.info(
+                "Pairing: unclaimed bot received message",
+                extra={"user_id": user_id, "message_len": len(message_text)},
+            )
+            valid = self.bootstrap.validate_code(message_text, user_id)
+            logger.info(
+                "Pairing: validate_code result",
+                extra={"user_id": user_id, "valid": valid},
+            )
+            if valid:
                 await update.message.reply_text(
                     f"✅ You are now the owner of this Glitch instance!\n\n"
                     f"Use /help to see available commands."
@@ -265,6 +295,10 @@ class TelegramChannel(ChannelAdapter):
                 return
             else:
                 pairing_code = self.bootstrap.get_pairing_code()
+                logger.warning(
+                    "Pairing: replying not configured",
+                    extra={"user_id": user_id, "instance_has_code": pairing_code is not None},
+                )
                 await update.message.reply_text(
                     f"❌ Bot not configured. Owner must send the pairing code first.\n\n"
                     f"Check the startup logs for the code."

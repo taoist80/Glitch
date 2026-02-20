@@ -260,11 +260,16 @@ python -m glitch.cli status --verbose
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `GLITCH_TELEGRAM_SECRET_NAME` | No | `glitch/telegram-bot-token` | Secrets Manager secret name for bot token |
+| `GLITCH_TELEGRAM_BOT_TOKEN` | No | None | Bot token (direct, not recommended for production) |
+| `GLITCH_TELEGRAM_SECRET_NAME` | No | `glitch/telegram-bot-token` | Secrets Manager secret name |
 | `GLITCH_CONFIG_DIR` | No | `~/.glitch` | Configuration directory |
-| `AWS_REGION` | No | `us-west-2` | AWS region for Secrets Manager |
+| `AWS_REGION` | No | `us-west-2` | AWS region |
 
-**Note**: Bot token is retrieved from AWS Secrets Manager, not environment variables.
+**Token Priority:**
+1. `GLITCH_TELEGRAM_BOT_TOKEN` environment variable (checked first)
+2. AWS Secrets Manager `glitch/telegram-bot-token` (fallback)
+
+**Recommendation**: Use Secrets Manager for production, environment variable for local testing.
 
 ## Agent Architecture
 

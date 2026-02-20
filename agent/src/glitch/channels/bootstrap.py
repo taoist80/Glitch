@@ -8,7 +8,7 @@ import logging
 import secrets
 import string
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Union
 
 from glitch.channels.types import BootstrapState
 from glitch.channels.config_manager import ConfigManager
@@ -26,20 +26,31 @@ class OwnerBootstrap:
     - UNCLAIMED: No owner, waiting for pairing code
     - CLAIMED: Owner set, normal operation
     - LOCKED: Owner has locked configuration
+    
+    Supports both local ConfigManager and DynamoDBConfigManager backends.
     """
     
-    def __init__(self, config_manager: ConfigManager):
+    def __init__(self, config_manager: Union[ConfigManager, "DynamoDBConfigManager"]):
         """Initialize bootstrap system.
         
         Args:
-            config_manager: ConfigManager instance for persisting ownership
+            config_manager: ConfigManager or DynamoDBConfigManager instance
         """
         self.config_manager = config_manager
+        self._uses_dynamodb = hasattr(config_manager, "get_pairing_code") and hasattr(config_manager, "validate_pairing_code")
         self.state = self._determine_state()
         
         # Generate pairing code if unclaimed
         if self.state.status == "unclaimed":
-            self._generate_new_code()
+            if self._uses_dynamodb:
+                # DynamoDB mode: get code from shared storage
+                code = self.config_manager.get_pairing_code()
+                self.state.pairing_code = code
+                self.state.code_expires_at = datetime.utcnow() + timedelta(hours=1)
+            else:
+                # Local mode: generate code locally
+                self._generate_new_code()
+            
             logger.warning(
                 f"╔══════════════════════════════════════════╗\n"
                 f"║ Bot is UNCLAIMED                         ║\n"
@@ -116,23 +127,54 @@ class OwnerBootstrap:
         Returns:
             True if code is valid and ownership claimed, False otherwise
         """
+        code_clean = (code or "").strip().upper()
+        logger.info(
+            "Pairing validate_code entry",
+            extra={
+                "user_id": user_id,
+                "code_len": len(code_clean),
+                "status": self.state.status,
+                "has_pairing_code": bool(self.state.pairing_code),
+                "uses_dynamodb": self._uses_dynamodb,
+            },
+        )
+        
         if self.state.status != "unclaimed":
-            logger.warning(f"Pairing attempt rejected: bot is {self.state.status}")
+            logger.warning(
+                "Pairing reject: status",
+                extra={"reason": "not_unclaimed", "status": self.state.status},
+            )
             return False
-        
+
+        # DynamoDB mode: delegate to config manager for atomic validation
+        if self._uses_dynamodb:
+            if self.config_manager.validate_pairing_code(code_clean, user_id):
+                self.state = BootstrapState(
+                    status="claimed",
+                    owner_id=user_id,
+                    claimed_at=datetime.utcnow(),
+                )
+                logger.info(f"Ownership claimed by Telegram user {user_id} (DynamoDB)")
+                return True
+            return False
+
+        # Local mode: validate locally
         if not self.state.pairing_code:
-            logger.error("No pairing code available")
+            logger.warning("Pairing reject: no pairing code on this instance", extra={"reason": "no_code"})
             return False
-        
+
         # Check expiration
         if self.state.code_expires_at and datetime.utcnow() > self.state.code_expires_at:
-            logger.warning("Pairing code expired, generating new code")
+            logger.warning("Pairing reject: code expired", extra={"reason": "expired"})
             self._generate_new_code()
             return False
-        
+
         # Validate code (case-insensitive)
-        if code.upper() != self.state.pairing_code:
-            logger.warning(f"Invalid pairing code attempt from user {user_id}")
+        if code_clean != self.state.pairing_code:
+            logger.warning(
+                "Pairing reject: code mismatch",
+                extra={"reason": "mismatch", "user_id": user_id},
+            )
             return False
         
         # Claim ownership
@@ -166,6 +208,15 @@ class OwnerBootstrap:
         Returns:
             True if bot is claimed or locked, False if unclaimed
         """
+        # For DynamoDB mode, refresh state from shared storage
+        if self._uses_dynamodb and hasattr(self.config_manager, "is_claimed"):
+            if self.config_manager.is_claimed():
+                if self.state.status == "unclaimed":
+                    # Refresh state from DynamoDB
+                    self.state = self._determine_state()
+                return True
+            return False
+        
         return self.state.status in ("claimed", "locked")
     
     def get_pairing_code(self) -> Optional[str]:
@@ -175,7 +226,11 @@ class OwnerBootstrap:
             Pairing code if unclaimed, None otherwise
         """
         if self.state.status == "unclaimed":
-            # Check expiration
+            # DynamoDB mode: get from shared storage
+            if self._uses_dynamodb:
+                return self.config_manager.get_pairing_code()
+            
+            # Local mode: check expiration
             if self.state.code_expires_at and datetime.utcnow() > self.state.code_expires_at:
                 self._generate_new_code()
             return self.state.pairing_code

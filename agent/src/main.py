@@ -21,6 +21,8 @@ import logging
 import os
 import sys
 import boto3
+import urllib.request
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -33,6 +35,7 @@ from glitch.types import (
 )
 from glitch.channels import (
     ConfigManager,
+    DynamoDBConfigManager,
     OwnerBootstrap,
     TelegramChannel,
 )
@@ -110,6 +113,65 @@ def get_server_config() -> ServerConfig:
     )
 
 
+def register_telegram_webhook(bot_token: str, webhook_url: str, secret_token: str) -> bool:
+    """Register webhook URL with Telegram API.
+    
+    Args:
+        bot_token: Telegram bot token
+        webhook_url: URL for Telegram to send updates to
+        secret_token: Secret token for webhook validation
+        
+    Returns:
+        True if registration succeeded
+    """
+    url = f"https://api.telegram.org/bot{bot_token}/setWebhook"
+    data = json.dumps({
+        "url": webhook_url,
+        "secret_token": secret_token,
+        "allowed_updates": ["message", "edited_message", "callback_query"],
+        "drop_pending_updates": True,
+    }).encode()
+    
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+    )
+    
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            result = json.loads(response.read().decode())
+            if result.get("ok"):
+                logger.info(f"Telegram webhook registered: {webhook_url}")
+                return True
+            else:
+                logger.error(f"Failed to register webhook: {result}")
+                return False
+    except Exception as e:
+        logger.error(f"Error registering webhook: {e}")
+        return False
+
+
+def get_webhook_url() -> Optional[str]:
+    """Resolve webhook URL: env GLITCH_TELEGRAM_WEBHOOK_URL, else Lambda function URL by name.
+    
+    Returns:
+        Webhook URL if found, None otherwise
+    """
+    url = os.getenv("GLITCH_TELEGRAM_WEBHOOK_URL")
+    if url:
+        return url
+    region = os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "us-west-2"))
+    function_name = os.getenv("GLITCH_TELEGRAM_WEBHOOK_FUNCTION_NAME", "glitch-telegram-webhook")
+    try:
+        lambda_client = boto3.client("lambda", region_name=region)
+        resp = lambda_client.get_function_url_config(FunctionName=function_name)
+        return resp.get("FunctionUrl")
+    except Exception as e:
+        logger.warning(f"Failed to get webhook URL from Lambda {function_name}: {e}")
+    return None
+
+
 async def main() -> None:
     """Main execution function.
     
@@ -145,13 +207,32 @@ async def main() -> None:
         try:
             logger.info("Telegram bot token retrieved from Secrets Manager, initializing Telegram channel...")
             
-            # Get config directory (allow override)
-            config_dir = os.getenv("GLITCH_CONFIG_DIR")
-            config_path = Path(config_dir) if config_dir else None
+            # Determine config backend: DynamoDB (webhook mode) or local file (polling mode)
+            use_dynamodb = os.getenv("GLITCH_CONFIG_BACKEND", "dynamodb").lower() == "dynamodb"
+            config_table = os.getenv("GLITCH_CONFIG_TABLE", "glitch-telegram-config")
             
-            # Initialize config manager
-            config_manager = ConfigManager(config_dir=config_path)
-            config = config_manager.load(bot_token=telegram_token)
+            if use_dynamodb:
+                logger.info(f"Using DynamoDB config backend (table: {config_table})")
+                config_manager = DynamoDBConfigManager(table_name=config_table)
+                config = config_manager.load(bot_token=telegram_token)
+                
+                # Register webhook if URL is available
+                webhook_url = get_webhook_url()
+                if webhook_url:
+                    webhook_secret = config_manager.get_webhook_secret()
+                    if register_telegram_webhook(telegram_token, webhook_url, webhook_secret):
+                        config_manager.set_webhook_url(webhook_url)
+                        logger.info("Telegram webhook mode enabled - Lambda handles incoming messages")
+                    else:
+                        logger.warning("Failed to register webhook, falling back to polling")
+                else:
+                    logger.info("No webhook URL configured, using polling mode")
+            else:
+                # Local file config (original behavior)
+                config_dir = os.getenv("GLITCH_CONFIG_DIR")
+                config_path = Path(config_dir) if config_dir else None
+                config_manager = ConfigManager(config_dir=config_path)
+                config = config_manager.load(bot_token=telegram_token)
             
             # Initialize bootstrap system
             bootstrap = OwnerBootstrap(config_manager)
