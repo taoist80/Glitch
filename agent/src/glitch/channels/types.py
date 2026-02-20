@@ -45,6 +45,7 @@ class TelegramConfig:
         require_mention: Whether bot must be @mentioned in groups
         text_chunk_limit: Max message length before chunking
         media_max_mb: Max inbound media size in megabytes
+        include_metrics: Whether to send Strands telemetry summary after each reply
     """
     bot_token: str
     owner_id: Optional[int] = None
@@ -58,6 +59,7 @@ class TelegramConfig:
     require_mention: bool = True
     text_chunk_limit: int = 4000
     media_max_mb: int = 5
+    include_metrics: bool = True
 
 
 @dataclass

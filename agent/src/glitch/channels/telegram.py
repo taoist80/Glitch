@@ -26,6 +26,7 @@ from glitch.channels.types import TelegramConfig, TelegramMediaMessage
 from glitch.channels.bootstrap import OwnerBootstrap
 from glitch.channels.config_manager import ConfigManager
 from glitch.channels.telegram_commands import TelegramCommandHandler
+from glitch.telemetry import invocation_metrics_to_telegram_string
 
 logger = logging.getLogger(__name__)
 
@@ -321,9 +322,18 @@ class TelegramChannel(ChannelAdapter):
                     session_id=session_id,
                 )
                 
-                # Send response
-                if isinstance(response, dict) and "response" in response:
-                    await self.send_message(session_id, response["response"])
+                # Send response (InvocationResponse uses "message" key)
+                if isinstance(response, dict):
+                    text = response.get("message") or response.get("response")
+                    if text is not None:
+                        await self.send_message(session_id, text)
+                        if self.config.include_metrics and response.get("metrics"):
+                            metrics_line = invocation_metrics_to_telegram_string(response["metrics"])
+                            if metrics_line:
+                                await update.message.reply_text(metrics_line)
+                    else:
+                        logger.error("Response dict missing message/key")
+                        await update.message.reply_text("❌ Internal error processing message")
                 elif isinstance(response, str):
                     await self.send_message(session_id, response)
                 else:
@@ -447,9 +457,18 @@ class TelegramChannel(ChannelAdapter):
                     image_data=media.media_data,  # Pass base64 image data
                 )
                 
-                # Send response
-                if isinstance(response, dict) and "response" in response:
-                    await self.send_message(session_id, response["response"])
+                # Send response (InvocationResponse uses "message" key)
+                if isinstance(response, dict):
+                    text = response.get("message") or response.get("response")
+                    if text is not None:
+                        await self.send_message(session_id, text)
+                        if self.config.include_metrics and response.get("metrics"):
+                            metrics_line = invocation_metrics_to_telegram_string(response["metrics"])
+                            if metrics_line:
+                                await update.message.reply_text(metrics_line)
+                    else:
+                        logger.error("Response dict missing message/key")
+                        await update.message.reply_text("❌ Internal error processing image")
                 elif isinstance(response, str):
                     await self.send_message(session_id, response)
                 else:

@@ -1,23 +1,36 @@
 """OpenTelemetry configuration and metrics for Glitch agent.
 
-This module provides a thin wrapper around Strands' built-in telemetry.
-Strands automatically tracks:
-- Token usage (input, output, cache read/write)
-- Event loop cycles and durations
-- Tool call counts, success rates, and durations
-- Model latency
+Thin wrapper around Strands built-in telemetry. Follows official patterns from:
+- Metrics: https://strandsagents.com/latest/documentation/docs/user-guide/observability-evaluation/metrics/
+- API: strands.telemetry.metrics (EventLoopMetrics.get_summary, metrics_to_string)
+- Config: strands.telemetry.config (StrandsTelemetry, setup_meter)
 
-Dataflow:
-    TelemetryConfig -> setup_telemetry() -> StrandsTelemetry
-    AgentResult -> extract_metrics_from_result() -> InvocationMetrics
-    InvocationMetrics -> log_invocation_metrics() -> CloudWatch logs
+Strands tracks: token usage (input/output/cache), cycle count/duration,
+tool_metrics (call_count, success_count, error_count, total_time), latencyMs.
 
-Reference: https://strandsagents.com/latest/documentation/docs/user-guide/observability-evaluation/metrics/
+Telemetry export strategy (hybrid approach per AgentCore best practices):
+1. OTEL/ADOT: Automatic traces/spans via opentelemetry-instrument (set env vars)
+2. CloudWatch Logs: Per-invocation JSON events for detailed history (GLITCH_TELEMETRY_LOG_GROUP)
+3. CloudWatch Metrics: Hourly aggregates for long-term retention (15 months)
+
+CloudWatch Metrics retention:
+- 1-minute resolution: 15 days
+- 5-minute resolution: 63 days
+- 1-hour resolution: 455 days (15 months)
 """
 
+import json
 import os
+import time
 import logging
+from datetime import datetime, timezone
 from typing import Optional, Any, Dict
+
+_DEFAULT_TELEMETRY_LOG_GROUP = "/glitch/telemetry"
+_DEFAULT_METRICS_NAMESPACE = "Glitch/Agent"
+_cloudwatch_sequence_tokens: Dict[str, str] = {}
+_cloudwatch_logs_client: Optional[Any] = None
+_cloudwatch_metrics_client: Optional[Any] = None
 
 from glitch.types import (
     TelemetryConfig,
@@ -32,6 +45,380 @@ from glitch.types import (
 logger = logging.getLogger(__name__)
 
 _telemetry_instance: Optional[Any] = None
+_last_agent_result: Optional[Any] = None
+_telemetry_history: list = []  # list of {"timestamp": float, "metrics": InvocationMetrics}
+_MAX_TELEMETRY_HISTORY = 10_000
+_MAX_HISTORY_AGE_SECONDS = 31 * 24 * 3600  # 31 days
+_telemetry_thresholds: list = []  # list of {"metric": str, "period": str, "limit": float}
+
+# Period lengths in seconds (rolling windows)
+_PERIOD_SECONDS = {"hour": 3600, "day": 86400, "week": 7 * 86400, "month": 30 * 86400}
+
+
+def set_last_agent_result(result: Any) -> None:
+    """Store the last AgentResult for the telemetry tool (last invocation in this process)."""
+    global _last_agent_result
+    _last_agent_result = result
+
+
+def get_last_agent_result() -> Optional[Any]:
+    """Return the last stored AgentResult, or None."""
+    return _last_agent_result
+
+
+def append_telemetry(result: Any) -> None:
+    """Append this invocation's metrics to the telemetry history (bounded by count and age).
+    
+    Also writes to CloudWatch Logs if GLITCH_TELEMETRY_LOG_GROUP is set.
+    """
+    global _telemetry_history
+    now = time.time()
+    metrics = extract_metrics_from_result(result)
+    entry = {"timestamp": now, "metrics": metrics}
+    _telemetry_history.append(entry)
+    if len(_telemetry_history) > _MAX_TELEMETRY_HISTORY:
+        _telemetry_history = _telemetry_history[-_MAX_TELEMETRY_HISTORY:]
+    cutoff = now - _MAX_HISTORY_AGE_SECONDS
+    _telemetry_history = [e for e in _telemetry_history if (e.get("timestamp") or 0) >= cutoff]
+    
+    if os.environ.get("GLITCH_TELEMETRY_LOG_GROUP"):
+        _write_telemetry_to_cloudwatch(entry, event_type="invocation")
+
+
+def get_telemetry_history(limit: int = 50) -> list:
+    """Return the last `limit` telemetry entries (newest first). Each entry is {"timestamp": float, "metrics": InvocationMetrics}."""
+    global _telemetry_history
+    n = min(max(0, limit), len(_telemetry_history))
+    if n == 0:
+        return []
+    return list(reversed(_telemetry_history[-n:]))
+
+
+def _get_usage(metrics: Any, key: str) -> int:
+    """Get a token-usage value from InvocationMetrics."""
+    if not metrics or not isinstance(metrics, dict):
+        return 0
+    usage = metrics.get("token_usage") or {}
+    return int(usage.get(key, 0) or 0)
+
+
+def get_telemetry_for_period(period: str, now_ts: Optional[float] = None) -> list:
+    """Return entries in the rolling window for period. period in ('hour','day','week','month')."""
+    global _telemetry_history
+    now = now_ts if now_ts is not None else time.time()
+    delta = _PERIOD_SECONDS.get(period)
+    if not delta:
+        return []
+    cutoff = now - delta
+    return [e for e in _telemetry_history if (e.get("timestamp") or 0) >= cutoff]
+
+
+def get_running_totals(now_ts: Optional[float] = None) -> dict:
+    """Return aggregates for calendar periods: this_hour, today, this_week, this_month (UTC)."""
+    global _telemetry_history
+    now = now_ts if now_ts is not None else time.time()
+    dt = datetime.fromtimestamp(now, tz=timezone.utc)
+    start_of_hour = dt.replace(minute=0, second=0, microsecond=0).timestamp()
+    start_of_day = dt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    start_of_week = start_of_day - (dt.weekday() * 86400)
+    start_of_month = dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()
+    buckets = {
+        "this_hour": start_of_hour,
+        "today": start_of_day,
+        "this_week": start_of_week,
+        "this_month": start_of_month,
+    }
+    out = {}
+    for name, start in buckets.items():
+        entries = [e for e in _telemetry_history if (e.get("timestamp") or 0) >= start]
+        out[name] = aggregate_metrics(entries)
+    return out
+
+
+def aggregate_metrics(entries: list) -> dict:
+    """Aggregate a list of {timestamp, metrics} into totals. Returns dict with count, input_tokens, output_tokens, total_tokens, duration_seconds, etc."""
+    count = len(entries)
+    input_tokens = output_tokens = total_tokens = cache_read = cache_write = 0
+    duration_seconds = 0.0
+    latency_ms = 0
+    for e in entries:
+        m = e.get("metrics") or {}
+        input_tokens += _get_usage(m, "input_tokens")
+        output_tokens += _get_usage(m, "output_tokens")
+        total_tokens += _get_usage(m, "total_tokens")
+        cache_read += _get_usage(m, "cache_read_tokens")
+        cache_write += _get_usage(m, "cache_write_tokens")
+        duration_seconds += float(m.get("duration_seconds") or 0)
+        latency_ms += int(m.get("latency_ms") or 0)
+    return {
+        "invocation_count": count,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "cache_read_tokens": cache_read,
+        "cache_write_tokens": cache_write,
+        "duration_seconds": round(duration_seconds, 2),
+        "latency_ms_total": latency_ms,
+        "latency_ms_avg": round(latency_ms / count, 0) if count else 0,
+    }
+
+
+def set_telemetry_threshold(metric: str, period: str, limit: float) -> None:
+    """Add a threshold: alert when metric over period exceeds limit. In-memory only."""
+    global _telemetry_thresholds
+    period = period.lower()
+    if period not in _PERIOD_SECONDS and period not in ("this_hour", "today", "this_week", "this_month"):
+        raise ValueError("period must be one of: hour, day, week, month, this_hour, today, this_week, this_month")
+    metric = metric.lower()
+    allowed = ("input_tokens", "output_tokens", "total_tokens", "invocation_count", "duration_seconds")
+    if metric not in allowed:
+        raise ValueError("metric must be one of: %s" % ", ".join(allowed))
+    _telemetry_thresholds.append({"metric": metric, "period": period, "limit": float(limit)})
+
+
+def get_telemetry_thresholds() -> list:
+    """Return list of configured threshold dicts."""
+    return list(_telemetry_thresholds)
+
+
+def clear_telemetry_thresholds() -> None:
+    """Remove all configured thresholds."""
+    global _telemetry_thresholds
+    _telemetry_thresholds = []
+
+
+def check_thresholds(period_aggregates: dict) -> list:
+    """Given a dict of period_name -> aggregate_metrics, check configured thresholds and return list of alert strings."""
+    global _telemetry_thresholds
+    alerts = []
+    for th in _telemetry_thresholds:
+        period = th.get("period")
+        metric = th.get("metric")
+        limit = th.get("limit")
+        agg = period_aggregates.get(period)
+        if not agg:
+            continue
+        value = agg.get(metric)
+        if value is None:
+            continue
+        if value > limit:
+            alerts.append("ALERT: %s for %s is %s (threshold: %s)" % (metric, period, value, limit))
+    return alerts
+
+
+# ---------------------------------------------------------------------------
+# CloudWatch Logs Export (detailed per-invocation history)
+# ---------------------------------------------------------------------------
+
+
+def _get_cloudwatch_logs_client():
+    """Lazy-init boto3 CloudWatch Logs client."""
+    global _cloudwatch_logs_client
+    if _cloudwatch_logs_client is None:
+        try:
+            import boto3
+            _cloudwatch_logs_client = boto3.client("logs")
+        except Exception as e:
+            logger.debug("Failed to create CloudWatch Logs client: %s", e)
+    return _cloudwatch_logs_client
+
+
+def _get_telemetry_log_group() -> str:
+    """Return the CloudWatch Logs log group name from env or default."""
+    return os.environ.get("GLITCH_TELEMETRY_LOG_GROUP", _DEFAULT_TELEMETRY_LOG_GROUP)
+
+
+def _telemetry_log_stream_for_timestamp(ts: float) -> str:
+    """Return a daily log stream name for the given timestamp (UTC date)."""
+    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+    return dt.strftime("%Y/%m/%d")
+
+
+def _ensure_log_stream(log_group: str, log_stream: str) -> bool:
+    """Ensure the log stream exists, creating it if necessary. Returns True on success."""
+    client = _get_cloudwatch_logs_client()
+    if not client:
+        return False
+    try:
+        client.create_log_stream(logGroupName=log_group, logStreamName=log_stream)
+        logger.debug("Created log stream %s/%s", log_group, log_stream)
+    except client.exceptions.ResourceAlreadyExistsException:
+        pass
+    except Exception as e:
+        logger.warning("Failed to create log stream %s/%s: %s", log_group, log_stream, e)
+        return False
+    return True
+
+
+def _write_telemetry_to_cloudwatch(entry: dict, event_type: str = "invocation") -> bool:
+    """
+    Write a telemetry entry to CloudWatch Logs.
+    
+    Args:
+        entry: dict with "timestamp" (float epoch) and "metrics" (InvocationMetrics)
+        event_type: "invocation" or "alert"
+    
+    Returns:
+        True if written successfully, False otherwise
+    """
+    global _cloudwatch_sequence_tokens
+    client = _get_cloudwatch_logs_client()
+    if not client:
+        return False
+    
+    log_group = _get_telemetry_log_group()
+    ts = entry.get("timestamp") or time.time()
+    log_stream = _telemetry_log_stream_for_timestamp(ts)
+    stream_key = f"{log_group}:{log_stream}"
+    
+    log_event = {
+        "timestamp": int(ts * 1000),
+        "message": json.dumps({
+            "event_type": event_type,
+            "timestamp_iso": datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(),
+            "metrics": entry.get("metrics"),
+        }, default=str),
+    }
+    
+    try:
+        kwargs = {
+            "logGroupName": log_group,
+            "logStreamName": log_stream,
+            "logEvents": [log_event],
+        }
+        if stream_key in _cloudwatch_sequence_tokens:
+            kwargs["sequenceToken"] = _cloudwatch_sequence_tokens[stream_key]
+        
+        response = client.put_log_events(**kwargs)
+        _cloudwatch_sequence_tokens[stream_key] = response.get("nextSequenceToken", "")
+        return True
+        
+    except client.exceptions.ResourceNotFoundException:
+        if _ensure_log_stream(log_group, log_stream):
+            try:
+                response = client.put_log_events(
+                    logGroupName=log_group,
+                    logStreamName=log_stream,
+                    logEvents=[log_event],
+                )
+                _cloudwatch_sequence_tokens[stream_key] = response.get("nextSequenceToken", "")
+                return True
+            except Exception as e:
+                logger.warning("Failed to write telemetry after creating stream: %s", e)
+        return False
+        
+    except client.exceptions.InvalidSequenceTokenException as e:
+        expected = getattr(e, "expectedSequenceToken", None)
+        if expected:
+            _cloudwatch_sequence_tokens[stream_key] = expected
+            try:
+                response = client.put_log_events(
+                    logGroupName=log_group,
+                    logStreamName=log_stream,
+                    logEvents=[log_event],
+                    sequenceToken=expected,
+                )
+                _cloudwatch_sequence_tokens[stream_key] = response.get("nextSequenceToken", "")
+                return True
+            except Exception as e2:
+                logger.warning("Failed to write telemetry after token refresh: %s", e2)
+        return False
+        
+    except Exception as e:
+        logger.warning("Failed to write telemetry to CloudWatch Logs: %s", e)
+        return False
+
+
+def write_telemetry_alert_to_cloudwatch(alert_message: str, period: str, metric: str, value: float, limit: float) -> bool:
+    """Write a threshold alert event to CloudWatch Logs."""
+    entry = {
+        "timestamp": time.time(),
+        "metrics": {
+            "alert_message": alert_message,
+            "period": period,
+            "metric": metric,
+            "value": value,
+            "limit": limit,
+        },
+    }
+    return _write_telemetry_to_cloudwatch(entry, event_type="alert")
+
+
+# ---------------------------------------------------------------------------
+# CloudWatch Metrics Export (long-term aggregates, 1-hour resolution)
+# ---------------------------------------------------------------------------
+
+
+def _get_cloudwatch_metrics_client():
+    """Lazy-init boto3 CloudWatch client for metrics."""
+    global _cloudwatch_metrics_client
+    if _cloudwatch_metrics_client is None:
+        try:
+            import boto3
+            _cloudwatch_metrics_client = boto3.client("cloudwatch")
+        except Exception as e:
+            logger.debug("Failed to create CloudWatch Metrics client: %s", e)
+    return _cloudwatch_metrics_client
+
+
+def _get_metrics_namespace() -> str:
+    """Return the CloudWatch Metrics namespace from env or default."""
+    return os.environ.get("GLITCH_METRICS_NAMESPACE", _DEFAULT_METRICS_NAMESPACE)
+
+
+def publish_hourly_metrics_to_cloudwatch(aggregates: dict) -> bool:
+    """
+    Publish hourly aggregate metrics to CloudWatch Metrics for long-term retention.
+    
+    CloudWatch retains 1-hour resolution metrics for 455 days (15 months).
+    Call this once per hour with the aggregated metrics for that hour.
+    
+    Args:
+        aggregates: dict from aggregate_metrics() with invocation_count, input_tokens, etc.
+    
+    Returns:
+        True if published successfully
+    """
+    client = _get_cloudwatch_metrics_client()
+    if not client:
+        return False
+    
+    namespace = _get_metrics_namespace()
+    now = datetime.now(timezone.utc)
+    
+    metric_data = []
+    metric_mappings = [
+        ("InvocationCount", aggregates.get("invocation_count", 0), "Count"),
+        ("InputTokens", aggregates.get("input_tokens", 0), "Count"),
+        ("OutputTokens", aggregates.get("output_tokens", 0), "Count"),
+        ("TotalTokens", aggregates.get("total_tokens", 0), "Count"),
+        ("CacheReadTokens", aggregates.get("cache_read_tokens", 0), "Count"),
+        ("CacheWriteTokens", aggregates.get("cache_write_tokens", 0), "Count"),
+        ("DurationSeconds", aggregates.get("duration_seconds", 0), "Seconds"),
+        ("LatencyMsTotal", aggregates.get("latency_ms_total", 0), "Milliseconds"),
+    ]
+    
+    for metric_name, value, unit in metric_mappings:
+        if value > 0:
+            metric_data.append({
+                "MetricName": metric_name,
+                "Timestamp": now,
+                "Value": float(value),
+                "Unit": unit,
+                "StorageResolution": 3600,
+            })
+    
+    if not metric_data:
+        logger.debug("No metrics to publish (all zero)")
+        return True
+    
+    try:
+        client.put_metric_data(Namespace=namespace, MetricData=metric_data)
+        logger.info("Published %d metrics to CloudWatch namespace %s", len(metric_data), namespace)
+        return True
+    except Exception as e:
+        logger.warning("Failed to publish metrics to CloudWatch: %s", e)
+        return False
 
 
 def setup_telemetry(config: Optional[TelemetryConfig] = None) -> Optional[Any]:
@@ -78,16 +465,14 @@ def setup_telemetry(config: Optional[TelemetryConfig] = None) -> Optional[Any]:
         elif "OTEL_EXPORTER_OTLP_ENDPOINT" not in os.environ:
             os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://localhost:4318"
         
+        # StrandsTelemetry: setup_* return self for chaining (strands.telemetry.config)
         telemetry = StrandsTelemetry()
-        
         if config.enable_otlp:
             telemetry.setup_otlp_exporter()
-            logger.info(f"OTLP exporter enabled: {os.environ.get('OTEL_EXPORTER_OTLP_ENDPOINT')}")
-        
+            logger.info("OTLP exporter enabled: %s", os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"))
         if config.enable_console:
             telemetry.setup_console_exporter()
             logger.info("Console exporter enabled")
-        
         telemetry.setup_meter(
             enable_otlp_exporter=config.enable_otlp,
             enable_console_exporter=config.enable_console,
@@ -114,74 +499,62 @@ def get_telemetry() -> Optional[Any]:
     return _telemetry_instance
 
 
+def _get_usage_value(usage: Any, key: str, default: int = 0) -> int:
+    """Get a value from Strands Usage (TypedDict or dict). Handles both dict and object access."""
+    if usage is None:
+        return default
+    if isinstance(usage, dict):
+        return int(usage.get(key, default) or 0)
+    return int(getattr(usage, key, default) or 0)
+
+
 def extract_metrics_from_result(result: Any) -> InvocationMetrics:
     """
-    Extract metrics from a Strands AgentResult using the built-in get_summary().
-    
-    Strands' EventLoopMetrics.get_summary() returns:
-    {
-        "total_cycles": int,
-        "total_duration": float,
-        "average_cycle_time": float,
-        "tool_usage": {...},
-        "traces": [...],
-        "accumulated_usage": {
-            "inputTokens": int,
-            "outputTokens": int,
-            "totalTokens": int,
-            "cacheReadInputTokens": int (optional),
-            "cacheWriteInputTokens": int (optional)
-        },
-        "accumulated_metrics": {"latencyMs": int},
-        "agent_invocations": [...]
-    }
-    
-    Args:
-        result: AgentResult from Strands agent invocation.
-                Can be None for error cases.
-    
-    Returns:
-        InvocationMetrics with extracted data, or empty metrics if extraction fails
+    Extract metrics from a Strands AgentResult using EventLoopMetrics.get_summary().
+
+    Follows Strands API: result.metrics is EventLoopMetrics; get_summary() returns
+    total_cycles, total_duration, tool_usage (execution_stats), accumulated_usage (Usage),
+    accumulated_metrics (latencyMs). See strands.telemetry.metrics.EventLoopMetrics.
     """
     if result is None:
         return create_empty_metrics()
-    
+
     try:
-        if hasattr(result, 'metrics') and result.metrics:
-            summary = result.metrics.get_summary()
-            
-            usage = summary.get('accumulated_usage', {})
-            acc_metrics = summary.get('accumulated_metrics', {})
-            
-            token_usage: TokenUsage = {
-                "input_tokens": usage.get('inputTokens', 0),
-                "output_tokens": usage.get('outputTokens', 0),
-                "total_tokens": usage.get('totalTokens', 0),
-                "cache_read_tokens": usage.get('cacheReadInputTokens', 0),
-                "cache_write_tokens": usage.get('cacheWriteInputTokens', 0),
-            }
-            
-            tool_usage: Dict[str, ToolUsageStats] = {}
-            for name, data in summary.get('tool_usage', {}).items():
-                exec_stats = data.get('execution_stats', {})
-                tool_usage[name] = ToolUsageStats(
-                    call_count=exec_stats.get('call_count', 0),
-                    success_count=exec_stats.get('success_count', 0),
-                    error_count=exec_stats.get('error_count', 0),
-                    total_time=exec_stats.get('total_time', 0.0),
-                )
-            
-            return InvocationMetrics(
-                duration_seconds=round(summary.get('total_duration', 0), 3),
-                token_usage=token_usage,
-                cycle_count=summary.get('total_cycles', 0),
-                latency_ms=acc_metrics.get('latencyMs', 0),
-                stop_reason=str(result.stop_reason) if hasattr(result, 'stop_reason') else "",
-                tool_usage=tool_usage,
+        if not hasattr(result, "metrics") or not result.metrics:
+            return create_empty_metrics()
+        summary = result.metrics.get_summary()
+        usage = summary.get("accumulated_usage") or {}
+        acc_metrics = summary.get("accumulated_metrics") or {}
+
+        token_usage: TokenUsage = {
+            "input_tokens": _get_usage_value(usage, "inputTokens"),
+            "output_tokens": _get_usage_value(usage, "outputTokens"),
+            "total_tokens": _get_usage_value(usage, "totalTokens"),
+            "cache_read_tokens": _get_usage_value(usage, "cacheReadInputTokens"),
+            "cache_write_tokens": _get_usage_value(usage, "cacheWriteInputTokens"),
+        }
+
+        tool_usage: Dict[str, ToolUsageStats] = {}
+        for name, data in summary.get("tool_usage", {}).items():
+            exec_stats = data.get("execution_stats", {}) if isinstance(data, dict) else {}
+            tool_usage[name] = ToolUsageStats(
+                call_count=exec_stats.get("call_count", 0),
+                success_count=exec_stats.get("success_count", 0),
+                error_count=exec_stats.get("error_count", 0),
+                total_time=float(exec_stats.get("total_time", 0) or 0),
             )
+
+        latency = acc_metrics.get("latencyMs", 0) if isinstance(acc_metrics, dict) else getattr(acc_metrics, "latencyMs", 0)
+        return InvocationMetrics(
+            duration_seconds=round(float(summary.get("total_duration", 0) or 0), 3),
+            token_usage=token_usage,
+            cycle_count=int(summary.get("total_cycles", 0) or 0),
+            latency_ms=int(latency or 0),
+            stop_reason=str(result.stop_reason) if hasattr(result, "stop_reason") else "",
+            tool_usage=tool_usage,
+        )
     except Exception as e:
-        logger.warning(f"Failed to extract metrics from result: {e}")
-    
+        logger.warning("Failed to extract metrics from result: %s", e)
     return create_empty_metrics()
 
 
@@ -216,27 +589,57 @@ def log_invocation_metrics(
         logger.info(f"Tools used: {list(tool_usage.keys())}")
 
 
-def get_metrics_to_string(result: Any) -> str:
+def get_metrics_to_string(result: Any, allowed_names: Optional[set] = None) -> str:
     """
-    Get a human-readable string of metrics using Strands' built-in formatter.
-    
-    Args:
-        result: AgentResult from Strands agent invocation
-    
-    Returns:
-        Formatted string representation of metrics, or empty string if unavailable
+    Human-readable metrics string from Strands EventLoopMetrics.
+
+    Uses strands.telemetry.metrics.metrics_to_string(event_loop_metrics, allowed_names).
     """
     try:
         from strands.telemetry.metrics import metrics_to_string
-        
-        if hasattr(result, 'metrics') and result.metrics:
-            return metrics_to_string(result.metrics)
+
+        if hasattr(result, "metrics") and result.metrics:
+            return metrics_to_string(result.metrics, allowed_names=allowed_names or set())
     except ImportError:
         pass
     except Exception as e:
-        logger.warning(f"Failed to format metrics: {e}")
-    
+        logger.warning("Failed to format metrics: %s", e)
     return ""
+
+
+def invocation_metrics_to_telegram_string(metrics: Optional[InvocationMetrics]) -> str:
+    """
+    Format InvocationMetrics as a short Telegram-friendly line (Strands telemetry summary).
+    
+    Args:
+        metrics: InvocationMetrics from InvocationResponse (or None)
+    
+    Returns:
+        One-line summary e.g. "📊 120 in / 80 out · 1.2s · 2 tools" or empty string
+    """
+    if not metrics:
+        return ""
+    token = metrics.get("token_usage") or {}
+    in_t = token.get("input_tokens", 0)
+    out_t = token.get("output_tokens", 0)
+    cache_r = token.get("cache_read_tokens", 0)
+    cache_w = token.get("cache_write_tokens", 0)
+    duration = metrics.get("duration_seconds", 0)
+    cycles = metrics.get("cycle_count", 0)
+    latency_ms = metrics.get("latency_ms", 0)
+    tool_usage = metrics.get("tool_usage") or {}
+    tool_names = list(tool_usage.keys()) if tool_usage else []
+    parts = [f"📊 {in_t} in / {out_t} out"]
+    if cache_r or cache_w:
+        parts.append(f"cache {cache_r}r/{cache_w}w")
+    parts.append(f"{duration:.1f}s")
+    if latency_ms:
+        parts.append(f"{latency_ms}ms")
+    if cycles and cycles > 1:
+        parts.append(f"{cycles} cycles")
+    if tool_names:
+        parts.append(f"tools: {', '.join(tool_names)}")
+    return " · ".join(parts)
 
 
 def add_span_attributes(attributes: Dict[str, Any]) -> None:

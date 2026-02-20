@@ -2,6 +2,7 @@ import * as cdk from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from 'constructs';
@@ -18,6 +19,8 @@ export class TelegramWebhookStack extends cdk.Stack {
   public readonly webhookUrl: string;
   /** S3 bucket for persistent agent state (e.g. SOUL.md). Set GLITCH_SOUL_S3_BUCKET to this in runtime env. */
   public readonly soulBucket: s3.Bucket;
+  /** CloudWatch Logs log group for telemetry. Set GLITCH_TELEMETRY_LOG_GROUP to this in runtime env. */
+  public readonly telemetryLogGroup: logs.LogGroup;
 
   constructor(scope: Construct, id: string, props: TelegramWebhookStackProps) {
     super(scope, id, props);
@@ -266,6 +269,91 @@ export class TelegramWebhookStack extends cdk.Stack {
         }),
       ]),
     });
+
+    // CloudWatch Logs log group for telemetry (per-invocation JSON events + alerts).
+    // Retention: 30 days for detailed logs; use CloudWatch Metrics for longer retention.
+    this.telemetryLogGroup = new logs.LogGroup(this, 'GlitchTelemetryLogGroup', {
+      logGroupName: '/glitch/telemetry',
+      retention: logs.RetentionDays.ONE_MONTH,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+    new cdk.CfnOutput(this, 'GlitchTelemetryLogGroupName', {
+      value: this.telemetryLogGroup.logGroupName,
+      description: 'CloudWatch Logs group for telemetry; set GLITCH_TELEMETRY_LOG_GROUP to this in runtime env',
+      exportName: 'GlitchTelemetryLogGroupName',
+    });
+
+    // Grant AgentCore runtime role permission to write telemetry to CloudWatch Logs and Metrics.
+    const telemetryPolicyName = 'GlitchTelemetryAccess';
+    const telemetryPolicyDocument = cdk.Fn.sub(
+      JSON.stringify({
+        Version: '2012-10-17',
+        Statement: [
+          {
+            Sid: 'CloudWatchLogsWrite',
+            Effect: 'Allow',
+            Action: [
+              'logs:CreateLogStream',
+              'logs:PutLogEvents',
+              'logs:DescribeLogStreams',
+            ],
+            Resource: ['${LogGroupArn}', '${LogGroupArn}:*'],
+          },
+          {
+            Sid: 'CloudWatchMetricsWrite',
+            Effect: 'Allow',
+            Action: ['cloudwatch:PutMetricData'],
+            Resource: '*',
+            Condition: {
+              StringEquals: {
+                'cloudwatch:namespace': 'Glitch/Agent',
+              },
+            },
+          },
+        ],
+      }),
+      { LogGroupArn: this.telemetryLogGroup.logGroupArn }
+    );
+    new cdk.custom_resources.AwsCustomResource(this, 'AgentCoreTelemetryPolicy', {
+      onCreate: {
+        service: 'IAM',
+        action: 'putRolePolicy',
+        parameters: {
+          RoleName: roleName,
+          PolicyName: telemetryPolicyName,
+          PolicyDocument: telemetryPolicyDocument,
+        },
+        physicalResourceId: cdk.custom_resources.PhysicalResourceId.of(
+          `${roleName}-${telemetryPolicyName}`
+        ),
+      },
+      onUpdate: {
+        service: 'IAM',
+        action: 'putRolePolicy',
+        parameters: {
+          RoleName: roleName,
+          PolicyName: telemetryPolicyName,
+          PolicyDocument: telemetryPolicyDocument,
+        },
+        physicalResourceId: cdk.custom_resources.PhysicalResourceId.of(
+          `${roleName}-${telemetryPolicyName}`
+        ),
+      },
+      onDelete: {
+        service: 'IAM',
+        action: 'deleteRolePolicy',
+        parameters: {
+          RoleName: roleName,
+          PolicyName: telemetryPolicyName,
+        },
+      },
+      policy: cdk.custom_resources.AwsCustomResourcePolicy.fromStatements([
+        new iam.PolicyStatement({
+          actions: ['iam:PutRolePolicy', 'iam:DeleteRolePolicy'],
+          resources: [defaultExecutionRoleArn],
+        }),
+      ]),
+    });
   }
 
   private getLambdaCode(): string {
@@ -419,54 +507,62 @@ def send_telegram_message(chat_id: int, text: str, bot_token: str):
         logger.error(f"Failed to send Telegram message: {e}")
 
 
-def invoke_agent(prompt: str, session_id: str) -> str:
-    """Invoke AgentCore Runtime via signed HTTP request."""
+def metrics_to_telegram_line(metrics):
+    """Format InvocationMetrics as a short Telegram line (Strands telemetry)."""
+    if not metrics or not isinstance(metrics, dict):
+        return None
+    token = metrics.get('token_usage') or {}
+    in_t = token.get('input_tokens', 0)
+    out_t = token.get('output_tokens', 0)
+    cache_r = token.get('cache_read_tokens', 0)
+    cache_w = token.get('cache_write_tokens', 0)
+    duration = metrics.get('duration_seconds', 0)
+    cycles = metrics.get('cycle_count', 0)
+    latency_ms = metrics.get('latency_ms', 0)
+    tool_usage = metrics.get('tool_usage') or {}
+    tool_names = list(tool_usage.keys())
+    parts = [f"📊 {in_t} in / {out_t} out"]
+    if cache_r or cache_w:
+        parts.append(f"cache {cache_r}r/{cache_w}w")
+    parts.append(f"{duration:.1f}s")
+    if latency_ms:
+        parts.append(f"{latency_ms}ms")
+    if cycles and cycles > 1:
+        parts.append(f"{cycles} cycles")
+    if tool_names:
+        parts.append(f"tools: {', '.join(tool_names)}")
+    return " · ".join(parts)
+
+
+def invoke_agent(prompt: str, session_id: str):
+    """Invoke AgentCore Runtime via signed HTTP request. Returns full result dict or error string."""
     if not AGENTCORE_RUNTIME_ARN:
         return "Agent runtime not configured."
     
     import urllib.request
     
     try:
-        # Parse ARN to get region and runtime ID
         arn_parts = parse_runtime_arn(AGENTCORE_RUNTIME_ARN)
         region = arn_parts['region']
-        
-        # Build data plane URL
         endpoint = get_data_plane_endpoint(region)
         encoded_arn = quote(AGENTCORE_RUNTIME_ARN, safe='')
         url = f"{endpoint}/runtimes/{encoded_arn}/invocations"
-        
-        # Prepare request body
         payload = {"prompt": prompt, "session_id": session_id}
         body = json.dumps(payload).encode('utf-8')
-        
-        # Create AWS request for signing
         headers = {
             'Content-Type': 'application/json',
             'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id': session_id,
         }
-        
         aws_request = AWSRequest(method='POST', url=url, data=body, headers=headers)
-        
-        # Sign with SigV4
         credentials = session.get_credentials()
         if credentials:
             SigV4Auth(credentials, 'bedrock-agentcore', region).add_auth(aws_request)
-        
-        # Make the request
         req = urllib.request.Request(
-            url,
-            data=body,
-            headers=dict(aws_request.headers),
-            method='POST'
+            url, data=body, headers=dict(aws_request.headers), method='POST'
         )
-        
         with urllib.request.urlopen(req, timeout=25) as response:
             result = json.loads(response.read().decode())
-            if isinstance(result, dict):
-                return result.get('response', result.get('message', str(result)))
-            return str(result)
-            
+            return result if isinstance(result, dict) else str(result)
     except Exception as e:
         logger.error(f"Failed to invoke agent: {e}", exc_info=True)
         return f"Error: {e}"
@@ -542,8 +638,15 @@ def handler(event, context):
             return {'statusCode': 200, 'body': 'OK'}
     
     session_id = f"telegram-chat-{chat_id}-session-00000000"
-    response_text = invoke_agent(text, session_id)
-    send_telegram_message(chat_id, response_text, bot_token)
+    result = invoke_agent(text, session_id)
+    if isinstance(result, dict):
+        message_text = result.get('message') or result.get('response') or str(result)
+        send_telegram_message(chat_id, message_text, bot_token)
+        metrics_line = metrics_to_telegram_line(result.get('metrics'))
+        if metrics_line:
+            send_telegram_message(chat_id, metrics_line, bot_token)
+    else:
+        send_telegram_message(chat_id, result, bot_token)
     
     return {'statusCode': 200, 'body': 'OK'}
 `;

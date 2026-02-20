@@ -27,9 +27,19 @@ from glitch.tools.network_tools import (
     query_protect_cameras,
 )
 from glitch.tools.soul_tools import load_soul_from_s3, update_soul
+from glitch.tools.telemetry_tools import (
+    telemetry,
+    set_telemetry_threshold,
+    list_telemetry_thresholds,
+)
 from glitch.routing.model_router import ModelRouter
 from glitch.memory.sliding_window import GlitchMemoryManager
-from glitch.telemetry import extract_metrics_from_result, log_invocation_metrics
+from glitch.telemetry import (
+    extract_metrics_from_result,
+    log_invocation_metrics,
+    set_last_agent_result,
+    append_telemetry,
+)
 from glitch.types import (
     AgentConfig,
     InvocationResponse,
@@ -105,6 +115,9 @@ GLITCH_TECHNICAL_CONTEXT = """
 - local_chat: Local Ollama for lightweight tasks (10.10.110.202)
 - check_ollama_health: Verify connectivity to on-prem models
 - update_soul: Update persistent SOUL.md (personality/instructions) when the user asks to change how you behave or remember preferences
+- telemetry: Return Strands telemetry; use period='hour'|'day'|'week'|'month' for rolling totals, running_totals=True for this hour/today/week/month, last_n for history; alerts shown when thresholds are exceeded
+- set_telemetry_threshold: Set alert when a metric (input_tokens, total_tokens, invocation_count, etc.) for a period (hour, day, today, etc.) exceeds a limit
+- list_telemetry_thresholds: List configured telemetry thresholds
 - Network tools: Pi-hole, Unifi, Protect (coming in future iterations)
 
 **Routing Guidelines:**
@@ -176,7 +189,7 @@ class GlitchAgent:
         )
         
         primary_model = self.model_router.get_primary_model("chat")
-        
+        # Strands Agent API: name, system_prompt, model, tools, conversation_manager, trace_attributes
         self.agent = Agent(
             name="glitch",
             system_prompt=build_system_prompt(),
@@ -186,6 +199,9 @@ class GlitchAgent:
                 local_chat,
                 check_ollama_health,
                 update_soul,
+                telemetry,
+                set_telemetry_threshold,
+                list_telemetry_thresholds,
                 query_pihole_stats,
                 check_unifi_network,
                 query_protect_cameras,
@@ -231,7 +247,9 @@ class GlitchAgent:
             enriched_message = f"{user_message}\n\n[Structured Memory:\n{memory_context}]"
             
             result = self.agent(enriched_message)
-            
+            set_last_agent_result(result)
+            append_telemetry(result)
+
             metrics: InvocationMetrics = extract_metrics_from_result(result)
             
             log_invocation_metrics(
