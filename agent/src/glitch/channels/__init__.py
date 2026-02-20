@@ -10,10 +10,8 @@ from glitch.channels.types import (
     TelegramConfig,
     BootstrapState,
     TelegramMediaMessage,
-    OwnerConfig,
-    GlitchConfig,
 )
-from glitch.channels.config_manager import ConfigManager
+from glitch.channels.config_manager import ConfigManager, OwnerConfig, GlitchConfig
 from glitch.channels.bootstrap import OwnerBootstrap
 from glitch.channels.telegram_commands import TelegramCommandHandler
 from glitch.channels.telegram import TelegramChannel
