@@ -1,0 +1,30 @@
+{
+  "id": "glitch-telemetry-maintainer",
+  "version": "1.0.0",
+  "description": "Expert guidance for maintaining and extending the Glitch telemetry system",
+  "triggers": [
+    "telemetry",
+    "metrics",
+    "cloudwatch",
+    "observability",
+    "monitoring",
+    "telemetry system",
+    "add metric",
+    "threshold"
+  ],
+  "tags": [
+    "telemetry",
+    "observability",
+    "infrastructure",
+    "tools"
+  ],
+  "priority": 80,
+  "model_allowlist": null,
+  "model_denylist": ["vision_agent", "tool_agent"],
+  "required_tools": [
+    "telemetry",
+    "set_telemetry_threshold",
+    "add_telemetry_metric"
+  ],
+  "author": "Glitch Team"
+}

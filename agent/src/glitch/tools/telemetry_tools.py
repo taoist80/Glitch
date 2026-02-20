@@ -5,19 +5,33 @@ import json
 import logging
 import time
 from datetime import datetime, timezone
+from typing import List
 
+from pydantic import BaseModel
 from strands import tool
 
+from glitch.types import PeriodAggregates, TelemetryThreshold
+
 from glitch.telemetry import (
+    add_aggregation_period,
     aggregate_metrics,
     check_thresholds,
+    clear_telemetry_thresholds as clear_thresholds_impl,
+    get_aggregation_periods,
     get_last_agent_result,
     get_metrics_to_string,
+    get_registered_custom_metrics,
     get_telemetry_history,
     get_telemetry_for_period,
     get_telemetry_thresholds,
     get_running_totals,
     invocation_metrics_to_telegram_string,
+    publish_custom_metric_to_cloudwatch,
+    record_custom_telemetry_metric,
+    register_custom_telemetry_metric,
+    remove_telemetry_threshold as remove_threshold_impl,
+    set_telemetry_thresholds as set_thresholds_impl,
+    update_telemetry_threshold as update_threshold_impl,
 )
 
 logger = logging.getLogger(__name__)
@@ -27,7 +41,7 @@ def _format_timestamp(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def _format_aggregate(agg: dict, label: str) -> str:
+def _format_aggregate(agg: PeriodAggregates, label: str) -> str:
     lines = [
         "  invocations: %s" % agg.get("invocation_count", 0),
         "  input_tokens: %s" % agg.get("input_tokens", 0),
@@ -35,6 +49,10 @@ def _format_aggregate(agg: dict, label: str) -> str:
         "  total_tokens: %s" % agg.get("total_tokens", 0),
         "  duration_seconds: %s" % agg.get("duration_seconds", 0),
     ]
+    custom = agg.get("custom_metrics")
+    if custom:
+        for k, v in sorted(custom.items()):
+            lines.append("  %s: %s" % (k, v))
     return "%s:\n%s" % (label, "\n".join(lines))
 
 
@@ -175,6 +193,41 @@ def set_telemetry_threshold(metric: str, period: str, limit: float) -> str:
         return "Invalid threshold: %s" % e
 
 
+class _TelemetryThresholdInput(BaseModel):
+    """Input model for set_telemetry_thresholds to avoid Pydantic TypedDict introspection on Python < 3.12."""
+
+    metric: str
+    period: str
+    limit: float
+
+
+@tool
+def set_telemetry_thresholds(thresholds: List[_TelemetryThresholdInput]) -> str:
+    """Set multiple telemetry thresholds at once, replacing any existing thresholds.
+
+    Use when the user wants to define several alerts in one go (e.g. tokens per day and per week).
+
+    Args:
+        thresholds: List of dicts, each with keys: metric, period, limit.
+            metric: one of input_tokens, output_tokens, total_tokens, invocation_count, duration_seconds
+            period: one of hour, day, week, month, this_hour, today, this_week, this_month
+            limit: number; alert when the metric for that period exceeds this value.
+
+    Returns:
+        Confirmation message or error.
+    """
+    try:
+        # Convert Pydantic models to TelemetryThreshold dicts for the implementation
+        as_dicts: List[TelemetryThreshold] = [
+            {"metric": t.metric, "period": t.period, "limit": t.limit} for t in (thresholds or [])
+        ]
+        set_thresholds_impl(as_dicts)
+        n = len(as_dicts)
+        return "Set %d threshold(s). Use list_telemetry_thresholds() to see them." % n
+    except ValueError as e:
+        return "Invalid thresholds: %s" % e
+
+
 @tool
 def list_telemetry_thresholds() -> str:
     """List all configured telemetry thresholds (alert when metric for period exceeds limit)."""
@@ -185,3 +238,172 @@ def list_telemetry_thresholds() -> str:
     for t in ths:
         lines.append("  %s for %s > %s" % (t.get("metric"), t.get("period"), t.get("limit")))
     return "\n".join(lines)
+
+
+@tool
+def remove_telemetry_threshold(metric: str, period: str) -> str:
+    """Remove one telemetry threshold that matches the given metric and period.
+
+    Use when the user wants to stop alerting on a specific metric/period.
+    To remove all thresholds, use clear_telemetry_thresholds().
+
+    Args:
+        metric: Same as set_telemetry_threshold (e.g. total_tokens, invocation_count).
+        period: Same as set_telemetry_threshold (e.g. day, today).
+
+    Returns:
+        Confirmation that the threshold was removed, or that no matching threshold was found.
+    """
+    if remove_threshold_impl(metric, period):
+        return "Removed threshold for %s / %s." % (metric, period)
+    return "No threshold found for metric=%s, period=%s. Use list_telemetry_thresholds() to see current ones." % (
+        metric,
+        period,
+    )
+
+
+@tool
+def clear_telemetry_thresholds() -> str:
+    """Remove all configured telemetry thresholds. Use when the user wants to clear all alerts."""
+    clear_thresholds_impl()
+    return "All telemetry thresholds have been cleared."
+
+
+@tool
+def update_telemetry_threshold(metric: str, period: str, new_limit: float) -> str:
+    """Update an existing telemetry threshold's limit (e.g. change the alert level).
+
+    Use when the user wants to change a threshold without removing and re-adding it.
+
+    Args:
+        metric: Same as set_telemetry_threshold (e.g. total_tokens, invocation_count).
+        period: Same as set_telemetry_threshold (e.g. day, today).
+        new_limit: New limit; alert when the metric for that period exceeds this value.
+
+    Returns:
+        Confirmation that the threshold was updated, or that no matching threshold was found.
+    """
+    if update_threshold_impl(metric, period, new_limit):
+        return "Updated threshold: %s for %s now alerts when > %s." % (metric, period, new_limit)
+    return "No threshold found for metric=%s, period=%s. Use list_telemetry_thresholds() to see current ones." % (
+        metric,
+        period,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Add new telemetry metric / update aggregation / CloudWatch metric
+# ---------------------------------------------------------------------------
+
+
+@tool
+def add_telemetry_metric(name: str, unit: str = "Count") -> str:
+    """Register a new custom telemetry metric. After registering, use record_telemetry_metric(name, value) to record values per invocation.
+
+    Use when the user asks to "add a new telemetry metric". Custom metrics are stored in history and aggregated by period; you can also set thresholds on them.
+
+    Args:
+        name: Short name for the metric (e.g. widgets_sold, api_calls).
+        unit: Unit string (e.g. Count, Seconds, None). Default Count.
+
+    Returns:
+        Confirmation or error.
+    """
+    try:
+        register_custom_telemetry_metric(name, unit)
+        return "Registered custom telemetry metric %r (unit=%s). Use record_telemetry_metric(%r, value) to record values for the current invocation." % (
+            name,
+            unit,
+            name,
+        )
+    except ValueError as e:
+        return "Invalid: %s" % e
+
+
+@tool
+def record_telemetry_metric(name: str, value: float) -> str:
+    """Record a value for a custom telemetry metric for the current invocation. The metric must have been registered with add_telemetry_metric first.
+
+    Use when the user or a tool produces a value to track (e.g. number of API calls, latency). The value is attached to the current turn and included in history and aggregates.
+
+    Args:
+        name: Name registered with add_telemetry_metric.
+        value: Numeric value to record.
+
+    Returns:
+        Confirmation or error.
+    """
+    try:
+        record_custom_telemetry_metric(name, float(value))
+        return "Recorded %s=%s for this invocation." % (name, value)
+    except ValueError as e:
+        return "Error: %s" % e
+
+
+@tool
+def list_telemetry_metrics() -> str:
+    """List registered custom telemetry metrics (name -> unit). Use add_telemetry_metric to register new ones."""
+    metrics = get_registered_custom_metrics()
+    if not metrics:
+        return "No custom metrics registered. Use add_telemetry_metric(name, unit) to add one."
+    lines = ["Custom telemetry metrics:"]
+    for name, unit in sorted(metrics.items()):
+        lines.append("  %s (unit=%s)" % (name, unit))
+    return "\n".join(lines)
+
+
+@tool
+def update_telemetry_aggregation(period_name: str, period_seconds: int) -> str:
+    """Add or update a rolling telemetry aggregation period. Enables querying aggregates for that period (e.g. telemetry(period='quarter')).
+
+    Use when the user asks to "update telemetry aggregation" or add a new time window (e.g. quarter = 90 days).
+
+    Args:
+        period_name: Name for the period (e.g. quarter, fortnight).
+        period_seconds: Length of the period in seconds (e.g. 90*86400 for 90 days).
+
+    Returns:
+        Confirmation or error.
+    """
+    try:
+        add_aggregation_period(period_name, period_seconds)
+        return "Aggregation period %r set to %s seconds. You can now use telemetry(period=%r) for rolling totals." % (
+            period_name,
+            period_seconds,
+            period_name,
+        )
+    except ValueError as e:
+        return "Invalid: %s" % e
+
+
+@tool
+def list_aggregation_periods() -> str:
+    """List current telemetry aggregation periods (rolling windows) and their lengths in seconds."""
+    periods = get_aggregation_periods()
+    lines = ["Aggregation periods (rolling windows):"]
+    for name, secs in sorted(periods.items(), key=lambda x: -x[1]):
+        lines.append("  %s: %s seconds" % (name, secs))
+    return "\n".join(lines)
+
+
+@tool
+def create_cloudwatch_metric(metric_name: str, value: float, unit: str = "Count") -> str:
+    """Publish a single metric to CloudWatch Metrics. Use when the user asks to "create a CloudWatch metric for X".
+
+    The metric appears in the Glitch/Agent namespace (or GLITCH_METRICS_NAMESPACE). Good for one-off or periodic custom metrics.
+
+    Args:
+        metric_name: Name for the metric (alphanumeric and underscore; will be sanitized).
+        value: Numeric value to publish.
+        unit: Unit (e.g. Count, Seconds, Milliseconds). Default Count.
+
+    Returns:
+        Confirmation or error.
+    """
+    if publish_custom_metric_to_cloudwatch(metric_name, value, unit):
+        return "Published CloudWatch metric %s=%s (unit=%s). Check GLITCH_METRICS_NAMESPACE (default Glitch/Agent) in CloudWatch." % (
+            metric_name,
+            value,
+            unit,
+        )
+    return "Failed to publish metric to CloudWatch (check logs and IAM permissions)."

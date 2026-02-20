@@ -88,4 +88,10 @@ def update_soul(contents: str) -> str:
             "SOUL.md updated successfully in S3. New sessions (e.g. next Telegram chat or "
             "restart) will load the new personality; this session continues with the previous prompt."
         )
-    return "SOUL update failed (S3 not configured or write error). Check logs."
+    bucket, _ = get_soul_s3_config()
+    if not bucket:
+        return (
+            "SOUL update skipped: S3 is not configured. Set GLITCH_SOUL_S3_BUCKET (and optional "
+            "GLITCH_SOUL_S3_KEY) to persist SOUL changes. Until then, edits apply only to this session."
+        )
+    return "SOUL update failed (S3 write error). Check logs and bucket permissions."

@@ -1,0 +1,33 @@
+# MCP Server Configuration
+#
+# Define external MCP servers that Glitch can connect to for additional tools.
+# Environment variables can be referenced using ${VAR_NAME} syntax.
+
+mcp_servers:
+  unifi:
+    enabled: true
+    transport: stdio
+    command: npx
+    args:
+      - -y
+      - unifi-mcp-server
+    env:
+      # API key from UniFi Site Manager (https://account.ui.com/api-keys)
+      UNIFI_API_KEY: ${UNIFI_API_KEY}
+      # API type: 'cloud' for UniFi Site Manager, 'local' for on-premises controller
+      UNIFI_API_TYPE: ${UNIFI_API_TYPE}
+      # For local mode only: gateway IP address (e.g., 192.168.1.1)
+      # UNIFI_LOCAL_HOST: ${UNIFI_LOCAL_HOST}
+    prefix: unifi
+    tool_filters:
+      allowed: []  # Empty list = all tools allowed
+      rejected: []  # List of tool names to exclude
+
+  # Example: Add more MCP servers here
+  # aws-docs:
+  #   enabled: false
+  #   transport: stdio
+  #   command: uvx
+  #   args:
+  #     - awslabs.aws-documentation-mcp-server@latest
+  #   prefix: aws_docs

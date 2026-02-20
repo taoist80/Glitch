@@ -22,6 +22,7 @@ class TelegramCommandHandler:
         config_manager: ConfigManager,
         bootstrap: OwnerBootstrap,
         agent: Optional[any] = None,
+        poet_agent: Optional[any] = None,
     ):
         """Initialize command handler.
         
@@ -29,10 +30,12 @@ class TelegramCommandHandler:
             config_manager: ConfigManager instance
             bootstrap: OwnerBootstrap instance
             agent: GlitchAgent instance (optional, for agent commands)
+            poet_agent: PoetAgent instance (optional; when set, help shows /poet and /glitch)
         """
         self.config_manager = config_manager
         self.bootstrap = bootstrap
         self.agent = agent
+        self.poet_agent = poet_agent
     
     async def handle_config(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /config commands - owner only.
@@ -335,6 +338,11 @@ class TelegramCommandHandler:
             "• /status - Show bot status\n"
             "• /help - Show this message\n"
         )
+        if self.poet_agent:
+            msg += (
+                "• /poet - Switch to Poet (creative writing); optional: /poet &lt;prompt&gt;\n"
+                "• /glitch - Switch back to Glitch\n"
+            )
         
         # Owner commands
         if is_owner:

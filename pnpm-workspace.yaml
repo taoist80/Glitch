@@ -1,6 +1,7 @@
 packages:
   - 'infrastructure'
   - 'agent'
+  - 'ui'
 
 catalog:
   # CDK Dependencies

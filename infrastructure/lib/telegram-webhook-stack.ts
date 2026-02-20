@@ -44,7 +44,7 @@ export class TelegramWebhookStack extends cdk.Stack {
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'index.handler',
       code: lambda.Code.fromInline(this.getLambdaCode()),
-      timeout: cdk.Duration.seconds(30),
+      timeout: cdk.Duration.seconds(120),
       memorySize: 256,
       environment: {
         CONFIG_TABLE_NAME: this.configTable.tableName,
@@ -425,15 +425,134 @@ def get_webhook_secret():
     return new_secret
 
 
+def _int_or(v, default=None):
+    """Coerce to int (handles DynamoDB Decimal and str)."""
+    if v is None:
+        return default
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
 def get_config():
     """Get current config from DynamoDB."""
     try:
         response = table.get_item(Key={'pk': 'CONFIG', 'sk': 'main'})
         if 'Item' in response:
-            return response['Item']
+            item = response['Item']
+            if 'owner_id' in item:
+                item = {**item, 'owner_id': _int_or(item['owner_id'], item['owner_id'])}
+            return item
     except Exception as e:
         logger.error(f"Failed to get config: {e}")
     return None
+
+
+_bot_info_cache = {}
+
+
+def get_bot_info(bot_token: str) -> dict:
+    """Get bot username and id from Telegram getMe. Cached per cold start."""
+    if bot_token in _bot_info_cache:
+        return _bot_info_cache[bot_token]
+    import urllib.request
+    url = f"https://api.telegram.org/bot{bot_token}/getMe"
+    try:
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            data = json.loads(resp.read().decode())
+            if data.get('ok') and data.get('result'):
+                r = data['result']
+                _bot_info_cache[bot_token] = {'username': (r.get('username') or '').lower(), 'id': r.get('id')}
+                return _bot_info_cache[bot_token]
+    except Exception as e:
+        logger.warning(f"getMe failed: {e}")
+    _bot_info_cache[bot_token] = {'username': '', 'id': None}
+    return _bot_info_cache[bot_token]
+
+
+def is_group_chat(chat: dict) -> bool:
+    """True if chat is a group or supergroup (mention required)."""
+    return (chat or {}).get('type') in ('group', 'supergroup')
+
+
+def is_private_chat(chat: dict) -> bool:
+    """True if chat is a private DM."""
+    return (chat or {}).get('type') == 'private'
+
+
+def is_bot_mentioned(message: dict, bot_username: str, bot_id) -> bool:
+    """True if message explicitly mentions the bot via @username or text_mention."""
+    if not bot_username and bot_id is None:
+        return False
+    text = (message or {}).get('text') or ''
+    entities = (message or {}).get('entities') or []
+    for e in entities:
+        if e.get('type') == 'mention':
+            mention = text[e['offset']:e['offset'] + e['length']].lstrip('@').lower()
+            if mention == bot_username:
+                return True
+        if e.get('type') == 'text_mention':
+            if e.get('user', {}).get('id') == bot_id:
+                return True
+    return False
+
+
+def strip_bot_mention_from_text(message: dict, bot_username: str, bot_id) -> str:
+    """Remove the bot mention from message text so the agent receives clean input."""
+    text = (message or {}).get('text') or ''
+    entities = (message or {}).get('entities') or []
+    for e in sorted(entities, key=lambda x: -x.get('offset', 0)):
+        if e.get('type') == 'mention':
+            mention = text[e['offset']:e['offset'] + e['length']].lstrip('@').lower()
+            if mention == bot_username:
+                before = text[:e['offset']].strip()
+                after = text[e['offset'] + e['length']:].strip()
+                return ' '.join([before, after]).strip() or ''
+        if e.get('type') == 'text_mention' and e.get('user', {}).get('id') == bot_id:
+            before = text[:e['offset']].strip()
+            after = text[e['offset'] + e['length']:].strip()
+            return ' '.join([before, after]).strip() or ''
+    return text.strip()
+
+
+def is_user_allowed_dm(user_id, config: dict) -> bool:
+    """True if user is owner or explicitly allowed to DM."""
+    if not config:
+        return False
+    owner_id = _int_or(config.get('owner_id'))
+    if owner_id is not None and owner_id == _int_or(user_id):
+        return True
+    try:
+        response = table.get_item(Key={'pk': 'CONFIG', 'sk': f"allowed_dm#{user_id}"})
+        return 'Item' in response
+    except Exception:
+        return False
+
+
+def allow_dm(user_id: int) -> None:
+    """Grant a user permission to DM the bot (owner only)."""
+    table.put_item(Item={'pk': 'CONFIG', 'sk': f"allowed_dm#{user_id}", 'user_id': user_id})
+    logger.info(f"Allowed DM for user {user_id}")
+
+
+def revoke_dm(user_id: int) -> None:
+    """Revoke a user's permission to DM the bot (owner only)."""
+    table.delete_item(Key={'pk': 'CONFIG', 'sk': f"allowed_dm#{user_id}"})
+    logger.info(f"Revoked DM for user {user_id}")
+
+
+def list_allowed_dm_user_ids() -> list:
+    """Return list of user_ids who are allowed to DM (excluding owner)."""
+    try:
+        response = table.query(
+            KeyConditionExpression='pk = :pk AND begins_with(sk, :sk)',
+            ExpressionAttributeValues={':pk': 'CONFIG', ':sk': 'allowed_dm#'}
+        )
+        return [int(item['user_id']) for item in response.get('Items', []) if item.get('user_id')]
+    except Exception as e:
+        logger.warning(f"list_allowed_dm failed: {e}")
+        return []
 
 
 def set_owner(user_id: int):
@@ -537,8 +656,11 @@ def metrics_to_telegram_line(metrics):
 def invoke_agent(prompt: str, session_id: str):
     """Invoke AgentCore Runtime via signed HTTP request. Returns full result dict or error string."""
     if not AGENTCORE_RUNTIME_ARN:
+        logger.warning("AGENTCORE_RUNTIME_ARN not set; agent runtime not configured")
         return "Agent runtime not configured."
     
+    arn_preview = (AGENTCORE_RUNTIME_ARN or "")[:70] + ("..." if len(AGENTCORE_RUNTIME_ARN or "") > 70 else "")
+    logger.info("Invoking agent: runtime_arn=%s prompt_len=%d session_id=%s", arn_preview, len(prompt or ""), session_id)
     import urllib.request
     
     try:
@@ -560,8 +682,9 @@ def invoke_agent(prompt: str, session_id: str):
         req = urllib.request.Request(
             url, data=body, headers=dict(aws_request.headers), method='POST'
         )
-        with urllib.request.urlopen(req, timeout=25) as response:
+        with urllib.request.urlopen(req, timeout=90) as response:
             result = json.loads(response.read().decode())
+            logger.info("Invoke agent success: has_message=%s", bool(isinstance(result, dict) and result.get('message')))
             return result if isinstance(result, dict) else str(result)
     except Exception as e:
         logger.error(f"Failed to invoke agent: {e}", exc_info=True)
@@ -569,7 +692,7 @@ def invoke_agent(prompt: str, session_id: str):
 
 
 def handler(event, context):
-    """Lambda handler for Telegram webhook."""
+    """Lambda handler for Telegram webhook. Always returns 200 to acknowledge receipt."""
     logger.info(f"Received event: {json.dumps(event)[:500]}")
     
     try:
@@ -589,26 +712,35 @@ def handler(event, context):
         logger.warning("Invalid webhook secret")
         return {'statusCode': 403, 'body': 'Forbidden'}
     
-    bot_token = get_bot_token()
+    try:
+        bot_token = get_bot_token()
+    except Exception as e:
+        logger.error(f"Failed to get bot token: {e}", exc_info=True)
+        return {'statusCode': 200, 'body': 'OK'}
     
     message = body.get('message', {})
     if not message:
         return {'statusCode': 200, 'body': 'OK'}
     
     chat_id = message.get('chat', {}).get('id')
-    user_id = message.get('from', {}).get('id')
-    text = message.get('text', '')
+    user_id = _int_or(message.get('from', {}).get('id'))
+    text = (message.get('text') or '').strip()
     
     if not chat_id or not text:
         return {'statusCode': 200, 'body': 'OK'}
     
     logger.info(f"Message from user {user_id} in chat {chat_id}: {text[:100]}")
     
-    config = get_config()
+    try:
+        config = get_config()
+    except Exception as e:
+        logger.error(f"Failed to get config: {e}", exc_info=True)
+        return {'statusCode': 200, 'body': 'OK'}
+    
     is_claimed = config and config.get('status') in ('claimed', 'locked')
     
     if not is_claimed:
-        if validate_pairing_code(text.strip(), user_id):
+        if validate_pairing_code(text, user_id):
             send_telegram_message(
                 chat_id,
                 "✅ You are now the owner of this Glitch instance!\\n\\nUse /help to see available commands.",
@@ -624,29 +756,92 @@ def handler(event, context):
     
     if text.startswith('/'):
         cmd = text.split()[0].lower()
+        owner_id = _int_or(config.get('owner_id'))
+        is_owner = (user_id is not None and owner_id is not None and user_id == owner_id)
         if cmd == '/help' or cmd == '/start':
             help_text = "🤖 *Glitch Bot Commands*\\n\\n"
             help_text += "• /new - Start new conversation\\n"
             help_text += "• /status - Show bot status\\n"
             help_text += "• /help - Show this message"
+            if is_owner:
+                help_text += "\\n• /allow <user_id> - Allow user to DM (owner)\\n"
+                help_text += "• /revoke <user_id> - Revoke DM access (owner)\\n"
+                help_text += "• /allowed - List users allowed to DM (owner)"
             send_telegram_message(chat_id, help_text, bot_token)
             return {'statusCode': 200, 'body': 'OK'}
         elif cmd == '/status':
-            owner_id = config.get('owner_id', 'Unknown')
             status_text = f"📊 *Bot Status*\\n\\nOwner: \`{owner_id}\`\\nStatus: {config.get('status', 'unknown')}"
             send_telegram_message(chat_id, status_text, bot_token)
             return {'statusCode': 200, 'body': 'OK'}
+        elif cmd == '/allow' and is_owner:
+            parts = text.split()
+            target_id = None
+            if len(parts) >= 2 and parts[1].isdigit():
+                target_id = int(parts[1])
+            reply = message.get('reply_to_message')
+            if reply and reply.get('from'):
+                target_id = reply['from'].get('id')
+            if target_id is not None:
+                allow_dm(target_id)
+                send_telegram_message(chat_id, f"✅ User \`{target_id}\` can now DM the bot.", bot_token)
+            else:
+                send_telegram_message(chat_id, "Usage: /allow <user_id> or reply to a user and send /allow", bot_token)
+            return {'statusCode': 200, 'body': 'OK'}
+        elif cmd == '/revoke' and is_owner:
+            parts = text.split()
+            target_id = None
+            if len(parts) >= 2 and parts[1].isdigit():
+                target_id = int(parts[1])
+            reply = message.get('reply_to_message')
+            if reply and reply.get('from'):
+                target_id = reply['from'].get('id')
+            if target_id is not None:
+                revoke_dm(target_id)
+                send_telegram_message(chat_id, f"Revoked DM access for user \`{target_id}\`.", bot_token)
+            else:
+                send_telegram_message(chat_id, "Usage: /revoke <user_id> or reply to a user and send /revoke", bot_token)
+            return {'statusCode': 200, 'body': 'OK'}
+        elif cmd == '/allowed' and is_owner:
+            allowed = list_allowed_dm_user_ids()
+            if not allowed:
+                send_telegram_message(chat_id, "No additional users allowed to DM (only owner).", bot_token)
+            else:
+                send_telegram_message(chat_id, "Users allowed to DM: " + ", ".join(str(u) for u in allowed), bot_token)
+            return {'statusCode': 200, 'body': 'OK'}
     
-    session_id = f"telegram-chat-{chat_id}-session-00000000"
-    result = invoke_agent(text, session_id)
-    if isinstance(result, dict):
-        message_text = result.get('message') or result.get('response') or str(result)
-        send_telegram_message(chat_id, message_text, bot_token)
-        metrics_line = metrics_to_telegram_line(result.get('metrics'))
-        if metrics_line:
-            send_telegram_message(chat_id, metrics_line, bot_token)
-    else:
-        send_telegram_message(chat_id, result, bot_token)
+    chat = message.get('chat', {})
+    if is_group_chat(chat):
+        bot_info = get_bot_info(bot_token)
+        if not is_bot_mentioned(message, bot_info.get('username'), bot_info.get('id')):
+            logger.info("Group message ignored: bot not @mentioned (mention @%s to get a reply)", bot_info.get('username') or "bot")
+            return {'statusCode': 200, 'body': 'OK'}
+        text = strip_bot_mention_from_text(message, bot_info.get('username'), bot_info.get('id'))
+        if not text:
+            logger.info("Group message ignored: text empty after stripping mention")
+            return {'statusCode': 200, 'body': 'OK'}
+    elif is_private_chat(chat):
+        if not is_user_allowed_dm(user_id, config):
+            send_telegram_message(
+                chat_id,
+                "You are not authorized to DM this bot. Only the owner and users granted access can message here.",
+                bot_token
+            )
+            return {'statusCode': 200, 'body': 'OK'}
+    
+    try:
+        session_id = f"telegram-chat-{chat_id}-session-00000000"
+        result = invoke_agent(text, session_id)
+        if isinstance(result, dict):
+            message_text = result.get('message') or result.get('response') or str(result)
+            send_telegram_message(chat_id, message_text, bot_token)
+        else:
+            send_telegram_message(chat_id, result, bot_token)
+    except Exception as e:
+        logger.error(f"Error processing message: {e}", exc_info=True)
+        try:
+            send_telegram_message(chat_id, "Sorry, something went wrong. Please try again.", bot_token)
+        except Exception:
+            pass
     
     return {'statusCode': 200, 'body': 'OK'}
 `;

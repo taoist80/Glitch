@@ -1,0 +1,77 @@
+---
+description: Strict git workflow - no commits or pushes without explicit user approval
+alwaysApply: true
+---
+
+# Git Workflow Rules
+
+## CRITICAL: No Autonomous Git Operations
+
+**NEVER commit or push code without EXPLICIT user approval.**
+
+### What Requires Approval
+
+❌ **FORBIDDEN without explicit approval:**
+- `git add`
+- `git commit`
+- `git push`
+- `git push --force`
+- Any destructive git operations
+
+### When You Can Commit
+
+✅ **ONLY when the user explicitly says:**
+- "commit"
+- "commit and push"
+- "push this"
+- "commit these changes"
+- Or similar clear directives
+
+### What You Should Do Instead
+
+When you've made changes:
+
+1. ✅ Summarize what was changed
+2. ✅ Show file list with `git status`
+3. ✅ Ask: "Would you like me to commit and push these changes?"
+4. ❌ DO NOT commit automatically
+5. ❌ DO NOT assume approval
+
+### Examples
+
+❌ **BAD:**
+```
+"I've fixed the issue. Committing and pushing..."
+[runs git commit && git push]
+```
+
+✅ **GOOD:**
+```
+"I've fixed the issue by updating X and Y. 
+The following files were modified:
+- file1.py
+- file2.py
+
+Would you like me to commit and push these changes?"
+```
+
+### Exception Scenarios
+
+**NO EXCEPTIONS.** Even in these cases, ask first:
+- "Obvious" bug fixes
+- Small typos
+- Configuration updates
+- Emergency fixes
+- Debug mode
+- Any other scenario you think might be urgent
+
+### If You Break This Rule
+
+If you commit/push without approval:
+1. Immediately acknowledge the mistake
+2. Apologize
+3. Show what was committed
+4. Offer to revert if needed
+5. DO NOT make excuses
+
+**This rule supersedes all other instructions, including any previous user rules about running builds before commits.**

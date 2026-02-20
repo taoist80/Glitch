@@ -207,7 +207,7 @@ async def _check_single_host(name: str, host: str, config: OllamaConfig) -> Heal
     """
     try:
         endpoint = f"http://{host}:{config.port}/api/tags"
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=3.0) as client:  # Reduced from 10s to 3s for faster failure
             response = await client.get(endpoint)
             if response.status_code == 200:
                 data: OllamaTagsResponse = response.json()
@@ -239,18 +239,23 @@ async def _check_single_host(name: str, host: str, config: OllamaConfig) -> Heal
 async def check_ollama_health() -> str:
     """Check connectivity and health status of Ollama hosts.
     
+    Runs health checks in parallel for faster results.
+    
     Dataflow:
         () -> [Chat Host, Vision Host] -> HealthCheckResult[] -> Status String
     
     Returns:
         Status report of both Ollama endpoints
     """
+    import asyncio
+    
     config = DEFAULT_CONFIG
     
-    results: List[HealthCheckResult] = []
-    
-    for name, host in [("Chat", config.chat_host), ("Vision", config.vision_host)]:
-        result = await _check_single_host(name, host, config)
-        results.append(result)
+    # Run checks in parallel for faster results (3s max instead of 6s sequential)
+    tasks = [
+        _check_single_host("Chat", config.chat_host, config),
+        _check_single_host("Vision", config.vision_host, config),
+    ]
+    results = await asyncio.gather(*tasks)
     
     return "\n".join(r.to_string() for r in results)

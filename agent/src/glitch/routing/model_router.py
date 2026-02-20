@@ -160,6 +160,15 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         max_context_tokens=8192,
         cost_per_million_tokens=0.0,
     ),
+    "poet": ModelConfig(
+        name="poet",
+        model_id="us.anthropic.claude-sonnet-4-5-20250514-v1:0",
+        tier=CognitiveTier.TIER_2,
+        supports_vision=False,
+        supports_tools=False,
+        max_context_tokens=200000,
+        cost_per_million_tokens=5.0,
+    ),
 }
 
 

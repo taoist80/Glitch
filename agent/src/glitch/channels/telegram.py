@@ -9,7 +9,7 @@ import base64
 import logging
 import io
 import os
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from telegram import Update, Bot
 from telegram.error import Conflict
@@ -22,11 +22,11 @@ from telegram.ext import (
 )
 
 from glitch.channels.base import ChannelAdapter
-from glitch.channels.types import TelegramConfig, TelegramMediaMessage
+from glitch.channels.types import AccessContext, TelegramConfig, TelegramMediaMessage
+from glitch.channels.bot_policy import check_access
 from glitch.channels.bootstrap import OwnerBootstrap
 from glitch.channels.config_manager import ConfigManager
 from glitch.channels.telegram_commands import TelegramCommandHandler
-from glitch.telemetry import invocation_metrics_to_telegram_string
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,8 @@ class TelegramChannel(ChannelAdapter):
         self,
         config_manager: ConfigManager,
         bootstrap: OwnerBootstrap,
-        agent: Optional[any] = None,
+        agent: Optional[Any] = None,
+        poet_agent: Optional[Any] = None,
     ):
         """Initialize Telegram channel.
         
@@ -55,20 +56,24 @@ class TelegramChannel(ChannelAdapter):
             config_manager: ConfigManager instance
             bootstrap: OwnerBootstrap instance
             agent: GlitchAgent instance (optional)
+            poet_agent: PoetAgent instance (optional); when set, /poet and /glitch enable routing
         """
         self.config_manager = config_manager
         self.bootstrap = bootstrap
         self.agent = agent
+        self.poet_agent = poet_agent
+        self._session_agent: Dict[str, str] = {}  # session_id -> "glitch" | "poet"
         self.config = config_manager.config.telegram
         
         if not self.config or not self.config.bot_token:
             raise ValueError("Telegram bot token not configured")
         
-        # Initialize command handler
+        # Initialize command handler (pass poet_agent so help lists /poet and /glitch)
         self.command_handler = TelegramCommandHandler(
             config_manager=config_manager,
             bootstrap=bootstrap,
             agent=agent,
+            poet_agent=poet_agent,
         )
         
         # Initialize application
@@ -79,6 +84,47 @@ class TelegramChannel(ChannelAdapter):
         
         logger.info(f"Telegram channel initialized (mode: {self.config.mode})")
     
+    def _get_agent(self, session_id: str) -> Optional[Any]:
+        """Return the agent to use for this session (Glitch or Poet)."""
+        if self.poet_agent is None:
+            return self.agent
+        current = self._session_agent.get(session_id, "glitch")
+        return self.poet_agent if current == "poet" else self.agent
+
+    async def _handle_poet_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /poet — switch to Poet or run Poet with optional prompt."""
+        if not await self._check_access(update):
+            return
+        session_id = self.get_session_id(update)
+        if context.args:
+            prompt = " ".join(context.args)
+            if self.poet_agent:
+                try:
+                    response = await self.poet_agent.process_message(prompt)
+                    text = response.get("message") if isinstance(response, dict) else str(response)
+                    if text:
+                        await self.send_message(session_id, text)
+                    else:
+                        await update.message.reply_text("❌ Poet had no response.")
+                except Exception as e:
+                    logger.error("Poet command error: %s", e, exc_info=True)
+                    await update.message.reply_text(f"❌ Error: {e}")
+            else:
+                await update.message.reply_text("❌ Poet is not configured.")
+        else:
+            self._session_agent[session_id] = "poet"
+            await update.message.reply_text(
+                "Poet here. Send me a theme, a line, or a mood and I'll write for you. Use /glitch to switch back."
+            )
+
+    async def _handle_glitch_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /glitch — switch back to Glitch."""
+        if not await self._check_access(update):
+            return
+        session_id = self.get_session_id(update)
+        self._session_agent[session_id] = "glitch"
+        await update.message.reply_text("Switched back to Glitch.")
+
     def _register_handlers(self) -> None:
         """Register message and command handlers."""
         # Command handlers
@@ -87,6 +133,9 @@ class TelegramChannel(ChannelAdapter):
         self.application.add_handler(CommandHandler("help", self.command_handler.handle_help))
         self.application.add_handler(CommandHandler("start", self.command_handler.handle_help))
         self.application.add_handler(CommandHandler("new", self.command_handler.handle_new))
+        if self.poet_agent is not None:
+            self.application.add_handler(CommandHandler("poet", self._handle_poet_command))
+            self.application.add_handler(CommandHandler("glitch", self._handle_glitch_command))
         
         # Message handlers
         self.application.add_handler(
@@ -132,22 +181,18 @@ class TelegramChannel(ChannelAdapter):
                     await self.application.updater.stop()
                     return
             else:
-                # Webhook mode: either this process serves the webhook, or an external endpoint (e.g. Lambda) does
+                # Webhook mode: we always use an external webhook (e.g. Lambda). This process does not
+                # run a local webhook server; Telegram sends updates to the configured URL.
                 if not self.config.webhook_url:
                     logger.info(
-                        "Telegram webhook mode but no webhook_url set; Lambda or external endpoint will receive updates. "
-                        "Skipping local webhook server."
+                        "Telegram webhook mode but no webhook_url set; external endpoint will receive updates."
                     )
-                    return
-
-                logger.info(f"Starting Telegram bot in webhook mode: {self.config.webhook_url}")
-                await self.application.updater.start_webhook(
-                    listen="0.0.0.0",
-                    port=8443,
-                    url_path=self.config.bot_token,
-                    webhook_url=self.config.webhook_url,
-                    secret_token=self.config.webhook_secret,
-                )
+                else:
+                    logger.info(
+                        "Webhook mode: updates will be received by external endpoint: %s",
+                        self.config.webhook_url,
+                    )
+                return
 
             logger.info("Telegram bot started successfully")
         except Exception as e:
@@ -155,21 +200,31 @@ class TelegramChannel(ChannelAdapter):
             raise
     
     async def stop(self) -> None:
-        """Stop the Telegram bot gracefully."""
+        """Stop the Telegram bot gracefully.
+        In webhook mode the updater is never started; only polling mode starts it.
+        We never call updater.stop() in webhook mode and swallow 'not running' so
+        shutdown does not mask the real error (e.g. missing fastapi).
+        """
         try:
             logger.info("Stopping Telegram bot")
-            
             if self.config.mode == "polling":
-                await self.application.updater.stop()
+                try:
+                    await self.application.updater.stop()
+                except RuntimeError as e:
+                    if "not running" not in str(e).lower():
+                        raise
+                    logger.debug("Updater was not running, skipping updater.stop()")
             else:
-                await self.application.updater.stop()
-            
-            await self.application.stop()
-            await self.application.shutdown()
-            
+                # Webhook mode: updater was never started; do not call updater.stop().
+                pass
+            try:
+                await self.application.stop()
+                await self.application.shutdown()
+            except Exception as e:
+                logger.warning("Error during application stop/shutdown: %s", e)
             logger.info("Telegram bot stopped")
         except Exception as e:
-            logger.error(f"Error stopping Telegram bot: {e}", exc_info=True)
+            logger.error("Error stopping Telegram bot: %s", e, exc_info=True)
     
     async def send_message(self, session_id: str, message: str) -> None:
         """Send a message to a Telegram chat.
@@ -314,23 +369,17 @@ class TelegramChannel(ChannelAdapter):
         session_id = self.get_session_id(update)
         message_text = update.message.text
         
-        # Process message with agent
-        if self.agent:
+        # Process message with agent (Glitch or Poet per session)
+        agent = self._get_agent(session_id)
+        if agent:
             try:
-                response = await self.agent.process_message(
-                    prompt=message_text,
-                    session_id=session_id,
-                )
+                response = await agent.process_message(message_text)
                 
                 # Send response (InvocationResponse uses "message" key)
                 if isinstance(response, dict):
                     text = response.get("message") or response.get("response")
                     if text is not None:
                         await self.send_message(session_id, text)
-                        if self.config.include_metrics and response.get("metrics"):
-                            metrics_line = invocation_metrics_to_telegram_string(response["metrics"])
-                            if metrics_line:
-                                await update.message.reply_text(metrics_line)
                     else:
                         logger.error("Response dict missing message/key")
                         await update.message.reply_text("❌ Internal error processing message")
@@ -446,26 +495,17 @@ class TelegramChannel(ChannelAdapter):
         else:
             prompt = "[Image attached] Please describe this image in detail."
         
-        # Process with agent
-        if self.agent:
+        # Process with agent (Glitch or Poet per session; Poet has no vision)
+        agent = self._get_agent(session_id)
+        if agent:
             try:
-                # Note: The agent should detect the [Image attached] prefix and
-                # use the vision_agent tool automatically
-                response = await self.agent.process_message(
-                    prompt=prompt,
-                    session_id=session_id,
-                    image_data=media.media_data,  # Pass base64 image data
-                )
+                response = await agent.process_message(prompt)
                 
                 # Send response (InvocationResponse uses "message" key)
                 if isinstance(response, dict):
                     text = response.get("message") or response.get("response")
                     if text is not None:
                         await self.send_message(session_id, text)
-                        if self.config.include_metrics and response.get("metrics"):
-                            metrics_line = invocation_metrics_to_telegram_string(response["metrics"])
-                            if metrics_line:
-                                await update.message.reply_text(metrics_line)
                     else:
                         logger.error("Response dict missing message/key")
                         await update.message.reply_text("❌ Internal error processing image")
@@ -481,70 +521,36 @@ class TelegramChannel(ChannelAdapter):
             await update.message.reply_text("⚠️ Agent not configured")
     
     async def _check_access(self, update: Update) -> bool:
-        """Check if user/group has access to the bot.
+        """Check if user/group has access to the bot via bot_policy.
         
-        Args:
-            update: Telegram update
-            
-        Returns:
-            True if access granted, False otherwise
+        Builds AccessContext from the update, calls check_access(), then sends
+        any denial message and returns the result.
         """
         chat = update.effective_chat
         user = update.effective_user
         message = update.effective_message
-        
-        # Owner always has access
-        if self.bootstrap.is_owner(user.id):
+        owner_id = self.config.owner_id if self.config else None
+
+        message_mentions_bot = False
+        if chat and chat.type in ("group", "supergroup") and message and message.text:
+            me = await self.application.bot.get_me()
+            bot_username = (me.username or "").lower()
+            message_mentions_bot = bot_username and f"@{bot_username}" in (message.text or "").lower()
+
+        ctx = AccessContext(
+            chat_type=chat.type if chat else "unknown",
+            user_id=user.id if user else 0,
+            chat_id=chat.id if chat else 0,
+            owner_id=owner_id,
+            message_mentions_bot=message_mentions_bot,
+        )
+        result = check_access(ctx, self.config)
+
+        if result.allowed:
             return True
-        
-        # DM (private chat)
-        if chat.type == "private":
-            policy = self.config.dm_policy
-            
-            if policy == "disabled":
-                await update.message.reply_text("❌ DMs are disabled")
-                return False
-            
-            if policy == "open":
-                return True
-            
-            if policy == "allowlist":
-                if user.id in self.config.dm_allowlist:
-                    return True
-                await update.message.reply_text(
-                    f"❌ Access denied. Your user ID: `{user.id}`",
-                    parse_mode="Markdown",
-                )
-                return False
-            
-            if policy == "pairing":
-                # Generate pairing code for new user
-                await update.message.reply_text(
-                    f"❌ Access denied. Contact the bot owner to get access.\n"
-                    f"Your user ID: `{user.id}`",
-                    parse_mode="Markdown",
-                )
-                return False
-        
-        # Group chat
-        if chat.type in ("group", "supergroup"):
-            policy = self.config.group_policy
-            
-            if policy == "disabled":
-                return False
-            
-            # Check mention requirement
-            if self.config.require_mention:
-                bot_username = (await self.application.bot.get_me()).username
-                if not message or not message.text or f"@{bot_username}" not in message.text:
-                    return False
-            
-            if policy == "open":
-                return True
-            
-            if policy == "allowlist":
-                if chat.id in self.config.group_allowlist:
-                    return True
-                return False
-        
+        if result.denial_message:
+            await update.message.reply_text(
+                result.denial_message,
+                parse_mode="Markdown",
+            )
         return False

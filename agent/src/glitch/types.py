@@ -14,12 +14,17 @@ Dataflow Overview:
                             AgentResult (Strands)
                                     |
                                     v
-                            InvocationMetrics
+                            InvocationMetrics -> TelemetryHistoryEntry -> PeriodAggregates
+    TelemetryThreshold (list) + PeriodAggregates -> check_thresholds() -> List[str] (alerts)
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any, TypedDict, Literal
 from enum import Enum
+from pathlib import Path
+from typing import Dict, List, Literal, Optional, Any
+
+# Pydantic requires typing_extensions.TypedDict on Python < 3.12 (runtime is 3.10).
+from typing_extensions import TypedDict
 
 
 class TokenUsage(TypedDict):
@@ -55,6 +60,45 @@ class InvocationMetrics(TypedDict):
     latency_ms: int
     stop_reason: str
     tool_usage: Dict[str, ToolUsageStats]
+
+
+class TelemetryThreshold(TypedDict):
+    """A single telemetry alert threshold: alert when metric over period exceeds limit.
+    
+    Used by telemetry module and telemetry_tools; makes threshold dataflow explicit.
+    """
+    metric: str   # input_tokens, output_tokens, total_tokens, invocation_count, duration_seconds
+    period: str   # hour, day, week, month, this_hour, today, this_week, this_month
+    limit: float
+
+
+class _TelemetryHistoryEntryRequired(TypedDict):
+    timestamp: float
+    metrics: InvocationMetrics
+
+
+class TelemetryHistoryEntry(_TelemetryHistoryEntryRequired, total=False):
+    """A single entry in the in-memory telemetry history.
+    Optional: custom_metrics (Dict[str, float]).
+    """
+    custom_metrics: Dict[str, float]
+
+
+class _PeriodAggregatesRequired(TypedDict):
+    invocation_count: int
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+    duration_seconds: float
+    latency_ms_total: int
+    latency_ms_avg: float
+
+
+class PeriodAggregates(_PeriodAggregatesRequired, total=False):
+    """Aggregated metrics over a time period. Optional: custom_metrics (Dict[str, float])."""
+    custom_metrics: Dict[str, float]
 
 
 class InvocationRequest(TypedDict, total=False):
@@ -140,11 +184,13 @@ class AgentConfig:
         memory_id: Memory store identifier
         region: AWS region for AgentCore services
         window_size: Sliding window size for conversation history
+        mcp_config_path: Optional path to MCP servers configuration file
     """
     session_id: str
     memory_id: str
     region: str = "us-west-2"
     window_size: int = 20
+    mcp_config_path: Optional[Path] = None
 
 
 @dataclass

@@ -59,6 +59,14 @@ A hybrid AI agent system combining AWS AgentCore Runtime with on-premises Ollama
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
+### Recent Architecture and Behavior Updates
+
+- **Telegram:** Webhook is always external (Lambda); the runtime never runs a local webhook server. Config can be stored in DynamoDB (`glitch-telegram-config`) for webhook deployments. In groups, the bot responds only when @mentioned; in DMs, owner and allowlisted users can message without a mention.
+- **Lambda webhook:** Retries setWebhook on 429; normalizes owner/user IDs for DynamoDB; always returns 200 to Telegram; does not send a per-message metrics line—only the agent reply is sent.
+- **Tool use:** Agent calls tools only when the user’s request or an active skill requires it; telemetry/threshold tools are not invoked unless the user explicitly asks for metrics or alerts. `GLITCH_MAX_TURNS` (default 3) caps agent cycles per invocation.
+- **Server:** HTTP access logging is disabled so runtime logs are not filled with `GET /ping` lines. Per-reply telemetry is not shown in chat.
+- **MCP:** Optional integration via `mcp_servers.yaml` and `MCPServerManager`; stdio transport with env expansion and tool filters.
+
 ## Communication Channels
 
 ### Telegram Channel Architecture
@@ -109,9 +117,8 @@ A hybrid AI agent system combining AWS AgentCore Runtime with on-premises Ollama
 5. Owner configures bot via `/config` commands in Telegram
 
 **Configuration Storage**:
-- Location: `~/.glitch/config.json`
-- Auto-saves on all changes
-- Permissions: 600 (owner read/write only)
+- **Production (webhook mode):** DynamoDB table `glitch-telegram-config` (pk/sk); config and webhook URL set by Lambda; owner, allowlist, and pairing stored in DynamoDB.
+- **Local/polling:** `~/.glitch/config.json`; auto-saves on all changes; permissions: 600 (owner read/write only).
 
 **Session Isolation**:
 - DM: `telegram:dm:{user_id}`
@@ -132,8 +139,28 @@ A hybrid AI agent system combining AWS AgentCore Runtime with on-premises Ollama
 - `disabled`: All groups rejected
 
 **Mention Requirement** (groups):
-- When enabled, bot must be @mentioned to respond
+- When enabled, bot must be @mentioned to respond (e.g. `@YourBotName hello`).
 - Default: `true`
+- **Private (DM):** No @mention needed; owner and allowlisted users can message directly.
+
+### Telegram Webhook (Lambda) and External-Only Mode
+
+When the bot is deployed with the Telegram webhook stack, Telegram sends updates to an **AWS Lambda Function URL** (not to the agent runtime). The runtime never runs a local webhook server.
+
+**Flow:**
+1. User sends a message in Telegram (DM or group).
+2. Telegram POSTs the update to the Lambda Function URL (`glitch-telegram-webhook`).
+3. Lambda validates the webhook secret, loads config from DynamoDB, and applies access rules (owner/allowed DMs; in groups, bot must be @mentioned).
+4. Lambda invokes the AgentCore Runtime with the message and session ID.
+5. Lambda sends the agent’s reply back to the user via the Telegram API and returns 200 to Telegram.
+
+**Behavior:**
+- **Webhook is always external:** The agent process does not start a local webhook listener (no `python-telegram-bot[webhooks]` extra required). Updates are received only by the Lambda.
+- **Acknowledgment:** Lambda always returns 200 to Telegram (even on errors) so Telegram does not retry; on failure the user receives an error message in chat.
+- **Rate limits:** Lambda retries webhook registration (setWebhook) on HTTP 429 with exponential backoff.
+- **IDs:** Owner and user IDs from DynamoDB are normalized to integers so owner/allowed checks work (DynamoDB may return numeric types that would otherwise break equality).
+
+**Stack:** `TelegramWebhookStack` (CDK) creates the Lambda, Function URL, DynamoDB config table, and S3 soul bucket; the Lambda receives `AGENTCORE_RUNTIME_ARN` and invokes the runtime via the Bedrock AgentCore API.
 
 ### Telegram Commands
 
@@ -262,7 +289,12 @@ python -m glitch.cli status --verbose
 |----------|----------|---------|-------------|
 | `GLITCH_TELEGRAM_BOT_TOKEN` | No | None | Bot token (direct, not recommended for production) |
 | `GLITCH_TELEGRAM_SECRET_NAME` | No | `glitch/telegram-bot-token` | Secrets Manager secret name |
-| `GLITCH_CONFIG_DIR` | No | `~/.glitch` | Configuration directory |
+| `GLITCH_CONFIG_DIR` | No | `~/.glitch` | Configuration directory (local/polling) |
+| `GLITCH_CONFIG_BACKEND` | No | `dynamodb` | `dynamodb` or file-based config for Telegram |
+| `GLITCH_CONFIG_TABLE` | No | `glitch-telegram-config` | DynamoDB table for Telegram config (webhook mode) |
+| `GLITCH_TELEGRAM_WEBHOOK_URL` | No | (from Lambda) | Override webhook URL for Telegram |
+| `GLITCH_MAX_TURNS` | No | `3` | Max agent/tool cycles per invocation (0 = no limit) |
+| `GLITCH_MCP_CONFIG_PATH` | No | `agent/mcp_servers.yaml` | Path to MCP servers YAML |
 | `AWS_REGION` | No | `us-west-2` | AWS region |
 
 **Token Priority:**
@@ -271,7 +303,22 @@ python -m glitch.cli status --verbose
 
 **Recommendation**: Use Secrets Manager for production, environment variable for local testing.
 
+### Server and Observability Behavior
+
+- **HTTP access log:** Request logging (e.g. `GET /ping`) is disabled so runtime logs are not flooded; the Uvicorn access logger is disabled at server startup.
+- **Per-message telemetry in chat:** The agent and Lambda do not send a follow-up message with token/cycle metrics after each reply; only the main reply text is sent. Telemetry tools remain available when the user explicitly asks for metrics or alerts.
+
 ## Agent Architecture
+
+### Tool Use Policy
+
+The agent is instructed to call tools only when:
+1. **The user’s request requires it** (e.g. “what’s in this image?” → `vision_agent`, “is Ollama up?” → `check_ollama_health`, “remember I prefer X” → `update_soul`, or routing a task → `local_chat`), or
+2. **An active skill instructs it.**
+
+The agent does **not** call tools on its own for side tasks (e.g. telemetry, thresholds, metrics) unless the user explicitly asks for metrics, usage, or alert configuration. For greetings and simple conversation, the agent responds without using any tools. This reduces unnecessary tool cycles and token usage.
+
+**Turn limit:** `GLITCH_MAX_TURNS` (default `3`) limits the number of agent/tool cycles per invocation. Set in the runtime environment to cap cost and latency.
 
 ### Tiered Model System
 
@@ -372,7 +419,7 @@ python -m glitch.cli status --verbose
            │
            ▼
 ┌─────────────────────┐
-│ BedrockAgentCoreApp │  Built-in /ping, /invocations, /ws handlers
+│ BedrockAgentCoreApp │  Built-in /ping, /invocations, /ws handlers (access log disabled)
 └──────────┬──────────┘
            │
            ▼
@@ -591,6 +638,41 @@ Enums
 └── IntegrationStatus: NOT_IMPLEMENTED, CONFIGURED, CONNECTED, ERROR
 ```
 
+## MCP (Model Context Protocol)
+
+Glitch can connect to external MCP servers to expose their tools to the agent (e.g. AWS Knowledge, Context7, custom MCP servers).
+
+**Configuration:** `agent/mcp_servers.yaml` (or path set via `GLITCH_MCP_CONFIG_PATH`). The file uses a top-level key `mcp_servers`; each entry is a server name with:
+
+| Field | Description |
+|-------|-------------|
+| `enabled` | Whether to load this server (default: true) |
+| `transport` | `stdio`, `sse`, or `streamable_http` (stdio is the primary supported transport) |
+| `command` | Command to run for stdio (e.g. `npx`, `python`) |
+| `args` | Arguments (e.g. `["-y", "some-mcp-server"]`) |
+| `env` | Optional env vars for the server process |
+| `prefix` | Optional prefix for tool names to avoid collisions |
+| `tool_filters` | Optional `allowed` / `rejected` lists to limit which tools are exposed |
+
+**Env expansion:** Values in the YAML can use `${VAR_NAME}`; they are expanded from the environment at load time.
+
+**Runtime:** `MCPServerManager` (in `glitch.mcp`) loads the config, creates Strands `MCPClient` instances over stdio for each enabled server, and provides them as tool providers to the agent. The model router can route tasks to `mcp_use` (e.g. primary model `mcp_agent`) when MCP tools are in use.
+
+**Example `mcp_servers.yaml`:**
+
+```yaml
+mcp_servers:
+  my_server:
+    enabled: true
+    transport: stdio
+    command: npx
+    args: ["-y", "my-mcp-server"]
+    env:
+      API_KEY: "${MY_API_KEY}"
+    tool_filters:
+      allowed: ["tool_a", "tool_b"]
+```
+
 ## Infrastructure Components
 
 ### CDK Stacks
@@ -601,6 +683,7 @@ Enums
 | `GlitchSecretsStack` | Credential management | Secrets Manager secrets |
 | `GlitchTailscaleStack` | Hybrid connectivity | EC2 instance, Security Groups |
 | `GlitchAgentCoreStack` | Agent runtime | IAM roles, Security Groups |
+| `GlitchTelegramWebhookStack` | Telegram webhook | Lambda (Function URL), DynamoDB config table, S3 soul bucket |
 
 ### VPC Endpoints (Single AZ for cost optimization)
 
@@ -696,7 +779,8 @@ AgentCore-Glitch/
 │   │   ├── vpc-stack.ts        # VPC, subnets, endpoints
 │   │   ├── secrets-stack.ts    # Secrets Manager
 │   │   ├── tailscale-stack.ts  # EC2 Tailscale connector
-│   │   └── agentcore-stack.ts  # IAM, security groups
+│   │   ├── agentcore-stack.ts  # IAM, security groups
+│   │   └── telegram-webhook-stack.ts  # Lambda webhook, DynamoDB config, S3 soul bucket
 │   └── package.json
 ├── agent/                       # Python Strands agent
 │   ├── src/
@@ -705,7 +789,7 @@ AgentCore-Glitch/
 │   │       ├── __init__.py     # Package exports
 │   │       ├── types.py        # Type definitions
 │   │       ├── agent.py        # GlitchAgent orchestrator
-│   │       ├── server.py       # HTTP server
+│   │       ├── server.py       # HTTP server (access log disabled)
 │   │       ├── telemetry.py    # OpenTelemetry setup
 │   │       ├── cli.py          # CLI commands
 │   │       ├── channels/       # Communication channels
@@ -713,16 +797,25 @@ AgentCore-Glitch/
 │   │       │   ├── base.py              # ChannelAdapter ABC
 │   │       │   ├── types.py             # Channel types
 │   │       │   ├── config_manager.py    # Config persistence
+│   │       │   ├── dynamodb_config.py   # DynamoDB config (webhook mode)
 │   │       │   ├── bootstrap.py         # Owner pairing codes
-│   │       │   ├── telegram.py          # Telegram channel
+│   │       │   ├── telegram.py          # Telegram channel (external webhook only)
 │   │       │   └── telegram_commands.py # /config handlers
 │   │       ├── memory/
 │   │       │   └── sliding_window.py
+│   │       ├── mcp/                      # MCP (Model Context Protocol)
+│   │       │   ├── __init__.py
+│   │       │   ├── types.py              # MCPServerConfig, MCPConfig
+│   │       │   ├── loader.py             # YAML loader, env expansion
+│   │       │   └── manager.py            # MCPServerManager, MCPClient lifecycle
 │   │       ├── routing/
 │   │       │   └── model_router.py
 │   │       └── tools/
 │   │           ├── ollama_tools.py
-│   │           └── network_tools.py
+│   │           ├── network_tools.py
+│   │           ├── soul_tools.py
+│   │           └── telemetry_tools.py
+│   ├── mcp_servers.yaml        # MCP server definitions (optional)
 │   ├── Dockerfile
 │   ├── requirements.txt
 │   ├── SOUL.md                 # Agent personality
@@ -807,6 +900,53 @@ aws ssm start-session --target <instance-id>
 tailscale status
 curl http://10.10.110.202:11434/api/tags
 ```
+
+## Dashboard UI
+
+A React + DaisyUI dashboard for monitoring and interacting with Glitch.
+
+### Features
+
+| Tab | Description |
+|-----|-------------|
+| Chat | Real-time conversation with Glitch orchestrator |
+| Telegram | Bot configuration and status |
+| Ollama | Local model health and available models |
+| Memory | Structured memory viewer |
+| MCP | Model Context Protocol server status |
+| Skills | Enable/disable agent skills |
+| Unifi | Network monitoring (Coming Soon) |
+| Pi-hole | DNS filtering stats (Coming Soon) |
+| Settings | Agent configuration |
+
+### Running the UI
+
+```bash
+# Start the agent backend (port 8080)
+cd agent
+agentcore launch
+
+# In another terminal, start the UI (port 5173)
+cd ui
+pnpm install
+pnpm dev
+```
+
+Access at: **http://localhost:5173** (localhost only)
+
+### API Endpoints
+
+The UI communicates via REST API endpoints mounted at `/api`:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/status` | GET | Agent status and info |
+| `/api/telegram/config` | GET/POST | Telegram configuration |
+| `/api/ollama/health` | GET | Ollama hosts health |
+| `/api/memory/summary` | GET | Memory state |
+| `/api/mcp/servers` | GET | MCP server status |
+| `/api/skills` | GET | List all skills |
+| `/api/skills/{id}/toggle` | POST | Enable/disable skill |
 
 ## License
 

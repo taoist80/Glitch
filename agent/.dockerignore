@@ -7,6 +7,7 @@ __pycache__/
 .gitignore
 *.md
 !SOUL.md
+!poet-soul.md
 .pytest_cache/
 .mypy_cache/
 .coverage

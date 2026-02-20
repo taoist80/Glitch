@@ -24,7 +24,7 @@ import os
 import time
 import logging
 from datetime import datetime, timezone
-from typing import Optional, Any, Dict
+from typing import Dict, List, Optional, Any
 
 _DEFAULT_TELEMETRY_LOG_GROUP = "/glitch/telemetry"
 _DEFAULT_METRICS_NAMESPACE = "Glitch/Agent"
@@ -34,6 +34,9 @@ _cloudwatch_metrics_client: Optional[Any] = None
 
 from glitch.types import (
     TelemetryConfig,
+    TelemetryThreshold,
+    TelemetryHistoryEntry,
+    PeriodAggregates,
     InvocationMetrics,
     TokenUsage,
     ToolUsageStats,
@@ -46,13 +49,17 @@ logger = logging.getLogger(__name__)
 
 _telemetry_instance: Optional[Any] = None
 _last_agent_result: Optional[Any] = None
-_telemetry_history: list = []  # list of {"timestamp": float, "metrics": InvocationMetrics}
+_telemetry_history: List[TelemetryHistoryEntry] = []
 _MAX_TELEMETRY_HISTORY = 10_000
 _MAX_HISTORY_AGE_SECONDS = 31 * 24 * 3600  # 31 days
-_telemetry_thresholds: list = []  # list of {"metric": str, "period": str, "limit": float}
+_telemetry_thresholds: List[TelemetryThreshold] = []
 
-# Period lengths in seconds (rolling windows)
-_PERIOD_SECONDS = {"hour": 3600, "day": 86400, "week": 7 * 86400, "month": 30 * 86400}
+# Period lengths in seconds (rolling windows). Mutable so add_aggregation_period can extend.
+_PERIOD_SECONDS: Dict[str, int] = {"hour": 3600, "day": 86400, "week": 7 * 86400, "month": 30 * 86400}
+
+# Custom metrics: registered names (with unit) and values for the current invocation.
+_custom_metric_units: Dict[str, str] = {}
+_current_custom_metrics: Dict[str, float] = {}
 
 
 def set_last_agent_result(result: Any) -> None:
@@ -70,11 +77,15 @@ def append_telemetry(result: Any) -> None:
     """Append this invocation's metrics to the telemetry history (bounded by count and age).
     
     Also writes to CloudWatch Logs if GLITCH_TELEMETRY_LOG_GROUP is set.
+    Merges any record_custom_telemetry_metric() values into the entry, then clears them.
     """
-    global _telemetry_history
+    global _telemetry_history, _current_custom_metrics
     now = time.time()
     metrics = extract_metrics_from_result(result)
-    entry = {"timestamp": now, "metrics": metrics}
+    entry: TelemetryHistoryEntry = {"timestamp": now, "metrics": metrics}
+    if _current_custom_metrics:
+        entry["custom_metrics"] = dict(_current_custom_metrics)
+        _current_custom_metrics = {}
     _telemetry_history.append(entry)
     if len(_telemetry_history) > _MAX_TELEMETRY_HISTORY:
         _telemetry_history = _telemetry_history[-_MAX_TELEMETRY_HISTORY:]
@@ -85,8 +96,8 @@ def append_telemetry(result: Any) -> None:
         _write_telemetry_to_cloudwatch(entry, event_type="invocation")
 
 
-def get_telemetry_history(limit: int = 50) -> list:
-    """Return the last `limit` telemetry entries (newest first). Each entry is {"timestamp": float, "metrics": InvocationMetrics}."""
+def get_telemetry_history(limit: int = 50) -> List[TelemetryHistoryEntry]:
+    """Return the last `limit` telemetry entries (newest first)."""
     global _telemetry_history
     n = min(max(0, limit), len(_telemetry_history))
     if n == 0:
@@ -94,7 +105,7 @@ def get_telemetry_history(limit: int = 50) -> list:
     return list(reversed(_telemetry_history[-n:]))
 
 
-def _get_usage(metrics: Any, key: str) -> int:
+def _get_usage(metrics: Optional[InvocationMetrics], key: str) -> int:
     """Get a token-usage value from InvocationMetrics."""
     if not metrics or not isinstance(metrics, dict):
         return 0
@@ -102,7 +113,7 @@ def _get_usage(metrics: Any, key: str) -> int:
     return int(usage.get(key, 0) or 0)
 
 
-def get_telemetry_for_period(period: str, now_ts: Optional[float] = None) -> list:
+def get_telemetry_for_period(period: str, now_ts: Optional[float] = None) -> List[TelemetryHistoryEntry]:
     """Return entries in the rolling window for period. period in ('hour','day','week','month')."""
     global _telemetry_history
     now = now_ts if now_ts is not None else time.time()
@@ -113,7 +124,7 @@ def get_telemetry_for_period(period: str, now_ts: Optional[float] = None) -> lis
     return [e for e in _telemetry_history if (e.get("timestamp") or 0) >= cutoff]
 
 
-def get_running_totals(now_ts: Optional[float] = None) -> dict:
+def get_running_totals(now_ts: Optional[float] = None) -> Dict[str, PeriodAggregates]:
     """Return aggregates for calendar periods: this_hour, today, this_week, this_month (UTC)."""
     global _telemetry_history
     now = now_ts if now_ts is not None else time.time()
@@ -122,25 +133,26 @@ def get_running_totals(now_ts: Optional[float] = None) -> dict:
     start_of_day = dt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     start_of_week = start_of_day - (dt.weekday() * 86400)
     start_of_month = dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()
-    buckets = {
+    buckets: Dict[str, float] = {
         "this_hour": start_of_hour,
         "today": start_of_day,
         "this_week": start_of_week,
         "this_month": start_of_month,
     }
-    out = {}
+    out: Dict[str, PeriodAggregates] = {}
     for name, start in buckets.items():
         entries = [e for e in _telemetry_history if (e.get("timestamp") or 0) >= start]
         out[name] = aggregate_metrics(entries)
     return out
 
 
-def aggregate_metrics(entries: list) -> dict:
-    """Aggregate a list of {timestamp, metrics} into totals. Returns dict with count, input_tokens, output_tokens, total_tokens, duration_seconds, etc."""
+def aggregate_metrics(entries: List[TelemetryHistoryEntry]) -> PeriodAggregates:
+    """Aggregate a list of history entries into totals for the period. Includes custom metrics sum."""
     count = len(entries)
     input_tokens = output_tokens = total_tokens = cache_read = cache_write = 0
     duration_seconds = 0.0
     latency_ms = 0
+    custom_totals: Dict[str, float] = {}
     for e in entries:
         m = e.get("metrics") or {}
         input_tokens += _get_usage(m, "input_tokens")
@@ -150,7 +162,9 @@ def aggregate_metrics(entries: list) -> dict:
         cache_write += _get_usage(m, "cache_write_tokens")
         duration_seconds += float(m.get("duration_seconds") or 0)
         latency_ms += int(m.get("latency_ms") or 0)
-    return {
+        for name, val in (e.get("custom_metrics") or {}).items():
+            custom_totals[name] = custom_totals.get(name, 0) + float(val)
+    out: PeriodAggregates = {
         "invocation_count": count,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
@@ -161,6 +175,15 @@ def aggregate_metrics(entries: list) -> dict:
         "latency_ms_total": latency_ms,
         "latency_ms_avg": round(latency_ms / count, 0) if count else 0,
     }
+    if custom_totals:
+        out["custom_metrics"] = custom_totals
+    return out
+
+
+def _allowed_threshold_metric(metric: str) -> bool:
+    """True if metric is a built-in or registered custom metric."""
+    allowed = ("input_tokens", "output_tokens", "total_tokens", "invocation_count", "duration_seconds")
+    return metric.lower() in allowed or metric in _custom_metric_units
 
 
 def set_telemetry_threshold(metric: str, period: str, limit: float) -> None:
@@ -170,15 +193,55 @@ def set_telemetry_threshold(metric: str, period: str, limit: float) -> None:
     if period not in _PERIOD_SECONDS and period not in ("this_hour", "today", "this_week", "this_month"):
         raise ValueError("period must be one of: hour, day, week, month, this_hour, today, this_week, this_month")
     metric = metric.lower()
-    allowed = ("input_tokens", "output_tokens", "total_tokens", "invocation_count", "duration_seconds")
-    if metric not in allowed:
-        raise ValueError("metric must be one of: %s" % ", ".join(allowed))
+    if not _allowed_threshold_metric(metric):
+        raise ValueError("metric must be one of: input_tokens, output_tokens, total_tokens, invocation_count, duration_seconds, or a registered custom metric name")
     _telemetry_thresholds.append({"metric": metric, "period": period, "limit": float(limit)})
 
 
-def get_telemetry_thresholds() -> list:
+def set_telemetry_thresholds(thresholds: List[TelemetryThreshold]) -> None:
+    """Replace all thresholds with the given list. Each item must have metric, period, limit."""
+    global _telemetry_thresholds
+    _telemetry_thresholds = []
+    for th in thresholds or []:
+        if not isinstance(th, dict):
+            raise ValueError("Each threshold must be a dict with metric, period, limit")
+        set_telemetry_threshold(
+            th.get("metric", ""),
+            th.get("period", ""),
+            float(th.get("limit", 0)),
+        )
+
+
+def get_telemetry_thresholds() -> List[TelemetryThreshold]:
     """Return list of configured threshold dicts."""
     return list(_telemetry_thresholds)
+
+
+def remove_telemetry_threshold(metric: str, period: str) -> bool:
+    """Remove one threshold that matches the given metric and period.
+    
+    Returns True if a matching threshold was removed, False if none matched.
+    """
+    global _telemetry_thresholds
+    metric = metric.lower()
+    period = period.lower()
+    for i, th in enumerate(_telemetry_thresholds):
+        if (th.get("metric") or "").lower() == metric and (th.get("period") or "").lower() == period:
+            _telemetry_thresholds.pop(i)
+            return True
+    return False
+
+
+def update_telemetry_threshold(metric: str, period: str, new_limit: float) -> bool:
+    """Update the limit of an existing threshold that matches metric and period. Returns True if updated."""
+    global _telemetry_thresholds
+    metric = metric.lower()
+    period = period.lower()
+    for th in _telemetry_thresholds:
+        if (th.get("metric") or "").lower() == metric and (th.get("period") or "").lower() == period:
+            th["limit"] = float(new_limit)
+            return True
+    return False
 
 
 def clear_telemetry_thresholds() -> None:
@@ -187,7 +250,7 @@ def clear_telemetry_thresholds() -> None:
     _telemetry_thresholds = []
 
 
-def check_thresholds(period_aggregates: dict) -> list:
+def check_thresholds(period_aggregates: Dict[str, PeriodAggregates]) -> List[str]:
     """Given a dict of period_name -> aggregate_metrics, check configured thresholds and return list of alert strings."""
     global _telemetry_thresholds
     alerts = []
@@ -199,11 +262,54 @@ def check_thresholds(period_aggregates: dict) -> list:
         if not agg:
             continue
         value = agg.get(metric)
+        if value is None and agg.get("custom_metrics") is not None:
+            value = agg["custom_metrics"].get(metric)
         if value is None:
             continue
         if value > limit:
             alerts.append("ALERT: %s for %s is %s (threshold: %s)" % (metric, period, value, limit))
     return alerts
+
+
+# ---------------------------------------------------------------------------
+# Custom metrics and aggregation periods
+# ---------------------------------------------------------------------------
+
+def register_custom_telemetry_metric(name: str, unit: str = "Count") -> None:
+    """Register a custom metric name. Once registered, record_custom_telemetry_metric(name, value) can be used."""
+    global _custom_metric_units
+    name = name.strip().lower().replace(" ", "_")
+    if not name:
+        raise ValueError("metric name cannot be empty")
+    _custom_metric_units[name] = unit
+
+
+def get_registered_custom_metrics() -> Dict[str, str]:
+    """Return dict of registered custom metric names to their units."""
+    return dict(_custom_metric_units)
+
+
+def record_custom_telemetry_metric(name: str, value: float) -> None:
+    """Record a value for a custom metric for the current invocation. Name must be registered first."""
+    global _current_custom_metrics, _custom_metric_units
+    name = name.strip().lower().replace(" ", "_")
+    if name not in _custom_metric_units:
+        raise ValueError("unknown custom metric %r; use add_telemetry_metric(name, unit) first" % name)
+    _current_custom_metrics[name] = float(value)
+
+
+def add_aggregation_period(name: str, period_seconds: int) -> None:
+    """Add or update a rolling aggregation period (e.g. 'quarter' = 90*86400). Enables get_telemetry_for_period(name)."""
+    global _PERIOD_SECONDS
+    name = name.lower().strip()
+    if not name or period_seconds < 1:
+        raise ValueError("name must be non-empty and period_seconds must be positive")
+    _PERIOD_SECONDS[name] = int(period_seconds)
+
+
+def get_aggregation_periods() -> Dict[str, int]:
+    """Return current rolling period names and their lengths in seconds."""
+    return dict(_PERIOD_SECONDS)
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +356,7 @@ def _ensure_log_stream(log_group: str, log_stream: str) -> bool:
     return True
 
 
-def _write_telemetry_to_cloudwatch(entry: dict, event_type: str = "invocation") -> bool:
+def _write_telemetry_to_cloudwatch(entry: TelemetryHistoryEntry, event_type: str = "invocation") -> bool:
     """
     Write a telemetry entry to CloudWatch Logs.
     
@@ -366,7 +472,7 @@ def _get_metrics_namespace() -> str:
     return os.environ.get("GLITCH_METRICS_NAMESPACE", _DEFAULT_METRICS_NAMESPACE)
 
 
-def publish_hourly_metrics_to_cloudwatch(aggregates: dict) -> bool:
+def publish_hourly_metrics_to_cloudwatch(aggregates: PeriodAggregates) -> bool:
     """
     Publish hourly aggregate metrics to CloudWatch Metrics for long-term retention.
     
@@ -418,6 +524,35 @@ def publish_hourly_metrics_to_cloudwatch(aggregates: dict) -> bool:
         return True
     except Exception as e:
         logger.warning("Failed to publish metrics to CloudWatch: %s", e)
+        return False
+
+
+def publish_custom_metric_to_cloudwatch(metric_name: str, value: float, unit: str = "Count") -> bool:
+    """
+    Publish a single custom metric to CloudWatch Metrics.
+    Use when the user asks to "create a CloudWatch metric for X".
+    """
+    client = _get_cloudwatch_metrics_client()
+    if not client:
+        return False
+    namespace = _get_metrics_namespace()
+    # CloudWatch metric names: alphanumeric and underscore
+    safe_name = "".join(c if c.isalnum() or c == "_" else "_" for c in metric_name.strip())[:255] or "CustomMetric"
+    try:
+        client.put_metric_data(
+            Namespace=namespace,
+            MetricData=[{
+                "MetricName": safe_name,
+                "Timestamp": datetime.now(timezone.utc),
+                "Value": float(value),
+                "Unit": unit,
+                "StorageResolution": 60,
+            }],
+        )
+        logger.info("Published custom metric %s=%s to CloudWatch namespace %s", safe_name, value, namespace)
+        return True
+    except Exception as e:
+        logger.warning("Failed to publish custom metric to CloudWatch: %s", e)
         return False
 
 
@@ -563,6 +698,7 @@ def log_invocation_metrics(
     user_message: str = "",
     response_preview: str = "",
     session_id: str = "",
+    extra: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
     Log detailed metrics for an invocation to CloudWatch.
@@ -572,6 +708,7 @@ def log_invocation_metrics(
         user_message: The user's input message (truncated for logging)
         response_preview: Preview of the response (truncated for logging)
         session_id: Session identifier for correlation
+        extra: Optional extra data to include in logs (e.g., skill selection info)
     """
     token_usage = metrics.get("token_usage", create_empty_token_usage())
     
@@ -587,6 +724,18 @@ def log_invocation_metrics(
     tool_usage = metrics.get("tool_usage", {})
     if tool_usage:
         logger.info(f"Tools used: {list(tool_usage.keys())}")
+    
+    # Log skill selection info if provided
+    if extra:
+        skills_injected = extra.get("skills_injected", 0)
+        if skills_injected > 0:
+            skill_ids = extra.get("skill_ids", [])
+            model_used = extra.get("model_used", "unknown")
+            logger.info(
+                f"Skills injected: {skills_injected} | "
+                f"skill_ids: {skill_ids} | "
+                f"model: {model_used}"
+            )
 
 
 def get_metrics_to_string(result: Any, allowed_names: Optional[set] = None) -> str:

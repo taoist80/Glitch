@@ -1,11 +1,47 @@
 """Type definitions for channel adapters.
 
 Defines configuration and message types used across different channel adapters.
+Dataflow: TelegramConfig + AccessContext -> bot_policy -> AccessResult.
 """
 
 from dataclasses import dataclass, field
 from typing import Optional, Literal, List, Union
 from datetime import datetime
+
+
+# ---------------------------------------------------------------------------
+# Access control (bot policy)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class AccessResult:
+    """Result of an access check. Used by bot_policy and channel handlers.
+
+    Attributes:
+        allowed: True if the user/chat may receive a response.
+        denial_message: User-facing message to send when allowed is False (None if silent deny).
+    """
+    allowed: bool
+    denial_message: Optional[str] = None
+
+
+@dataclass
+class AccessContext:
+    """Context for access decisions. Built from an incoming message/update.
+
+    Attributes:
+        chat_type: Telegram chat type (private, group, supergroup).
+        user_id: Telegram user ID of the sender.
+        chat_id: Telegram chat ID.
+        owner_id: Bot owner's Telegram user ID (from config).
+        message_mentions_bot: True if the message text contains @bot_username (groups).
+    """
+    chat_type: str
+    user_id: int
+    chat_id: int
+    owner_id: Optional[int]
+    message_mentions_bot: bool = False
 
 
 @dataclass
@@ -59,7 +95,7 @@ class TelegramConfig:
     require_mention: bool = True
     text_chunk_limit: int = 4000
     media_max_mb: int = 5
-    include_metrics: bool = True
+    include_metrics: bool = False
 
 
 @dataclass

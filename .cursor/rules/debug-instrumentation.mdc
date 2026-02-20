@@ -1,0 +1,27 @@
+---
+description: Check CloudWatch (or existing logs) before adding debug instrumentation
+alwaysApply: true
+---
+
+# Debug Instrumentation Rule
+
+## Check Existing Logs First
+
+**Do not add instrumentation until you have already looked through CloudWatch logs** (or other existing log sources for the system under investigation).
+
+### Workflow
+
+1. **First**: Use CloudWatch Logs (or equivalent) to inspect runtime behavior, errors, and request flow for the failing scenario.
+2. **Then**: If existing logs are insufficient to confirm or reject hypotheses, add targeted instrumentation and reproduce.
+
+### Rationale
+
+- CloudWatch (and similar) often already contain the evidence needed to form or validate hypotheses.
+- Adding instrumentation before checking existing logs can duplicate effort and add noise.
+- Instrumentation should be used only when existing observability does not provide enough information.
+
+### When Instrumentation Is Appropriate
+
+- After reviewing CloudWatch (or other logs) and still lacking key data (e.g. specific variable values, branch taken, or call sequence).
+- When the user has no access to CloudWatch and asks for local or file-based logging to debug.
+- When the failure path does not produce any logs in the existing pipeline.

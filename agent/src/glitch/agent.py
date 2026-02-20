@@ -1,22 +1,35 @@
 """Glitch - Primary orchestrator agent for AgentCore hybrid system.
 
 Dataflow:
-    User Message -> process_message() -> Strands Agent -> AgentResult
-                                              |
-                                              v
-                                    InvocationResponse (with metrics)
+    User Message -> TaskPlanner -> TaskSpec
+                                      |
+                                      v
+                              SkillSelector(TaskSpec, model)
+                                      |
+                                      v
+                              List[SelectedSkill] (max 3)
+                                      |
+                                      v
+                              build_prompt_with_skills()
+                                      |
+                                      v
+                              Strands Agent -> AgentResult
+                                      |
+                                      v
+                              InvocationResponse (with metrics + skill telemetry)
 
 The GlitchAgent orchestrates:
 1. Memory management (AgentCore Memory API)
 2. Model routing (tier escalation)
-3. Tool execution (local Ollama, network tools)
-4. Metrics collection (via Strands telemetry)
+3. Skill selection and injection
+4. Tool execution (local Ollama, network tools)
+5. Metrics collection (via Strands telemetry)
 """
 
 import os
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any
 from strands import Agent
 from strands.agent.conversation_manager import SlidingWindowConversationManager
 
@@ -30,10 +43,27 @@ from glitch.tools.soul_tools import load_soul_from_s3, update_soul
 from glitch.tools.telemetry_tools import (
     telemetry,
     set_telemetry_threshold,
+    set_telemetry_thresholds,
+    update_telemetry_threshold,
     list_telemetry_thresholds,
+    remove_telemetry_threshold,
+    clear_telemetry_thresholds,
+    add_telemetry_metric,
+    record_telemetry_metric,
+    list_telemetry_metrics,
+    update_telemetry_aggregation,
+    list_aggregation_periods,
+    create_cloudwatch_metric,
 )
 from glitch.routing.model_router import ModelRouter
 from glitch.memory.sliding_window import GlitchMemoryManager
+from glitch.mcp.manager import MCPServerManager
+from glitch.skills.loader import SkillLoader, get_default_skills_dir
+from glitch.skills.registry import SkillRegistry
+from glitch.skills.selector import SkillSelector
+from glitch.skills.planner import TaskPlanner
+from glitch.skills.prompt_builder import build_prompt_with_skills
+from glitch.skills.types import SkillSelectionResult
 from glitch.telemetry import (
     extract_metrics_from_result,
     log_invocation_metrics,
@@ -96,6 +126,13 @@ GLITCH_TECHNICAL_CONTEXT = """
 - You manage conversations, route tasks, and coordinate with specialized sub-agents
 - You are the only agent allowed to escalate to higher cognitive tiers
 
+**Where you run:**
+- You are the same Glitch agent across all interfaces. You can be reached via:
+  - **Telegram DMs** (direct messages to the bot)
+  - **Telegram group chats** (when the user @mentions the bot in the group, or per owner configuration)
+  - **This conversation interface** (e.g. Cursor, web chat, or other clients that call your API)
+- Do not claim you "don't have Telegram" or "only work here". You are one agent; the delivery channel (Telegram vs this chat) is just how the user reached you. If someone says they're not getting replies in a Telegram group, help them troubleshoot (e.g. they may need to @mention the bot in the group, or the owner may need to allow the group).
+
 **Your Capabilities:**
 - Conversation management with sliding memory
 - Task routing to appropriate executors (local or cloud)
@@ -116,9 +153,21 @@ GLITCH_TECHNICAL_CONTEXT = """
 - check_ollama_health: Verify connectivity to on-prem models
 - update_soul: Update persistent SOUL.md (personality/instructions) when the user asks to change how you behave or remember preferences
 - telemetry: Return Strands telemetry; use period='hour'|'day'|'week'|'month' for rolling totals, running_totals=True for this hour/today/week/month, last_n for history; alerts shown when thresholds are exceeded
-- set_telemetry_threshold: Set alert when a metric (input_tokens, total_tokens, invocation_count, etc.) for a period (hour, day, today, etc.) exceeds a limit
+- set_telemetry_threshold: Set alert when a metric (input_tokens, total_tokens, invocation_count, etc.) for a period exceeds a limit
+- set_telemetry_thresholds: Set multiple thresholds at once (list of dicts with metric, period, limit); replaces existing
+- update_telemetry_threshold: Update an existing threshold's limit (metric, period, new_limit)
 - list_telemetry_thresholds: List configured telemetry thresholds
+- remove_telemetry_threshold: Remove one threshold by metric and period
+- clear_telemetry_thresholds: Remove all telemetry thresholds
+- add_telemetry_metric: Register a new custom metric (name, unit); then record_telemetry_metric(name, value) per invocation
+- record_telemetry_metric: Record a value for a custom metric for the current invocation
+- list_telemetry_metrics: List registered custom metrics
+- update_telemetry_aggregation: Add/update a rolling period (period_name, period_seconds) for aggregates
+- list_aggregation_periods: List aggregation periods (hour, day, week, month, plus any custom)
+- create_cloudwatch_metric: Publish a single metric to CloudWatch (metric_name, value, unit)
 - Network tools: Pi-hole, Unifi, Protect (coming in future iterations)
+
+**Tool use:** Only call tools when (1) the user's request requires it (e.g. "what's in this image?" → vision_agent, "is Ollama up?" → check_ollama_health, "remember I prefer X" → update_soul, or routing a task → local_chat), or (2) an active skill instructs you to. Do not call tools on your own initiative for side tasks (e.g. telemetry, thresholds, metrics) unless the user explicitly asks for metrics, usage, or alert configuration. For greetings and simple conversation, respond without using any tools.
 
 **Routing Guidelines:**
 1. Assess task complexity and confidence before responding
@@ -161,14 +210,20 @@ class GlitchAgent:
         region: AWS region for AgentCore services
         memory_manager: GlitchMemoryManager instance
         model_router: ModelRouter for tier escalation
+        mcp_manager: MCPServerManager for external MCP server integration
+        skill_registry: SkillRegistry with loaded skills
+        skill_selector: SkillSelector for task-based skill selection
+        task_planner: TaskPlanner for analyzing user messages
         agent: Strands Agent instance
+        last_skill_selection: Last skill selection result for telemetry
     """
     
-    def __init__(self, config: AgentConfig):
+    def __init__(self, config: AgentConfig, skills_dir: Optional[Path] = None):
         """Initialize GlitchAgent with configuration.
         
         Args:
-            config: AgentConfig with session_id, memory_id, region, window_size
+            config: AgentConfig with session_id, memory_id, region, window_size, mcp_config_path
+            skills_dir: Optional path to skills directory (defaults to agent/skills/)
         """
         self.session_id = config.session_id
         self.memory_id = config.memory_id
@@ -188,11 +243,23 @@ class GlitchAgent:
             max_escalations_per_session=2,
         )
         
+        # Initialize MCP servers
+        self._init_mcp_servers(config.mcp_config_path)
+        
+        # Initialize skill system
+        self._init_skills(skills_dir)
+        
+        # Store base prompt for skill injection
+        self._base_prompt = build_system_prompt()
+        self.last_skill_selection: Optional[SkillSelectionResult] = None
+        
         primary_model = self.model_router.get_primary_model("chat")
+        self._current_model_name = primary_model.name
+        
         # Strands Agent API: name, system_prompt, model, tools, conversation_manager, trace_attributes
         self.agent = Agent(
             name="glitch",
-            system_prompt=build_system_prompt(),
+            system_prompt=self._base_prompt,
             model=primary_model.model_id,
             tools=[
                 vision_agent,
@@ -201,10 +268,21 @@ class GlitchAgent:
                 update_soul,
                 telemetry,
                 set_telemetry_threshold,
+                set_telemetry_thresholds,
+                update_telemetry_threshold,
                 list_telemetry_thresholds,
+                remove_telemetry_threshold,
+                clear_telemetry_thresholds,
+                add_telemetry_metric,
+                record_telemetry_metric,
+                list_telemetry_metrics,
+                update_telemetry_aggregation,
+                list_aggregation_periods,
+                create_cloudwatch_metric,
                 query_pihole_stats,
                 check_unifi_network,
                 query_protect_cameras,
+                *self.mcp_manager.get_tool_providers(),  # MCP server tools
             ],
             conversation_manager=SlidingWindowConversationManager(
                 window_size=config.window_size
@@ -218,18 +296,98 @@ class GlitchAgent:
         )
         
         logger.info(f"Initialized Glitch agent for session {config.session_id}")
+        logger.info(f"Loaded {len(self.skill_registry)} skills")
+        mcp_status = self.mcp_manager.get_status()
+        logger.info(f"Loaded {mcp_status['connected_clients']} MCP servers: {mcp_status['server_names']}")
+    
+    def _init_mcp_servers(self, mcp_config_path: Optional[Path] = None) -> None:
+        """Initialize MCP server connections.
+        
+        Args:
+            mcp_config_path: Optional path to MCP configuration file
+        """
+        try:
+            self.mcp_manager = MCPServerManager(mcp_config_path)
+        except Exception as e:
+            logger.warning(f"Failed to initialize MCP servers: {e}")
+            # Create empty manager as fallback
+            from glitch.mcp.types import MCPConfig
+            self.mcp_manager = MCPServerManager.__new__(MCPServerManager)
+            self.mcp_manager.config = MCPConfig(servers={})
+            self.mcp_manager.clients = {}
+    
+    def _init_skills(self, skills_dir: Optional[Path] = None) -> None:
+        """Initialize the skill system.
+        
+        Args:
+            skills_dir: Optional path to skills directory
+        """
+        skills_path = skills_dir or get_default_skills_dir()
+        
+        # Load skills (non-strict mode to gracefully handle missing/invalid skills)
+        loader = SkillLoader(skills_path, strict=False)
+        skills = loader.load_all()
+        
+        # Build registry
+        self.skill_registry = SkillRegistry()
+        self.skill_registry.register_all(skills)
+        
+        # Create selector and planner
+        self.skill_selector = SkillSelector(self.skill_registry)
+        self.task_planner = TaskPlanner()
+    
+    def _select_and_inject_skills(self, user_message: str, model_name: str) -> str:
+        """Select skills for the message and build prompt with injected skills.
+        
+        Args:
+            user_message: The user's input message
+            model_name: Name of the model that will execute
+            
+        Returns:
+            System prompt with skills injected
+        """
+        # Plan the task
+        task_spec = self.task_planner.plan(user_message)
+        
+        # Select skills
+        self.last_skill_selection = self.skill_selector.select(task_spec, model_name)
+        
+        # Log skill selection
+        if self.last_skill_selection.selected:
+            logger.info(
+                f"Selected skills for model {model_name}: "
+                f"{[s.skill_id for s in self.last_skill_selection.selected]}"
+            )
+            for selected in self.last_skill_selection.selected:
+                reasons = [r.value for r in selected.reasons]
+                logger.debug(
+                    f"  {selected.skill_id}: score={selected.match_score:.2f}, "
+                    f"reasons={reasons}"
+                )
+        
+        # Build prompt with skills
+        return build_prompt_with_skills(
+            self._base_prompt,
+            self.last_skill_selection.selected,
+        )
     
     async def process_message(self, user_message: str) -> InvocationResponse:
         """Process a user message through the Glitch orchestrator.
         
         Dataflow:
-            user_message -> Memory (store) -> Strands Agent -> AgentResult
-                                                    |
-                                                    v
-                                        extract_metrics_from_result()
-                                                    |
-                                                    v
-                                            InvocationResponse
+            user_message -> TaskPlanner -> TaskSpec
+                                              |
+                                              v
+                                      SkillSelector(TaskSpec, model)
+                                              |
+                                              v
+                                      build_prompt_with_skills()
+                                              |
+                                              v
+                                      Strands Agent -> AgentResult
+                                              |
+                                              v
+                                      InvocationResponse (with skill telemetry)
         
         Args:
             user_message: The user's input message
@@ -243,20 +401,33 @@ class GlitchAgent:
                 event_type=EventType.USER_MESSAGE.value,
             )
             
+            # Select and inject skills based on message content
+            prompt_with_skills = self._select_and_inject_skills(
+                user_message, self._current_model_name
+            )
+            
+            # Update agent's system prompt with skills
+            self.agent.system_prompt = prompt_with_skills
+            
             memory_context = self.memory_manager.get_summary_for_context()
             enriched_message = f"{user_message}\n\n[Structured Memory:\n{memory_context}]"
             
-            result = self.agent(enriched_message)
+            max_turns = int(os.getenv("GLITCH_MAX_TURNS", "3"))
+            run_kwargs = {} if max_turns <= 0 else {"max_turns": max_turns}
+            result = self.agent(enriched_message, **run_kwargs)
             set_last_agent_result(result)
             append_telemetry(result)
 
             metrics: InvocationMetrics = extract_metrics_from_result(result)
             
+            # Log with skill information
+            skill_info = self._get_skill_telemetry()
             log_invocation_metrics(
                 metrics=metrics,
                 user_message=user_message[:100],
                 response_preview=str(result)[:200],
                 session_id=self.session_id,
+                extra=skill_info,
             )
             
             await self.memory_manager.create_event(
@@ -281,18 +452,45 @@ class GlitchAgent:
                 memory_id=self.memory_id,
             )
     
+    def _get_skill_telemetry(self) -> Dict[str, Any]:
+        """Get skill selection info for telemetry logging.
+        
+        Returns:
+            Dictionary with skill selection details
+        """
+        if not self.last_skill_selection:
+            return {"skills_injected": 0, "skill_ids": []}
+            
+        return {
+            "skills_injected": len(self.last_skill_selection.selected),
+            "skill_ids": [s.skill_id for s in self.last_skill_selection.selected],
+            "skill_reasons": {
+                s.skill_id: [r.value for r in s.reasons]
+                for s in self.last_skill_selection.selected
+            },
+            "model_used": self.last_skill_selection.model_used,
+            "total_skill_candidates": self.last_skill_selection.total_candidates,
+        }
+    
     def get_status(self) -> AgentStatus:
         """Get agent status and statistics.
         
         Returns:
             AgentStatus with session info, routing stats, and memory state
         """
-        return AgentStatus(
+        status = AgentStatus(
             session_id=self.session_id,
             memory_id=self.memory_id,
             routing_stats=self.model_router.get_stats(),
             structured_memory=self.memory_manager.structured_memory.to_dict(),
         )
+        # Add skill info to status
+        status["skills_loaded"] = len(self.skill_registry)
+        if self.last_skill_selection:
+            status["last_skill_selection"] = self.last_skill_selection.to_log_dict()
+        # Add MCP server info to status
+        status["mcp_servers"] = self.mcp_manager.get_status()
+        return status
     
     async def check_connectivity(self) -> ConnectivityStatus:
         """Check connectivity to all integrated services.

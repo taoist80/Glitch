@@ -17,16 +17,19 @@ Dataflow:
 """
 
 import asyncio
+import json
 import logging
 import os
 import sys
+import time
 import boto3
 import urllib.request
-import json
+import urllib.error
 from pathlib import Path
 from typing import Optional
 
 from glitch.agent import create_glitch_agent, GlitchAgent
+from glitch.poet_agent import create_poet_agent
 from glitch.telemetry import setup_telemetry
 from glitch.types import (
     TelemetryConfig,
@@ -113,8 +116,24 @@ def get_server_config() -> ServerConfig:
     )
 
 
+def get_current_telegram_webhook(bot_token: str) -> Optional[str]:
+    """Get current webhook URL from Telegram (getWebhookInfo). Returns None on error."""
+    info_url = f"https://api.telegram.org/bot{bot_token}/getWebhookInfo"
+    try:
+        with urllib.request.urlopen(info_url, timeout=10) as response:
+            result = json.loads(response.read().decode())
+            if result.get("ok"):
+                return (result.get("result") or {}).get("url") or ""
+            return None
+    except Exception:
+        return None
+
+
 def register_telegram_webhook(bot_token: str, webhook_url: str, secret_token: str) -> bool:
     """Register webhook URL with Telegram API.
+    
+    If getWebhookInfo shows the URL is already set to webhook_url, skips setWebhook to avoid
+    rate limits when multiple runtime instances start. Retries on 429 with exponential backoff.
     
     Args:
         bot_token: Telegram bot token
@@ -122,34 +141,55 @@ def register_telegram_webhook(bot_token: str, webhook_url: str, secret_token: st
         secret_token: Secret token for webhook validation
         
     Returns:
-        True if registration succeeded
+        True if registration succeeded or webhook already set to this URL
     """
+    current = get_current_telegram_webhook(bot_token)
+    if current is not None and current.rstrip("/") == webhook_url.rstrip("/"):
+        logger.info("Telegram webhook already set to %s, skipping setWebhook", webhook_url)
+        return True
+
     url = f"https://api.telegram.org/bot{bot_token}/setWebhook"
-    data = json.dumps({
+    payload = {
         "url": webhook_url,
         "secret_token": secret_token,
         "allowed_updates": ["message", "edited_message", "callback_query"],
         "drop_pending_updates": True,
-    }).encode()
-    
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={"Content-Type": "application/json"},
-    )
-    
-    try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            result = json.loads(response.read().decode())
-            if result.get("ok"):
-                logger.info(f"Telegram webhook registered: {webhook_url}")
-                return True
-            else:
+    }
+    data = json.dumps(payload).encode()
+    max_attempts = 4
+    base_delay = 5.0
+
+    for attempt in range(max_attempts):
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                result = json.loads(response.read().decode())
+                if result.get("ok"):
+                    logger.info(f"Telegram webhook registered: {webhook_url}")
+                    return True
                 logger.error(f"Failed to register webhook: {result}")
                 return False
-    except Exception as e:
-        logger.error(f"Error registering webhook: {e}")
-        return False
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < max_attempts - 1:
+                delay = base_delay * (2**attempt)
+                logger.warning(
+                    "Telegram rate limit (429) when registering webhook, retrying in %.0fs (attempt %d/%d)",
+                    delay,
+                    attempt + 1,
+                    max_attempts,
+                )
+                time.sleep(delay)
+                continue
+            logger.error(f"Error registering webhook: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Error registering webhook: {e}")
+            return False
+    return False
 
 
 def get_webhook_url() -> Optional[str]:
@@ -196,8 +236,9 @@ async def main() -> None:
     
     logger.info(f"Glitch agent initialized for session: {agent.session_id}")
     
-    connectivity = await agent.check_connectivity()
-    logger.info(f"Connectivity check: {connectivity}")
+    # Skip blocking connectivity check on startup - run on-demand via /status command instead
+    # connectivity = await agent.check_connectivity()
+    # logger.info(f"Connectivity check: {connectivity}")
     
     # Initialize Telegram channel if bot token is in Secrets Manager
     telegram_channel = None
@@ -237,11 +278,15 @@ async def main() -> None:
             # Initialize bootstrap system
             bootstrap = OwnerBootstrap(config_manager)
             
+            # Create Poet sub-agent for Telegram routing
+            poet_agent = create_poet_agent()
+            
             # Create Telegram channel
             telegram_channel = TelegramChannel(
                 config_manager=config_manager,
                 bootstrap=bootstrap,
                 agent=agent,
+                poet_agent=poet_agent,
             )
             
             # Start Telegram channel in background
