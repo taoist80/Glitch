@@ -2,6 +2,7 @@ import * as cdk from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from 'constructs';
 
@@ -15,6 +16,8 @@ export class TelegramWebhookStack extends cdk.Stack {
   public readonly configTable: dynamodb.Table;
   public readonly webhookFunction: lambda.Function;
   public readonly webhookUrl: string;
+  /** S3 bucket for persistent agent state (e.g. SOUL.md). Set GLITCH_SOUL_S3_BUCKET to this in runtime env. */
+  public readonly soulBucket: s3.Bucket;
 
   constructor(scope: Construct, id: string, props: TelegramWebhookStackProps) {
     super(scope, id, props);
@@ -78,6 +81,19 @@ export class TelegramWebhookStack extends cdk.Stack {
 
     this.webhookUrl = functionUrl.url;
 
+    // S3 bucket for persistent SOUL.md (personality) so Telegram and chat agents can read/write it.
+    this.soulBucket = new s3.Bucket(this, 'GlitchSoulBucket', {
+      bucketName: `glitch-agent-state-${cdk.Stack.of(this).account}-${cdk.Stack.of(this).region}`,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+    });
+    new cdk.CfnOutput(this, 'GlitchSoulBucketName', {
+      value: this.soulBucket.bucketName,
+      description: 'S3 bucket for Glitch SOUL.md; set GLITCH_SOUL_S3_BUCKET to this in runtime env',
+      exportName: 'GlitchSoulBucketName',
+    });
+
     // Grant AgentCore runtime role access to DynamoDB via AwsCustomResource.
     // This bypasses CloudFormation's ResourceExistenceCheck hook which fails when
     // referencing external IAM roles not managed by this stack.
@@ -138,6 +154,118 @@ export class TelegramWebhookStack extends cdk.Stack {
       ]),
     });
 
+    // Grant AgentCore runtime role permission to read webhook Lambda URL (for runtime to fetch
+    // and display webhook URL; same role, same AwsCustomResource pattern).
+    const lambdaWebhookPolicyName = 'GlitchLambdaWebhookRead';
+    const lambdaWebhookPolicyDocument = JSON.stringify({
+      Version: '2012-10-17',
+      Statement: [
+        {
+          Sid: 'LambdaWebhookRead',
+          Effect: 'Allow',
+          Action: ['lambda:GetFunctionUrlConfig', 'lambda:GetFunction'],
+          Resource: this.webhookFunction.functionArn,
+        },
+      ],
+    });
+    new cdk.custom_resources.AwsCustomResource(this, 'AgentCoreLambdaWebhookReadPolicy', {
+      onCreate: {
+        service: 'IAM',
+        action: 'putRolePolicy',
+        parameters: {
+          RoleName: roleName,
+          PolicyName: lambdaWebhookPolicyName,
+          PolicyDocument: lambdaWebhookPolicyDocument,
+        },
+        physicalResourceId: cdk.custom_resources.PhysicalResourceId.of(
+          `${roleName}-${lambdaWebhookPolicyName}`
+        ),
+      },
+      onUpdate: {
+        service: 'IAM',
+        action: 'putRolePolicy',
+        parameters: {
+          RoleName: roleName,
+          PolicyName: lambdaWebhookPolicyName,
+          PolicyDocument: lambdaWebhookPolicyDocument,
+        },
+        physicalResourceId: cdk.custom_resources.PhysicalResourceId.of(
+          `${roleName}-${lambdaWebhookPolicyName}`
+        ),
+      },
+      onDelete: {
+        service: 'IAM',
+        action: 'deleteRolePolicy',
+        parameters: {
+          RoleName: roleName,
+          PolicyName: lambdaWebhookPolicyName,
+        },
+      },
+      policy: cdk.custom_resources.AwsCustomResourcePolicy.fromStatements([
+        new iam.PolicyStatement({
+          actions: ['iam:PutRolePolicy', 'iam:DeleteRolePolicy'],
+          resources: [defaultExecutionRoleArn],
+        }),
+      ]),
+    });
+
+    // Grant AgentCore runtime role read/write access to SOUL.md in S3 (same AwsCustomResource pattern).
+    const soulPolicyName = 'GlitchSoulS3Access';
+    const soulBucketObjectsArn = this.soulBucket.arnForObjects('*');
+    const soulPolicyDocument = cdk.Fn.sub(
+      JSON.stringify({
+        Version: '2012-10-17',
+        Statement: [
+          {
+            Sid: 'SoulS3Access',
+            Effect: 'Allow',
+            Action: ['s3:GetObject', 's3:PutObject'],
+            Resource: ['${SoulBucketObjectsArn}'],
+          },
+        ],
+      }),
+      { SoulBucketObjectsArn: soulBucketObjectsArn }
+    );
+    new cdk.custom_resources.AwsCustomResource(this, 'AgentCoreSoulS3Policy', {
+      onCreate: {
+        service: 'IAM',
+        action: 'putRolePolicy',
+        parameters: {
+          RoleName: roleName,
+          PolicyName: soulPolicyName,
+          PolicyDocument: soulPolicyDocument,
+        },
+        physicalResourceId: cdk.custom_resources.PhysicalResourceId.of(
+          `${roleName}-${soulPolicyName}`
+        ),
+      },
+      onUpdate: {
+        service: 'IAM',
+        action: 'putRolePolicy',
+        parameters: {
+          RoleName: roleName,
+          PolicyName: soulPolicyName,
+          PolicyDocument: soulPolicyDocument,
+        },
+        physicalResourceId: cdk.custom_resources.PhysicalResourceId.of(
+          `${roleName}-${soulPolicyName}`
+        ),
+      },
+      onDelete: {
+        service: 'IAM',
+        action: 'deleteRolePolicy',
+        parameters: {
+          RoleName: roleName,
+          PolicyName: soulPolicyName,
+        },
+      },
+      policy: cdk.custom_resources.AwsCustomResourcePolicy.fromStatements([
+        new iam.PolicyStatement({
+          actions: ['iam:PutRolePolicy', 'iam:DeleteRolePolicy'],
+          resources: [defaultExecutionRoleArn],
+        }),
+      ]),
+    });
   }
 
   private getLambdaCode(): string {

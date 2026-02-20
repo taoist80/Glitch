@@ -26,6 +26,7 @@ from glitch.tools.network_tools import (
     check_unifi_network,
     query_protect_cameras,
 )
+from glitch.tools.soul_tools import load_soul_from_s3, update_soul
 from glitch.routing.model_router import ModelRouter
 from glitch.memory.sliding_window import GlitchMemoryManager
 from glitch.telemetry import extract_metrics_from_result, log_invocation_metrics
@@ -46,7 +47,8 @@ logger = logging.getLogger(__name__)
 def load_soul() -> str:
     """Load SOUL.md personality file.
     
-    Searches for SOUL.md in multiple locations:
+    When GLITCH_SOUL_S3_BUCKET is set, tries S3 first (soul.md key by default).
+    Then searches local paths:
     1. agent/SOUL.md (development)
     2. /app/SOUL.md (container)
     3. ~/SOUL.md (fallback)
@@ -54,17 +56,22 @@ def load_soul() -> str:
     Returns:
         Contents of SOUL.md or empty string if not found
     """
+    s3_content = load_soul_from_s3()
+    if s3_content:
+        logger.info("Loading personality from S3")
+        return s3_content
+
     soul_paths = [
         Path(__file__).parent.parent.parent / "SOUL.md",
         Path("/app/SOUL.md"),
         Path.home() / "SOUL.md",
     ]
-    
+
     for path in soul_paths:
         if path.exists():
-            logger.info(f"Loading personality from {path}")
+            logger.info("Loading personality from %s", path)
             return path.read_text()
-    
+
     logger.warning("SOUL.md not found, using default personality")
     return ""
 
@@ -97,6 +104,7 @@ GLITCH_TECHNICAL_CONTEXT = """
 - vision_agent: Local LLaVA model for image analysis (10.10.110.137)
 - local_chat: Local Ollama for lightweight tasks (10.10.110.202)
 - check_ollama_health: Verify connectivity to on-prem models
+- update_soul: Update persistent SOUL.md (personality/instructions) when the user asks to change how you behave or remember preferences
 - Network tools: Pi-hole, Unifi, Protect (coming in future iterations)
 
 **Routing Guidelines:**
@@ -177,6 +185,7 @@ class GlitchAgent:
                 vision_agent,
                 local_chat,
                 check_ollama_health,
+                update_soul,
                 query_pihole_stats,
                 check_unifi_network,
                 query_protect_cameras,
@@ -279,14 +288,9 @@ class GlitchAgent:
         )
 
 
-def _default_memory_id() -> str:
-    """Generate a memory_id that satisfies AgentCore CreateEvent pattern: [a-zA-Z][a-zA-Z0-9-_]{0,99}-[a-zA-Z0-9]{10}."""
-    import secrets
-    suffix = "".join(
-        secrets.choice("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
-        for _ in range(10)
-    )
-    return f"glitch-memory-{suffix}"
+# Memory ID used when no env var is set. Must match agent/.bedrock_agentcore.yaml memory_id so
+# CreateEvent targets the existing AgentCore memory (AgentCore runtime does not inject MEMORY_ID).
+_DEFAULT_AGENTCORE_MEMORY_ID = "Glitch_mem-IJtoBX7Ljd"
 
 
 def create_glitch_agent(
@@ -299,7 +303,7 @@ def create_glitch_agent(
     
     Args:
         session_id: Session identifier (defaults to env or generated UUID)
-        memory_id: Memory identifier (defaults to env or generated; must match [a-zA-Z][a-zA-Z0-9-_]{{0,99}}-[a-zA-Z0-9]{{10}})
+        memory_id: Memory identifier (defaults to env or _DEFAULT_AGENTCORE_MEMORY_ID; must match [a-zA-Z][a-zA-Z0-9-_]{{0,99}}-[a-zA-Z0-9]{{10}})
         region: AWS region (defaults to env or us-west-2)
         window_size: Sliding window size for conversation history
     
@@ -308,9 +312,16 @@ def create_glitch_agent(
     """
     import uuid
 
+    # Prefer explicit memory_id, then GLITCH_MEMORY_ID, then MEMORY_ID (set by AgentCore deploy), else use known memory from .bedrock_agentcore.yaml
+    _memory_id = (
+        memory_id
+        or os.getenv("GLITCH_MEMORY_ID")
+        or os.getenv("MEMORY_ID")
+        or _DEFAULT_AGENTCORE_MEMORY_ID
+    )
     config = AgentConfig(
         session_id=session_id or os.getenv("GLITCH_SESSION_ID", str(uuid.uuid4())),
-        memory_id=memory_id or os.getenv("GLITCH_MEMORY_ID", _default_memory_id()),
+        memory_id=_memory_id,
         region=region or os.getenv("AWS_REGION", "us-west-2"),
         window_size=window_size,
     )
