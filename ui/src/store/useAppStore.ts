@@ -6,9 +6,11 @@ import type {
   TelegramConfig,
   OllamaHealth,
   MemorySummary,
+  TelemetryData,
   MCPServersResponse,
   SkillsResponse,
   ChatMessage,
+  InvocationResponse,
 } from '../types';
 import { api } from '../api/client';
 
@@ -44,6 +46,11 @@ interface AppState {
   memoryLoading: boolean;
   memoryError: string | null;
   fetchMemorySummary: () => Promise<void>;
+
+  telemetryData: TelemetryData | null;
+  telemetryLoading: boolean;
+  telemetryError: string | null;
+  fetchTelemetry: () => Promise<void>;
   
   mcpServers: MCPServersResponse | null;
   mcpLoading: boolean;
@@ -145,6 +152,22 @@ export const useAppStore = create<AppState>()(
           });
         }
       },
+
+      telemetryData: null,
+      telemetryLoading: false,
+      telemetryError: null,
+      fetchTelemetry: async () => {
+        set({ telemetryLoading: true, telemetryError: null });
+        try {
+          const data = await api.getTelemetry();
+          set({ telemetryData: data, telemetryLoading: false });
+        } catch (error) {
+          set({
+            telemetryError: error instanceof Error ? error.message : 'Failed to fetch telemetry',
+            telemetryLoading: false,
+          });
+        }
+      },
       
       mcpServers: null,
       mcpLoading: false,
@@ -208,8 +231,24 @@ export const useAppStore = create<AppState>()(
         try {
           const response = await api.sendMessage(content);
           
+          // Extract the actual message content from various possible response formats
+          let messageContent = '';
+          const res = response as InvocationResponse & { response?: string };
+          if (typeof response === 'string') {
+            messageContent = response;
+          } else if (res.message) {
+            messageContent = res.message;
+          } else if (res.response) {
+            messageContent = res.response;
+          } else if (typeof response === 'object') {
+            // If we have an object but no message field, try to find text content
+            messageContent = JSON.stringify(response, null, 2);
+          } else {
+            messageContent = String(response);
+          }
+          
           // Handle metrics safely - they may be missing or have different structure
-          const metrics = response.metrics ? {
+          const metrics = response?.metrics ? {
             duration_seconds: response.metrics.duration_seconds ?? 0,
             token_usage: response.metrics.token_usage ?? {
               input_tokens: 0,
@@ -222,7 +261,7 @@ export const useAppStore = create<AppState>()(
           const assistantMessage: ChatMessage = {
             id: crypto.randomUUID(),
             role: 'assistant',
-            content: response.message || String(response),
+            content: messageContent,
             timestamp: new Date(),
             metrics,
           };

@@ -3,6 +3,7 @@ import type {
   TelegramConfig,
   OllamaHealth,
   MemorySummary,
+  TelemetryData,
   MCPServersResponse,
   SkillsResponse,
   InvocationResponse,
@@ -11,26 +12,46 @@ import type {
 const API_BASE = '/api';
 
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options?.headers,
-    },
-  });
-  
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        ...options?.headers,
+      },
+    });
+  } catch (networkError) {
+    const msg =
+      networkError instanceof TypeError && (networkError as Error).message === 'Failed to fetch'
+        ? 'Cannot reach the server. Is the agent running? In proxy mode use GLITCH_UI_MODE=proxy and ensure the deployed agent is ready.'
+        : (networkError as Error).message;
+    throw new Error(msg);
+  }
+
+  const text = await response.text();
   if (!response.ok) {
-    const error = await response.text();
-    throw new Error(error || `HTTP ${response.status}`);
+    try {
+      const errBody = JSON.parse(text) as { error?: string };
+      throw new Error(errBody?.error || text || `HTTP ${response.status}`);
+    } catch (e) {
+      if (e instanceof Error && e.name === 'SyntaxError') throw new Error(text || `HTTP ${response.status}`);
+      throw e;
+    }
   }
-  
-  const data = await response.json();
-  
-  // Check for error responses from the proxy/agent
-  if (data && typeof data === 'object' && 'error' in data && !('message' in data)) {
-    throw new Error(data.error || 'Unknown error');
+
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(text || 'Invalid response');
   }
-  
+
+  // Check for error payload from proxy/agent (200 body with error field)
+  if (data && typeof data === 'object' && 'error' in data && !('message' in (data as object))) {
+    throw new Error((data as { error?: string }).error || 'Unknown error');
+  }
+
   return data as T;
 }
 
@@ -56,6 +77,10 @@ export const api = {
 
   async getMemorySummary(): Promise<MemorySummary> {
     return fetchJson<MemorySummary>(`${API_BASE}/memory/summary`);
+  },
+
+  async getTelemetry(): Promise<TelemetryData> {
+    return fetchJson<TelemetryData>(`${API_BASE}/telemetry`);
   },
 
   async getMCPServers(): Promise<MCPServersResponse> {

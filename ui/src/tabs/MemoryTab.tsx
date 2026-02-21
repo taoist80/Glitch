@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { RefreshCw, Brain, Database, CheckCircle, XCircle } from 'lucide-react';
+import { RefreshCw, Brain, Database, CheckCircle, XCircle, MessageSquare } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
 
 export function MemoryTab() {
@@ -9,51 +9,44 @@ export function MemoryTab() {
     fetchMemorySummary();
   }, [fetchMemorySummary]);
 
-  const renderValue = (value: unknown, depth = 0): React.ReactNode => {
-    if (value === null || value === undefined) {
-      return <span className="text-base-content/50">null</span>;
-    }
-    if (typeof value === 'string') {
-      return <span className="text-success">"{value}"</span>;
-    }
-    if (typeof value === 'number') {
-      return <span className="text-info">{value}</span>;
-    }
-    if (typeof value === 'boolean') {
-      return <span className="text-warning">{value.toString()}</span>;
-    }
-    if (Array.isArray(value)) {
-      if (value.length === 0) {
-        return <span className="text-base-content/50">[]</span>;
-      }
+  const sm = memorySummary?.structured_memory ?? {};
+  const section = (title: string, value: unknown, emptyLabel = '—') => {
+    if (value === undefined || value === null) return null;
+    if (Array.isArray(value) && value.length === 0)
       return (
-        <div className="ml-4">
-          {value.map((item, i) => (
-            <div key={i} className="flex">
-              <span className="text-base-content/50 mr-2">{i}:</span>
-              {renderValue(item, depth + 1)}
-            </div>
-          ))}
+        <div className="mb-3">
+          <span className="text-primary font-medium">{title}:</span>{' '}
+          <span className="text-base-content/50">{emptyLabel}</span>
         </div>
       );
-    }
-    if (typeof value === 'object') {
-      const entries = Object.entries(value as Record<string, unknown>);
-      if (entries.length === 0) {
-        return <span className="text-base-content/50">{'{}'}</span>;
-      }
+    if (typeof value === 'string' && value === '')
       return (
-        <div className={depth > 0 ? 'ml-4' : ''}>
-          {entries.map(([key, val]) => (
-            <div key={key} className="flex">
-              <span className="text-primary mr-2">{key}:</span>
-              {renderValue(val, depth + 1)}
-            </div>
-          ))}
+        <div className="mb-3">
+          <span className="text-primary font-medium">{title}:</span>{' '}
+          <span className="text-base-content/50">{emptyLabel}</span>
         </div>
       );
-    }
-    return <span>{String(value)}</span>;
+    if (Array.isArray(value))
+      return (
+        <div className="mb-3">
+          <span className="text-primary font-medium">{title}:</span>
+          <ul className="list-disc list-inside mt-1 ml-2 text-sm">
+            {value.map((item, i) => (
+              <li key={i}>
+                {typeof item === 'object' && item !== null && 'decision' in (item as object)
+                  ? `${(item as { decision?: string }).decision ?? ''} (${(item as { rationale?: string }).rationale ?? ''})`
+                  : String(item)}
+              </li>
+            ))}
+          </ul>
+        </div>
+      );
+    return (
+      <div className="mb-3">
+        <span className="text-primary font-medium">{title}:</span>{' '}
+        <span className="text-base-content">{String(value)}</span>
+      </div>
+    );
   };
 
   return (
@@ -123,11 +116,41 @@ export function MemoryTab() {
           <div className="card bg-base-200">
             <div className="card-body">
               <h3 className="card-title text-lg">Structured Memory</h3>
-              <div className="bg-base-300 rounded-lg p-4 font-mono text-sm overflow-x-auto">
-                {renderValue(memorySummary.structured_memory)}
+              <div className="bg-base-300 rounded-lg p-4 text-sm">
+                {section('Session goal', sm.session_goal)}
+                {section('Facts', sm.facts, 'None')}
+                {section('Constraints', sm.constraints, 'None')}
+                {section('Decisions', sm.decisions, 'None')}
+                {section('Open questions', sm.open_questions, 'None')}
+                {section('Tool results summary', sm.tool_results_summary, 'None')}
+                {section('Last updated', sm.last_updated)}
               </div>
             </div>
           </div>
+
+          {Array.isArray(memorySummary.recent_events) && memorySummary.recent_events.length > 0 && (
+            <div className="card bg-base-200">
+              <div className="card-body">
+                <h3 className="card-title text-lg flex items-center gap-2">
+                  <MessageSquare size={20} />
+                  Recent conversation turns
+                </h3>
+                <div className="bg-base-300 rounded-lg p-4 font-mono text-sm overflow-x-auto max-h-64 overflow-y-auto">
+                  <ul className="space-y-2">
+                    {memorySummary.recent_events.map((ev: { role?: string; content?: string; message?: string }, i: number) => (
+                      <li key={i} className="border-b border-base-content/10 pb-2 last:border-0">
+                        <span className="text-primary font-medium">
+                          {(ev.role ?? ev.message ?? 'message')}:
+                        </span>{' '}
+                        {(ev.content ?? ev.message ?? JSON.stringify(ev)).toString().slice(0, 200)}
+                        {((ev.content ?? ev.message ?? '') as string).length > 200 ? '…' : ''}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       ) : (
         <div className="text-center py-8 text-base-content/60">

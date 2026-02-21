@@ -7,6 +7,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 
 export interface TelegramWebhookStackProps extends cdk.StackProps {
@@ -118,8 +119,25 @@ export class TelegramWebhookStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, 'GlitchSoulBucketName', {
       value: this.soulBucket.bucketName,
-      description: 'S3 bucket for Glitch SOUL.md; set GLITCH_SOUL_S3_BUCKET to this in runtime env',
+      description: 'S3 bucket for Glitch SOUL.md; set GLITCH_SOUL_S3_BUCKET to this in runtime env (or use SSM auto-config)',
       exportName: 'GlitchSoulBucketName',
+    });
+
+    // SSM parameters so the runtime can discover SOUL/poet-soul S3 config without env vars (optional override).
+    const soulS3BucketParam = new ssm.StringParameter(this, 'GlitchSoulS3BucketParam', {
+      parameterName: '/glitch/soul/s3-bucket',
+      stringValue: this.soulBucket.bucketName,
+      description: 'S3 bucket for SOUL.md and poet-soul.md; agent reads this when GLITCH_SOUL_S3_BUCKET is not set',
+    });
+    const soulS3KeyParam = new ssm.StringParameter(this, 'GlitchSoulS3KeyParam', {
+      parameterName: '/glitch/soul/s3-key',
+      stringValue: 'soul.md',
+      description: 'S3 object key for SOUL.md; agent reads this when GLITCH_SOUL_S3_KEY is not set',
+    });
+    const poetSoulS3KeyParam = new ssm.StringParameter(this, 'GlitchPoetSoulS3KeyParam', {
+      parameterName: '/glitch/soul/poet-soul-s3-key',
+      stringValue: 'poet-soul.md',
+      description: 'S3 object key for poet-soul.md',
     });
 
     // Grant AgentCore runtime role access to DynamoDB via AwsCustomResource.
@@ -285,6 +303,64 @@ export class TelegramWebhookStack extends cdk.Stack {
         parameters: {
           RoleName: roleName,
           PolicyName: soulPolicyName,
+        },
+      },
+      policy: cdk.custom_resources.AwsCustomResourcePolicy.fromStatements([
+        new iam.PolicyStatement({
+          actions: ['iam:PutRolePolicy', 'iam:DeleteRolePolicy'],
+          resources: [defaultExecutionRoleArn],
+        }),
+      ]),
+    });
+
+    // Grant AgentCore runtime role read access to SSM parameters for SOUL/poet-soul S3 config (auto-config).
+    const soulSsmPolicyName = 'GlitchSoulSsmRead';
+    const soulSsmPolicyDocument = JSON.stringify({
+      Version: '2012-10-17',
+      Statement: [
+        {
+          Sid: 'SoulSsmRead',
+          Effect: 'Allow',
+          Action: ['ssm:GetParameter', 'ssm:GetParameters'],
+          Resource: [
+            soulS3BucketParam.parameterArn,
+            soulS3KeyParam.parameterArn,
+            poetSoulS3KeyParam.parameterArn,
+          ],
+        },
+      ],
+    });
+    new cdk.custom_resources.AwsCustomResource(this, 'AgentCoreSoulSsmPolicy', {
+      onCreate: {
+        service: 'IAM',
+        action: 'putRolePolicy',
+        parameters: {
+          RoleName: roleName,
+          PolicyName: soulSsmPolicyName,
+          PolicyDocument: soulSsmPolicyDocument,
+        },
+        physicalResourceId: cdk.custom_resources.PhysicalResourceId.of(
+          `${roleName}-${soulSsmPolicyName}`
+        ),
+      },
+      onUpdate: {
+        service: 'IAM',
+        action: 'putRolePolicy',
+        parameters: {
+          RoleName: roleName,
+          PolicyName: soulSsmPolicyName,
+          PolicyDocument: soulSsmPolicyDocument,
+        },
+        physicalResourceId: cdk.custom_resources.PhysicalResourceId.of(
+          `${roleName}-${soulSsmPolicyName}`
+        ),
+      },
+      onDelete: {
+        service: 'IAM',
+        action: 'deleteRolePolicy',
+        parameters: {
+          RoleName: roleName,
+          PolicyName: soulSsmPolicyName,
         },
       },
       policy: cdk.custom_resources.AwsCustomResourcePolicy.fromStatements([

@@ -27,6 +27,13 @@ from typing import Dict, List, Literal, Optional, Any
 from typing_extensions import TypedDict
 
 
+class UiApiRequest(TypedDict, total=False):
+    """Payload for UI API requests routed through invocations (proxy mode)."""
+    path: str
+    method: str
+    body: Optional[Dict[str, Any]]
+
+
 class TokenUsage(TypedDict):
     """Token usage statistics for a single invocation.
     
@@ -105,10 +112,13 @@ class InvocationRequest(TypedDict, total=False):
     """Request payload for agent invocation.
     
     Sent to POST /invocations endpoint.
+    Either prompt (normal chat) or _ui_api_request (proxy API) is present.
     """
-    prompt: str  # Required: The user's message
+    prompt: str  # Required for chat invocations
     session_id: Optional[str]  # Optional: Override session ID
     context: Optional[Dict[str, Any]]  # Optional: Additional context
+    stream: bool  # Optional: Stream events instead of single response
+    _ui_api_request: UiApiRequest  # Optional: UI API proxy request
 
 
 class InvocationResponse(TypedDict, total=False):

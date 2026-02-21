@@ -20,62 +20,70 @@ A modern React + DaisyUI dashboard for the Glitch Agent system.
 
 - Node.js 18+
 - pnpm
-- AWS CLI configured with credentials
-- AgentCore CLI (`pip install bedrock-agentcore-starter-toolkit`)
+- AWS CLI configured with credentials (for deployed agent / proxy mode)
 
-### Connecting to a Deployed Agent
+### Option A: Local Development (hot reload)
 
-The UI connects to your deployed Glitch agent via a local proxy that uses the AgentCore CLI.
-
-```bash
-cd ui
-
-# Step 1: Check connection status
-pnpm check
-
-# Step 2: Start the proxy (in one terminal)
-pnpm proxy
-
-# Step 3: Start the UI (in another terminal)
-pnpm dev
-
-# Step 4: Open http://localhost:5173
-```
-
-### How It Works
-
-```
-┌─────────────┐     ┌─────────────┐     ┌──────────────────┐
-│   Browser   │────▶│ Local Proxy │────▶│ AgentCore Runtime│
-│ :5173       │     │ :8080       │     │ (AWS)            │
-└─────────────┘     └─────────────┘     └──────────────────┘
-                          │
-                          ▼
-                    agentcore invoke
-```
-
-1. The UI runs on `localhost:5173` (Vite dev server)
-2. Vite proxies `/api/*` requests to `localhost:8080`
-3. The local proxy (`pnpm proxy`) forwards requests to the deployed agent via `agentcore invoke`
-4. The agent handles API requests and returns responses
-
-### Local Development (Optional)
-
-If you want to run the agent locally instead:
+Run the agent locally and the UI with Vite dev server.
 
 ```bash
+# From the repo root (parent of agent/ and ui/)
+
 # Terminal 1: Start the agent locally
-cd agent
-agentcore deploy --local
+cd agent && PYTHONPATH=src python3 src/main.py
 
 # Terminal 2: Start the UI
-cd ui
-pnpm dev
+cd ui && pnpm dev
 
 # Open http://localhost:5173
 ```
 
-When running locally, the agent serves on port 8080 directly, so no proxy is needed.
+Vite proxies `/api` and `/invocations` to `http://localhost:8080`.
+
+### Option B: Production (built UI served by agent)
+
+Build the UI once, then the agent serves it at `/ui`. No separate UI process.
+
+```bash
+# From the repo root
+cd ui && pnpm build
+cd ../agent && PYTHONPATH=src python3 src/main.py
+
+# Open http://localhost:8080/ui
+```
+
+### Option C: Deployed Agent (proxy mode)
+
+Use the agent process as a local server that proxies all API and chat traffic to your deployed AgentCore runtime (boto3). No AgentCore CLI needed.
+
+```bash
+# Set proxy mode and deployed agent name
+export GLITCH_UI_MODE=proxy
+export GLITCH_DEPLOYED_AGENT_NAME=Glitch
+export AWS_REGION=us-west-2
+
+# Optional: set runtime ARN to skip control-plane lookup
+# export GLITCH_AGENT_RUNTIME_ARN=arn:aws:bedrock-agentcore:us-west-2:ACCOUNT:runtime/Glitch-XXX
+
+# From the repo root: build UI and start agent (serves UI at /ui, proxies to deployed agent)
+cd ui && pnpm build
+cd ../agent && GLITCH_UI_MODE=proxy PYTHONPATH=src python3 src/main.py
+
+# Open http://localhost:8080/ui
+```
+
+### Legacy: Node.js proxy (deprecated)
+
+The standalone Node.js proxy (`pnpm proxy`) is deprecated. Use Option C (Python proxy) instead. See `ui/scripts/agent-proxy.cjs` for the deprecated script.
+
+## UI modes (environment)
+
+| Variable | Values | Description |
+|----------|--------|-------------|
+| `GLITCH_UI_MODE` | `local` (default), `proxy`, `dev` | `local`: direct `/api` from this process. `proxy`: proxy `/api` and `/invocations` to deployed agent. `dev`: do not mount static UI (use Vite). |
+| `GLITCH_DEPLOYED_AGENT_NAME` | e.g. `Glitch` | Agent name when in `proxy` mode (used to resolve runtime ARN). |
+| `GLITCH_AGENT_RUNTIME_ARN` | Full ARN | Optional; skip control-plane lookup when set. |
+| `AWS_REGION` | e.g. `us-west-2` | AWS region for proxy mode. |
 
 ## API Endpoints
 
@@ -90,41 +98,17 @@ When running locally, the agent serves on port 8080 directly, so no proxy is nee
 | `/api/skills/{id}/toggle` | POST | Enable/disable skill |
 | `/invocations` | POST | Send message to Glitch |
 
+When in proxy mode, `/ui-proxy/api/*` and `/ui-proxy/invocations` are also available and behave the same as `/api` and `/invocations`.
+
 ## Scripts
 
 | Command | Description |
 |---------|-------------|
 | `pnpm dev` | Start Vite dev server |
 | `pnpm build` | Build for production |
-| `pnpm check` | Check agent connection status |
-| `pnpm proxy` | Start local proxy to deployed agent |
+| `pnpm check` | Check agent connection status (legacy) |
+| `pnpm proxy` | Start legacy Node proxy (deprecated) |
 | `pnpm preview` | Preview production build |
-
-## Configuration
-
-### Proxy Settings
-
-The Vite dev server proxies API requests. Configure in `vite.config.ts`:
-
-```typescript
-proxy: {
-  '/api': {
-    target: 'http://localhost:8080',
-    changeOrigin: true,
-  },
-  '/invocations': {
-    target: 'http://localhost:8080',
-    changeOrigin: true,
-  },
-}
-```
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `GLITCH_AGENT_NAME` | `Glitch` | Agent name for agentcore CLI |
-| `AWS_REGION` | `us-west-2` | AWS region |
 
 ## Tech Stack
 

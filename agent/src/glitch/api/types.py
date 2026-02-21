@@ -61,6 +61,7 @@ class MemorySummaryResponse(BaseModel):
     window_size: int
     structured_memory: Dict[str, Any]
     agentcore_connected: bool
+    recent_events: List[Dict[str, Any]] = []
 
 
 class MCPServerInfo(BaseModel):
@@ -106,3 +107,11 @@ class SkillToggleResponse(BaseModel):
     skill_id: str
     enabled: bool
     message: str
+
+
+class TelemetryResponse(BaseModel):
+    """Response from GET /api/telemetry."""
+    history: List[Dict[str, Any]] = []
+    running_totals: Dict[str, Dict[str, Any]] = {}
+    thresholds: List[Dict[str, Any]] = []
+    alerts: List[str] = []

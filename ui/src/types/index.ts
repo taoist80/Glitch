@@ -1,13 +1,59 @@
-export type Tab = 
+export type Tab =
   | 'chat'
   | 'telegram'
   | 'ollama'
   | 'memory'
+  | 'telemetry'
   | 'mcp'
   | 'skills'
   | 'unifi'
   | 'pihole'
   | 'settings';
+
+export interface TelemetryHistoryEntry {
+  timestamp: number;
+  metrics: {
+    duration_seconds?: number;
+    token_usage?: {
+      input_tokens?: number;
+      output_tokens?: number;
+      total_tokens?: number;
+      cache_read_tokens?: number;
+      cache_write_tokens?: number;
+    };
+    cycle_count?: number;
+    latency_ms?: number;
+    stop_reason?: string;
+    tool_usage?: Record<string, { call_count?: number; success_count?: number; error_count?: number; total_time?: number }>;
+  };
+  custom_metrics?: Record<string, number>;
+}
+
+export interface PeriodAggregates {
+  invocation_count: number;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  cache_read_tokens?: number;
+  cache_write_tokens?: number;
+  duration_seconds?: number;
+  latency_ms_total?: number;
+  latency_ms_avg?: number;
+  custom_metrics?: Record<string, number>;
+}
+
+export interface TelemetryThreshold {
+  metric: string;
+  period: string;
+  limit: number;
+}
+
+export interface TelemetryData {
+  history: TelemetryHistoryEntry[];
+  running_totals: Record<string, PeriodAggregates>;
+  thresholds: TelemetryThreshold[];
+  alerts: string[];
+}
 
 export interface StatusResponse {
   session_id: string;
@@ -51,6 +97,7 @@ export interface MemorySummary {
   window_size: number;
   structured_memory: Record<string, unknown>;
   agentcore_connected: boolean;
+  recent_events?: Array<{ role?: string; content?: string; message?: string; [key: string]: unknown }>;
 }
 
 export interface MCPServer {

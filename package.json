@@ -1,0 +1,10 @@
+{
+  "name": "agentcore-glitch",
+  "private": true,
+  "scripts": {
+    "ui": "./start-ui.sh",
+    "ui:sso": "./start-ui-sso.sh",
+    "ui:local": "cd agent && PYTHONPATH=src GLITCH_UI_MODE=local GLITCH_MODE=server .venv/bin/python -m glitch",
+    "build:ui": "cd ui && pnpm build"
+  }
+}

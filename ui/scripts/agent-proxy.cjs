@@ -1,13 +1,17 @@
 #!/usr/bin/env node
 
 /**
- * Glitch UI Connection Helper
- * 
+ * @deprecated This proxy is now integrated into the Python agent.
+ * Use the agent's built-in UI serving and proxy functionality instead.
+ *
+ * Set GLITCH_UI_MODE=proxy and run the agent; it will serve the UI at /ui
+ * and proxy /api and /invocations to the deployed agent via boto3.
+ *
+ * See ui/README.md for current usage.
+ *
+ * Glitch UI Connection Helper (legacy)
  * Creates a local proxy server that forwards requests to the deployed AgentCore runtime.
- * 
- * Usage:
- *   pnpm check     - Check connection status
- *   pnpm proxy     - Start local proxy to deployed agent
+ * Usage: pnpm check | pnpm proxy
  */
 
 const http = require('http');
@@ -225,25 +229,46 @@ function startProxy() {
             sessions.set(clientId, sessionMatch[1]);
           }
           
-          // Try to parse response
-          const jsonMatch = result.output.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
+          // agentcore invoke outputs metadata box, then "Response:" followed by JSON
+          // Look for "Response:" and extract JSON after it
+          const responseMatch = result.output.match(/Response:\s*(\{[\s\S]*\})\s*$/);
+          if (responseMatch) {
             try {
-              const parsed = JSON.parse(jsonMatch[0]);
+              const parsed = JSON.parse(responseMatch[1]);
+              console.log(`  Response: ${JSON.stringify(parsed).substring(0, 100)}...`);
               res.writeHead(200, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify(parsed));
               return;
             } catch (e) {
-              // Not valid JSON
+              console.error(`  JSON parse error:`, e.message);
+            }
+          }
+          
+          // Fallback: try to find any JSON in the output
+          const jsonMatch = result.output.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            try {
+              const parsed = JSON.parse(jsonMatch[0]);
+              console.log(`  Fallback parse: ${JSON.stringify(parsed).substring(0, 100)}...`);
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify(parsed));
+              return;
+            } catch (e) {
+              console.error(`  Fallback JSON parse error:`, e.message);
             }
           }
           
           // Return the raw response wrapped in JSON
+          console.log(`  Raw response (first 200 chars): ${result.output.substring(0, 200)}`);
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ response: result.output }));
+          res.end(JSON.stringify({ message: result.output }));
         } else {
+          console.error(`  Invocation failed: ${result.error}`);
+          if (result.output) {
+            console.error(`  Output: ${result.output.substring(0, 300)}`);
+          }
           res.writeHead(502, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Agent invocation failed', details: result.error }));
+          res.end(JSON.stringify({ error: 'Agent invocation failed', details: result.error, output: result.output }));
         }
         return;
       }

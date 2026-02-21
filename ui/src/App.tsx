@@ -4,6 +4,7 @@ import { ChatTab } from './tabs/ChatTab';
 import { TelegramTab } from './tabs/TelegramTab';
 import { OllamaTab } from './tabs/OllamaTab';
 import { MemoryTab } from './tabs/MemoryTab';
+import { TelemetryTab } from './tabs/TelemetryTab';
 import { MCPTab } from './tabs/MCPTab';
 import { SkillsTab } from './tabs/SkillsTab';
 import { UnifiTab } from './tabs/UnifiTab';
@@ -34,6 +35,8 @@ function App() {
         return <OllamaTab />;
       case 'memory':
         return <MemoryTab />;
+      case 'telemetry':
+        return <TelemetryTab />;
       case 'mcp':
         return <MCPTab />;
       case 'skills':

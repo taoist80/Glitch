@@ -22,6 +22,7 @@ from glitch.api.types import (
     SkillInfo,
     SkillToggleRequest,
     SkillToggleResponse,
+    TelemetryResponse,
 )
 
 if TYPE_CHECKING:
@@ -251,22 +252,54 @@ async def get_ollama_health() -> OllamaHealthResponse:
 
 @router.get("/memory/summary", response_model=MemorySummaryResponse)
 async def get_memory_summary() -> MemorySummaryResponse:
-    """Get memory state summary."""
+    """Get memory state summary including structured memory and recent AgentCore events."""
     try:
         agent = _get_agent()
         sm = agent.memory_manager.structured_memory
         raw = sm.to_dict() if hasattr(sm, "to_dict") and callable(sm.to_dict) else {}
+        recent_events: list = []
+        if getattr(agent.memory_manager, "retrieve_recent_events", None):
+            try:
+                recent_events = await agent.memory_manager.retrieve_recent_events(max_results=15)
+            except Exception as e:
+                logger.debug("retrieve_recent_events failed: %s", e)
         return MemorySummaryResponse(
             session_id=agent.session_id,
             memory_id=agent.memory_id,
             window_size=getattr(agent.memory_manager, "window_size", 20),
             structured_memory=_sanitize_for_json(raw) if isinstance(raw, dict) else {},
             agentcore_connected=agent.memory_manager.agentcore_client is not None,
+            recent_events=_sanitize_for_json(recent_events) if isinstance(recent_events, list) else [],
         )
     except HTTPException:
         raise
     except Exception as e:
         logger.exception("get_memory_summary failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/telemetry", response_model=TelemetryResponse)
+async def get_telemetry() -> TelemetryResponse:
+    """Get collected telemetry: recent history, running totals by period, thresholds, and current alerts."""
+    try:
+        from glitch.telemetry import (
+            get_telemetry_history,
+            get_running_totals,
+            get_telemetry_thresholds,
+            check_thresholds,
+        )
+        history = get_telemetry_history(limit=100)
+        running_totals = get_running_totals()
+        thresholds = get_telemetry_thresholds()
+        alerts = check_thresholds(running_totals)
+        return TelemetryResponse(
+            history=_sanitize_for_json(history) if isinstance(history, list) else [],
+            running_totals=_sanitize_for_json(running_totals) if isinstance(running_totals, dict) else {},
+            thresholds=_sanitize_for_json(thresholds) if isinstance(thresholds, list) else [],
+            alerts=alerts if isinstance(alerts, list) else [],
+        )
+    except Exception as e:
+        logger.exception("get_telemetry failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 

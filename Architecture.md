@@ -295,7 +295,25 @@ python -m glitch.cli status --verbose
 | `GLITCH_TELEGRAM_WEBHOOK_URL` | No | (from Lambda) | Override webhook URL for Telegram |
 | `GLITCH_MAX_TURNS` | No | `3` | Max agent/tool cycles per invocation (0 = no limit) |
 | `GLITCH_MCP_CONFIG_PATH` | No | `agent/mcp_servers.yaml` | Path to MCP servers YAML |
+| `GLITCH_SOUL_S3_BUCKET` | No | (or SSM) | S3 bucket for SOUL.md and poet-soul.md; required for persisting `update_soul` and loading personality from S3 |
+| `GLITCH_SOUL_S3_KEY` | No | `soul.md` | S3 object key for SOUL.md |
+| `GLITCH_POET_SOUL_S3_KEY` | No | (SSM or `poet-soul.md`) | S3 object key for poet-soul.md (Poet sub-agent) |
 | `AWS_REGION` | No | `us-west-2` | AWS region |
+
+**SOUL and poet-soul S3 configuration**
+
+When the CDK `TelegramWebhookStack` is deployed, it creates an S3 bucket for agent state and writes the bucket name (and default keys) to SSM Parameter Store. The runtime role is granted read/write access to that bucket and read access to these parameters. So **you do not need to set any env vars** for S3 if the stack is deployed and the agent runs with that role: the agent will read `/glitch/soul/s3-bucket` and `/glitch/soul/s3-key` (and `/glitch/soul/poet-soul-s3-key`) from SSM and use them automatically.
+
+- **With CDK stack:** After deploying `GlitchTelegramWebhookStack`, the runtime discovers the bucket via SSM. Ensure the runtime uses the same execution role that the stack attached policies to (`defaultExecutionRoleArn` in the CDK app).
+- **Without CDK / override:** Set `GLITCH_SOUL_S3_BUCKET` (and optionally `GLITCH_SOUL_S3_KEY`, `GLITCH_POET_SOUL_S3_KEY`) in the runtime environment. The bucket must allow the runtime role `s3:GetObject` and `s3:PutObject`.
+- **Poet sub-agent:** Uses the same bucket as SOUL; key is `GLITCH_POET_SOUL_S3_KEY` or SSM `poet-soul-s3-key`, default `poet-soul.md`. If the object is missing in S3, Poet falls back to file paths (`agent/poet-soul.md`, `/app/poet-soul.md`, `~/poet-soul.md`).
+
+**S3 soul bucket verification (when the agent says the bucket is not found)**
+
+1. **Bucket exists:** The stack creates `glitch-agent-state-{account}-{region}`. Confirm with: `aws s3 ls | grep glitch-agent-state`.
+2. **Runtime has the bucket name:** The agent reads `GLITCH_SOUL_S3_BUCKET` first, then SSM `/glitch/soul/s3-bucket`. Set the env var in `agent/.bedrock_agentcore.yaml` under `aws.environment_variables.GLITCH_SOUL_S3_BUCKET` (must match the bucket name above), then run `agentcore deploy` so the runtime gets it. Alternatively, ensure SSM parameters exist (deploy `GlitchTelegramWebhookStack`) and the runtime role has policy `GlitchSoulSsmRead`.
+3. **Runtime has S3 access:** The execution role must have `GlitchSoulS3Access` (s3:GetObject, s3:PutObject on the bucket). The stack attaches this via AwsCustomResource to `defaultExecutionRoleArn`; use the same role in `.bedrock_agentcore.yaml` and deploy the stack.
+4. **Redeploy after config change:** After editing `.bedrock_agentcore.yaml` (e.g. adding `environment_variables`), run `agentcore deploy` so the runtime is updated with the new env.
 
 **Token Priority:**
 1. `GLITCH_TELEGRAM_BOT_TOKEN` environment variable (checked first)
@@ -903,22 +921,24 @@ curl http://10.10.110.202:11434/api/tags
 
 ## Dashboard UI
 
-A React + DaisyUI dashboard for monitoring and interacting with Glitch.
+A React + DaisyUI dashboard for monitoring and interacting with Glitch. The agent can serve the built UI and proxy API/chat traffic to a deployed AgentCore runtime (boto3), so no separate Node.js proxy or manual tunnel is required.
 
-### Quick Start
+### Running Modes
 
-```bash
-# 1. Find your agent's endpoint and get tunnel instructions
-cd ui
-pnpm find-endpoint
+| Mode | When | How to run |
+|------|------|------------|
+| **Local dev** | UI development with hot reload | From repo root: Agent: `cd agent && PYTHONPATH=src python3 src/main.py`. UI: `cd ui && pnpm dev`. Open http://localhost:5173. |
+| **Production** | Single process, built UI | From repo root: `cd ui && pnpm build` then `cd agent && PYTHONPATH=src python3 src/main.py`. Open http://localhost:8080/ui. |
+| **Proxy** | Connect to deployed agent | From repo root: `cd ui && pnpm build` then `cd agent && GLITCH_UI_MODE=proxy PYTHONPATH=src python3 src/main.py`. Open http://localhost:8080/ui. `/api` and `/invocations` are proxied via boto3 to the deployed runtime. |
 
-# 2. Follow the instructions to set up SSH tunnel (in separate terminal)
+### Environment (UI / proxy)
 
-# 3. Start the UI
-pnpm dev
+- `GLITCH_UI_MODE`: `local` (default), `proxy`, or `dev`.
+- `GLITCH_DEPLOYED_AGENT_NAME`: Agent name in proxy mode (e.g. `Glitch`).
+- `GLITCH_AGENT_RUNTIME_ARN`: Optional; skip control-plane lookup when set.
+- `AWS_REGION`: Used for proxy mode.
 
-# 4. Access at http://localhost:5173
-```
+**After redeploy (proxy mode):** The proxy resolves the runtime ARN by name (cached 60s). If chat shows "Cannot reach the server" or a proxy error, ensure (1) the local proxy process is running with `GLITCH_UI_MODE=proxy`, (2) the deployed agent is ready, and (3) IAM allows `bedrock-agentcore:InvokeAgentRuntime` and `bedrock-agentcore-control:ListAgentRuntimes`. To pin the new runtime, set `GLITCH_AGENT_RUNTIME_ARN` to the runtime ARN from the deploy output.
 
 ### Features
 
@@ -934,24 +954,9 @@ pnpm dev
 | Pi-hole | DNS filtering stats (Coming Soon) |
 | Settings | Agent configuration |
 
-### Running the UI
-
-```bash
-# Start the agent backend (port 8080)
-cd agent
-agentcore launch
-
-# In another terminal, start the UI (port 5173)
-cd ui
-pnpm install
-pnpm dev
-```
-
-Access at: **http://localhost:5173** (localhost only)
-
 ### API Endpoints
 
-The UI communicates via REST API endpoints mounted at `/api`:
+The UI uses REST endpoints at `/api` (and, when in proxy mode, `/ui-proxy/api` and `/ui-proxy/invocations`):
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -962,6 +967,7 @@ The UI communicates via REST API endpoints mounted at `/api`:
 | `/api/mcp/servers` | GET | MCP server status |
 | `/api/skills` | GET | List all skills |
 | `/api/skills/{id}/toggle` | POST | Enable/disable skill |
+| `/invocations` | POST | Send message to Glitch |
 
 ## License
 
