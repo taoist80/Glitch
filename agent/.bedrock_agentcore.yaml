@@ -11,7 +11,7 @@ agents:
     container_runtime: docker
     source_path: /Users/jgilgen/IdeaProjects/AgentCore-Glitch/agent
     aws:
-      execution_role: arn:aws:iam::999776382415:role/AmazonBedrockAgentCoreSDKRuntime-us-west-2-14980158e2
+      execution_role: arn:aws:iam::999776382415:role/GlitchAgentCoreRuntimeRole
       execution_role_auto_create: false
       account: '999776382415'
       region: us-west-2
