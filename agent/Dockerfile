@@ -18,6 +18,7 @@ USER bedrock_agentcore
 
 COPY src/glitch/ /app/glitch/
 COPY src/main.py /app/main.py
+COPY skills/ /app/skills/
 COPY SOUL.md /app/SOUL.md
 COPY poet-soul.md /app/poet-soul.md
 

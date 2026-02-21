@@ -231,9 +231,25 @@ def get_default_skills_dir() -> Path:
     """Get the default skills directory path.
     
     Returns:
-        Path to agent/skills/ directory
+        Path to skills/ directory (relative to app root)
     """
-    # Navigate from this file to agent/skills/
-    # This file: agent/src/glitch/skills/loader.py
-    # Target: agent/skills/
-    return Path(__file__).parent.parent.parent.parent / "skills"
+    # In container: /app/glitch/skills/loader.py -> /app/skills/
+    # In dev: agent/src/glitch/skills/loader.py -> agent/skills/
+    # 
+    # Navigate up to find the skills directory:
+    # - Container: /app/glitch/skills/loader.py -> /app/skills
+    # - Dev: agent/src/glitch/skills/loader.py -> agent/skills
+    loader_path = Path(__file__).resolve()
+    
+    # Try container path first: /app/skills
+    container_skills = loader_path.parent.parent.parent / "skills"
+    if container_skills.exists():
+        return container_skills
+    
+    # Try dev path: agent/skills (4 levels up from loader.py)
+    dev_skills = loader_path.parent.parent.parent.parent / "skills"
+    if dev_skills.exists():
+        return dev_skills
+    
+    # Fallback to container path (will be created if needed)
+    return container_skills
