@@ -15,6 +15,12 @@ export interface TailscaleStackProps extends cdk.StackProps {
   readonly gatewayFunctionUrl?: string;
   /** S3 UI bucket name for nginx to proxy static files. */
   readonly uiBucketName?: string;
+  /** Custom domain for the UI (e.g. glitch.awoo.agency). Used in nginx server_name and TLS cert. */
+  readonly customDomain?: string;
+  /** Porkbun API secret for Let's Encrypt DNS-01 challenge. Required if customDomain is set. */
+  readonly porkbunApiSecret?: secretsmanager.ISecret;
+  /** Email for Let's Encrypt certificate notifications. */
+  readonly certbotEmail?: string;
 }
 
 export class TailscaleStack extends cdk.Stack {
@@ -24,10 +30,11 @@ export class TailscaleStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: TailscaleStackProps) {
     super(scope, id, props);
 
-    const { vpc, tailscaleAuthKeySecret, gatewayFunctionUrl, uiBucketName } = props;
+    const { vpc, tailscaleAuthKeySecret, gatewayFunctionUrl, uiBucketName, customDomain, porkbunApiSecret, certbotEmail } = props;
     const bootstrapVersion = props.instanceBootstrapVersion ??
       this.node.tryGetContext('glitchTailscaleBootstrapVersion') ?? '5';
     const enableUiProxy = Boolean(gatewayFunctionUrl && uiBucketName);
+    const enableTls = Boolean(customDomain && porkbunApiSecret);
 
     this.securityGroup = new ec2.SecurityGroup(this, 'TailscaleSecurityGroup', {
       vpc,
@@ -82,6 +89,9 @@ export class TailscaleStack extends cdk.Stack {
     });
 
     tailscaleAuthKeySecret.grantRead(role);
+    if (porkbunApiSecret) {
+      porkbunApiSecret.grantRead(role);
+    }
 
     const userData = ec2.UserData.forLinux();
     
@@ -117,61 +127,180 @@ export class TailscaleStack extends cdk.Stack {
 
     if (enableUiProxy) {
       const gatewayUrl = gatewayFunctionUrl!.replace(/\/$/, '');
+      // Extract hostname from Lambda URL (e.g., "abc123.lambda-url.us-west-2.on.aws" from "https://abc123.lambda-url.us-west-2.on.aws")
+      const gatewayHostname = gatewayUrl.replace(/^https?:\/\//, '');
+      const serverNames = customDomain ? `${customDomain} _` : '_';
+      
       userDataCommands.push(
         '',
         'echo "Setting up nginx UI proxy..."',
         'yum install -y nginx',
-        '',
-        `cat > /etc/nginx/conf.d/glitch-proxy.conf << 'NGINXEOF'`,
-        'server {',
-        '    listen 80;',
-        '    server_name _;',
-        '',
-        '    location / {',
-        `        proxy_pass http://${uiBucketName}.s3-website-${this.region}.amazonaws.com;`,
-        `        proxy_set_header Host ${uiBucketName}.s3-website-${this.region}.amazonaws.com;`,
-        '        proxy_set_header X-Real-IP $remote_addr;',
-        '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
-        '        proxy_set_header X-Forwarded-Proto $scheme;',
-        '    }',
-        '',
-        '    location /api/ {',
-        `        proxy_pass ${gatewayUrl}/api/;`,
-        '        proxy_set_header Host $host;',
-        '        proxy_set_header X-Real-IP $remote_addr;',
-        '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
-        '        proxy_set_header X-Forwarded-Proto $scheme;',
-        '        proxy_ssl_server_name on;',
-        '    }',
-        '',
-        '    location /invocations {',
-        `        proxy_pass ${gatewayUrl}/invocations;`,
-        '        proxy_set_header Host $host;',
-        '        proxy_set_header X-Real-IP $remote_addr;',
-        '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
-        '        proxy_set_header X-Forwarded-Proto $scheme;',
-        '        proxy_ssl_server_name on;',
-        '    }',
-        '',
-        '    location /health {',
-        `        proxy_pass ${gatewayUrl}/health;`,
-        '        proxy_set_header Host $host;',
-        '        proxy_set_header X-Real-IP $remote_addr;',
-        '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
-        '        proxy_set_header X-Forwarded-Proto $scheme;',
-        '        proxy_ssl_server_name on;',
-        '    }',
-        '}',
-        'NGINXEOF',
+        ''
+      );
+
+      // If TLS is enabled, set up certbot with Porkbun DNS plugin
+      if (enableTls && porkbunApiSecret) {
+        const email = certbotEmail || 'admin@' + customDomain;
+        userDataCommands.push(
+          'echo "Setting up Let\'s Encrypt with Porkbun DNS..."',
+          'yum install -y python3 python3-pip augeas-libs',
+          'pip3 install certbot certbot-dns-porkbun',
+          '',
+          '# Retrieve Porkbun API credentials',
+          `PORKBUN_CREDS=$(aws secretsmanager get-secret-value --secret-id ${porkbunApiSecret.secretName} --query SecretString --output text --region ${this.region})`,
+          'PORKBUN_API_KEY=$(echo "$PORKBUN_CREDS" | python3 -c "import sys,json; print(json.load(sys.stdin)[\'apiKey\'])")',
+          'PORKBUN_SECRET_KEY=$(echo "$PORKBUN_CREDS" | python3 -c "import sys,json; print(json.load(sys.stdin)[\'secretApiKey\'])")',
+          '',
+          '# Create Porkbun credentials file for certbot',
+          'mkdir -p /etc/letsencrypt',
+          'cat > /etc/letsencrypt/porkbun.ini << PORKBUNEOF',
+          'dns_porkbun_key = $PORKBUN_API_KEY',
+          'dns_porkbun_secret = $PORKBUN_SECRET_KEY',
+          'PORKBUNEOF',
+          'chmod 600 /etc/letsencrypt/porkbun.ini',
+          '',
+          '# Clear credentials from memory',
+          'unset PORKBUN_CREDS PORKBUN_API_KEY PORKBUN_SECRET_KEY',
+          '',
+          '# Obtain certificate using DNS-01 challenge',
+          `certbot certonly --non-interactive --agree-tos --email ${email} \\`,
+          `  --authenticator dns-porkbun \\`,
+          `  --dns-porkbun-credentials /etc/letsencrypt/porkbun.ini \\`,
+          `  --dns-porkbun-propagation-seconds 60 \\`,
+          `  -d ${customDomain}`,
+          '',
+          '# Set up auto-renewal cron job',
+          'echo "0 3 * * * root certbot renew --quiet --post-hook \\"systemctl reload nginx\\"" > /etc/cron.d/certbot-renew',
+          ''
+        );
+      }
+
+      // Write nginx config - HTTPS if TLS enabled, HTTP otherwise
+      if (enableTls) {
+        userDataCommands.push(
+          `cat > /etc/nginx/conf.d/glitch-proxy.conf << 'NGINXEOF'`,
+          '# Redirect HTTP to HTTPS',
+          'server {',
+          '    listen 80;',
+          `    server_name ${serverNames};`,
+          `    return 301 https://${customDomain}$request_uri;`,
+          '}',
+          '',
+          'server {',
+          '    listen 443 ssl http2;',
+          `    server_name ${serverNames};`,
+          '',
+          `    ssl_certificate /etc/letsencrypt/live/${customDomain}/fullchain.pem;`,
+          `    ssl_certificate_key /etc/letsencrypt/live/${customDomain}/privkey.pem;`,
+          '    ssl_protocols TLSv1.2 TLSv1.3;',
+          '    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;',
+          '    ssl_prefer_server_ciphers off;',
+          '',
+          '    location / {',
+          `        proxy_pass http://${uiBucketName}.s3-website-${this.region}.amazonaws.com;`,
+          `        proxy_set_header Host ${uiBucketName}.s3-website-${this.region}.amazonaws.com;`,
+          '        proxy_set_header X-Real-IP $remote_addr;',
+          '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+          '        proxy_set_header X-Forwarded-Proto $scheme;',
+          '    }',
+          '',
+          '    location /api/ {',
+          `        proxy_pass ${gatewayUrl}/api/;`,
+          `        proxy_set_header Host ${gatewayHostname};`,
+          '        proxy_set_header X-Real-IP $remote_addr;',
+          '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+          '        proxy_set_header X-Forwarded-Proto https;',
+          '        proxy_ssl_server_name on;',
+          '    }',
+          '',
+          '    location /invocations {',
+          `        proxy_pass ${gatewayUrl}/invocations;`,
+          `        proxy_set_header Host ${gatewayHostname};`,
+          '        proxy_set_header X-Real-IP $remote_addr;',
+          '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+          '        proxy_set_header X-Forwarded-Proto https;',
+          '        proxy_ssl_server_name on;',
+          '    }',
+          '',
+          '    location /health {',
+          `        proxy_pass ${gatewayUrl}/health;`,
+          `        proxy_set_header Host ${gatewayHostname};`,
+          '        proxy_set_header X-Real-IP $remote_addr;',
+          '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+          '        proxy_set_header X-Forwarded-Proto https;',
+          '        proxy_ssl_server_name on;',
+          '    }',
+          '}',
+          'NGINXEOF'
+        );
+      } else {
+        // HTTP-only config (Tailscale Serve handles TLS)
+        userDataCommands.push(
+          `cat > /etc/nginx/conf.d/glitch-proxy.conf << 'NGINXEOF'`,
+          'server {',
+          '    listen 80;',
+          `    server_name ${serverNames};`,
+          '',
+          '    location / {',
+          `        proxy_pass http://${uiBucketName}.s3-website-${this.region}.amazonaws.com;`,
+          `        proxy_set_header Host ${uiBucketName}.s3-website-${this.region}.amazonaws.com;`,
+          '        proxy_set_header X-Real-IP $remote_addr;',
+          '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+          '        proxy_set_header X-Forwarded-Proto $scheme;',
+          '    }',
+          '',
+          '    location /api/ {',
+          `        proxy_pass ${gatewayUrl}/api/;`,
+          `        proxy_set_header Host ${gatewayHostname};`,
+          '        proxy_set_header X-Real-IP $remote_addr;',
+          '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+          '        proxy_set_header X-Forwarded-Proto https;',
+          '        proxy_ssl_server_name on;',
+          '    }',
+          '',
+          '    location /invocations {',
+          `        proxy_pass ${gatewayUrl}/invocations;`,
+          `        proxy_set_header Host ${gatewayHostname};`,
+          '        proxy_set_header X-Real-IP $remote_addr;',
+          '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+          '        proxy_set_header X-Forwarded-Proto https;',
+          '        proxy_ssl_server_name on;',
+          '    }',
+          '',
+          '    location /health {',
+          `        proxy_pass ${gatewayUrl}/health;`,
+          `        proxy_set_header Host ${gatewayHostname};`,
+          '        proxy_set_header X-Real-IP $remote_addr;',
+          '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+          '        proxy_set_header X-Forwarded-Proto https;',
+          '        proxy_ssl_server_name on;',
+          '    }',
+          '}',
+          'NGINXEOF'
+        );
+      }
+
+      userDataCommands.push(
         '',
         'rm -f /etc/nginx/conf.d/default.conf',
         'systemctl enable nginx',
-        'systemctl start nginx',
-        '',
-        'echo "Enabling Tailscale Serve for HTTPS..."',
-        'tailscale serve --bg http://127.0.0.1:80',
-        'echo "Tailscale Serve enabled. UI available via Tailscale HTTPS URL."'
+        'systemctl start nginx'
       );
+
+      // Only use Tailscale Serve if TLS is NOT enabled (Serve handles TLS for *.ts.net domains)
+      if (!enableTls) {
+        userDataCommands.push(
+          '',
+          'echo "Enabling Tailscale Serve for HTTPS..."',
+          'tailscale serve --bg http://127.0.0.1:80',
+          'echo "Tailscale Serve enabled. UI available via Tailscale HTTPS URL."'
+        );
+      } else {
+        userDataCommands.push(
+          '',
+          `echo "TLS enabled with Let's Encrypt. UI available at https://${customDomain}"`
+        );
+      }
     }
 
     userData.addCommands(...userDataCommands);
@@ -216,10 +345,17 @@ export class TailscaleStack extends cdk.Stack {
     });
 
     if (enableUiProxy) {
-      new cdk.CfnOutput(this, 'TailscaleUiUrl', {
-        value: 'https://glitch-tailscale.YOUR_TAILNET.ts.net',
-        description: 'Glitch UI via Tailscale Serve. Replace YOUR_TAILNET with your Tailscale network name (e.g. from admin.tailscale.com or tailscale status). Use only on a device joined to the same Tailscale network.',
-      });
+      if (enableTls && customDomain) {
+        new cdk.CfnOutput(this, 'GlitchUiUrl', {
+          value: `https://${customDomain}`,
+          description: 'Glitch UI URL (TLS via Let\'s Encrypt). Accessible only from Tailscale network.',
+        });
+      } else {
+        new cdk.CfnOutput(this, 'TailscaleUiUrl', {
+          value: 'https://glitch-tailscale.YOUR_TAILNET.ts.net',
+          description: 'Glitch UI via Tailscale Serve. Replace YOUR_TAILNET with your Tailscale network name (e.g. from admin.tailscale.com or tailscale status). Use only on a device joined to the same Tailscale network.',
+        });
+      }
     }
   }
 }

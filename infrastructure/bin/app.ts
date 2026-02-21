@@ -80,16 +80,19 @@ const uiHostingStack = new GlitchUiHostingStack(app, 'GlitchUiHostingStack', {
 uiHostingStack.addDependency(gatewayStack);
 uiHostingStack.addDependency(certificateStack);
 
-// Bump instanceBootstrapVersion (e.g. to '6') to force EC2 instance replacement on next deploy.
+// Bump instanceBootstrapVersion (e.g. to '8') to force EC2 instance replacement on next deploy.
 const tailscaleStack = new TailscaleStack(app, 'GlitchTailscaleStack', {
   env,
   vpc: vpcStack.vpc,
   tailscaleAuthKeySecret: secretsStack.tailscaleAuthKeySecret,
   agentCoreRuntimeArn,
-  instanceBootstrapVersion: '6',
+  instanceBootstrapVersion: '8',
   gatewayFunctionUrl: gatewayStack.functionUrl,
   uiBucketName: uiHostingStack.uiBucket.bucketName,
-  description: 'EC2 Tailscale connector and UI proxy (nginx + Tailscale Serve)',
+  customDomain,
+  porkbunApiSecret: secretsStack.porkbunApiSecret,
+  certbotEmail: 'admin@awoo.agency',
+  description: 'EC2 Tailscale connector and UI proxy (nginx + Let\'s Encrypt TLS)',
 });
 tailscaleStack.addDependency(vpcStack);
 tailscaleStack.addDependency(secretsStack);

@@ -16,6 +16,7 @@ export class SecretsStack extends cdk.Stack {
   public readonly tailscaleAuthKeySecret: secretsmanager.ISecret;
   public readonly apiKeysSecret: secretsmanager.ISecret;
   public readonly telegramBotTokenSecret: secretsmanager.ISecret;
+  public readonly porkbunApiSecret: secretsmanager.ISecret;
 
   constructor(scope: Construct, id: string, props?: SecretsStackProps) {
     super(scope, id, props);
@@ -36,6 +37,12 @@ export class SecretsStack extends cdk.Stack {
       this,
       'TelegramBotToken',
       'glitch/telegram-bot-token'
+    );
+
+    this.porkbunApiSecret = secretsmanager.Secret.fromSecretNameV2(
+      this,
+      'PorkbunApi',
+      'glitch/porkbun-api'
     );
 
     new cdk.CfnOutput(this, 'TailscaleAuthKeySecretArn', {
