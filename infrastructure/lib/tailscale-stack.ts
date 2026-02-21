@@ -92,18 +92,11 @@ export class TailscaleStack extends cdk.Stack {
         effect: iam.Effect.ALLOW,
         actions: [
           'bedrock-agentcore:InvokeAgentRuntime',
+          'bedrock-agentcore:ListAgentRuntimes',
         ],
         resources: props.agentCoreRuntimeArn 
-          ? [props.agentCoreRuntimeArn, `${props.agentCoreRuntimeArn}/*`]
+          ? [props.agentCoreRuntimeArn, `${props.agentCoreRuntimeArn}/*`, `arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`]
           : [`arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`],
-      }));
-
-      role.addToPolicy(new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: [
-          'bedrock-agentcore-control:ListAgentRuntimes',
-        ],
-        resources: ['*'],
       }));
 
       role.addToPolicy(new iam.PolicyStatement({
@@ -116,9 +109,18 @@ export class TailscaleStack extends cdk.Stack {
 
       role.addToPolicy(new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ['s3:GetObject'],
+        actions: ['s3:GetObject', 's3:ListBucket'],
         resources: [
+          `arn:aws:s3:::glitch-agent-state-${this.account}-${this.region}`,
           `arn:aws:s3:::glitch-agent-state-${this.account}-${this.region}/*`,
+        ],
+      }));
+
+      role.addToPolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: [
+          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:glitch/*`,
         ],
       }));
     }
