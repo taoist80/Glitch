@@ -57,8 +57,8 @@ async def _proxy_api_handler(request: Request) -> JSONResponse:
             body = None
 
     payload = create_api_proxy_payload(api_path, method, body)
-    agent_name = os.environ.get("GLITCH_DEPLOYED_AGENT_NAME", "Glitch")
-    region = os.environ.get("AWS_REGION", "us-west-2")
+    agent_name = os.environ.get("GLITCH_DEPLOYED_AGENT_NAME") or os.environ.get("GLITCH_AGENT_NAME", "Glitch")
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION", "us-west-2")
     client_id = request.headers.get("x-client-id", "default")
     session_id = _proxy_sessions.get(client_id)
 
@@ -87,8 +87,8 @@ async def _proxy_invocations_handler(request: Request) -> JSONResponse:
     except Exception:
         return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
-    agent_name = os.environ.get("GLITCH_DEPLOYED_AGENT_NAME", "Glitch")
-    region = os.environ.get("AWS_REGION", "us-west-2")
+    agent_name = os.environ.get("GLITCH_DEPLOYED_AGENT_NAME") or os.environ.get("GLITCH_AGENT_NAME", "Glitch")
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION", "us-west-2")
     client_id = request.headers.get("x-client-id", "default")
     session_id = _proxy_sessions.get(client_id)
 

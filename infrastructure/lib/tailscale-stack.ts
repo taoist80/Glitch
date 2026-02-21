@@ -92,11 +92,18 @@ export class TailscaleStack extends cdk.Stack {
         effect: iam.Effect.ALLOW,
         actions: [
           'bedrock-agentcore:InvokeAgentRuntime',
-          'bedrock-agentcore:ListAgentRuntimes',
         ],
         resources: props.agentCoreRuntimeArn 
           ? [props.agentCoreRuntimeArn, `${props.agentCoreRuntimeArn}/*`]
           : [`arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`],
+      }));
+
+      role.addToPolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'bedrock-agentcore-control:ListAgentRuntimes',
+        ],
+        resources: ['*'],
       }));
 
       role.addToPolicy(new iam.PolicyStatement({
