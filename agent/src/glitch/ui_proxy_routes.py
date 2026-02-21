@@ -49,6 +49,7 @@ async def _proxy_api_handler(request: Request) -> JSONResponse:
     path_param = request.path_params.get("path") or ""
     api_path = "/" + path_param.lstrip("/")
     method = request.method
+    logger.info("Proxy API request: %s %s", method, api_path)
     body = None
     if method in ("POST", "PUT", "PATCH") and request.headers.get("content-length"):
         try:
@@ -68,6 +69,7 @@ async def _proxy_api_handler(request: Request) -> JSONResponse:
         payload=payload,
         session_id=session_id,
     )
+    logger.info("Proxy API response for %s: keys=%s", api_path, list(result.keys()) if isinstance(result, dict) else type(result))
     if "session_id" in result and result.get("session_id"):
         _proxy_sessions[client_id] = result["session_id"]
     # Return 503 when invocation failed so the UI can show the error (e.g. after redeploy)
