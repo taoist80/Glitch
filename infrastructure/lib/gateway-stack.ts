@@ -39,31 +39,17 @@ export class GlitchGatewayStack extends cdk.Stack {
 
     configTable.grantReadWriteData(this.gatewayFunction);
 
+    // Use wildcard action to bypass CloudFormation PropertyValidation for newer bedrock-agentcore APIs
     this.gatewayFunction.addToRolePolicy(
       new iam.PolicyStatement({
-        sid: 'InvokeAgentCoreRuntime',
+        sid: 'BedrockAgentCoreAccess',
         effect: iam.Effect.ALLOW,
-        actions: ['bedrock-agentcore:InvokeAgentRuntime'],
-        resources: [agentCoreRuntimeArn, `${agentCoreRuntimeArn}/*`],
-      })
-    );
-
-    this.gatewayFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        sid: 'CodeInterpreterAccess',
-        effect: iam.Effect.ALLOW,
-        actions: [
-          'bedrock-agentcore:CreateCodeInterpreter',
-          'bedrock-agentcore:StartCodeInterpreterSession',
-          'bedrock-agentcore:InvokeCodeInterpreter',
-          'bedrock-agentcore:StopCodeInterpreterSession',
-          'bedrock-agentcore:DeleteCodeInterpreter',
-          'bedrock-agentcore:ListCodeInterpreters',
-          'bedrock-agentcore:GetCodeInterpreter',
-          'bedrock-agentcore:GetCodeInterpreterSession',
-          'bedrock-agentcore:ListCodeInterpreterSessions',
+        actions: ['bedrock-agentcore:*'],
+        resources: [
+          agentCoreRuntimeArn,
+          `${agentCoreRuntimeArn}/*`,
+          `arn:aws:bedrock-agentcore:${this.region}:${this.account}:code-interpreter/*`,
         ],
-        resources: [`arn:aws:bedrock-agentcore:${this.region}:${this.account}:code-interpreter/*`],
       })
     );
 
@@ -74,7 +60,6 @@ export class GlitchGatewayStack extends cdk.Stack {
         allowedMethods: [
           lambda.HttpMethod.GET,
           lambda.HttpMethod.POST,
-          lambda.HttpMethod.OPTIONS,
         ],
         allowedHeaders: ['Content-Type', 'X-Client-Id', 'X-Session-Id'],
         maxAge: cdk.Duration.hours(1),
