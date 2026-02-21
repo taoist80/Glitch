@@ -42,7 +42,7 @@ const tailscaleStack = new TailscaleStack(app, 'GlitchTailscaleStack', {
   tailscaleAuthKeySecret: secretsStack.tailscaleAuthKeySecret,
   agentCoreRuntimeArn,
   enableUiServer: true,
-  instanceBootstrapVersion: '4',
+  instanceBootstrapVersion: '2',
   description: 'EC2 Tailscale connector with Glitch UI server',
 });
 tailscaleStack.addDependency(vpcStack);
