@@ -14,6 +14,19 @@ import type {
 } from '../types';
 import { api } from '../api/client';
 
+// Fallback UUID generator for non-secure contexts (HTTP over Tailscale)
+function generateUUID(): string {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  // Fallback: simple UUID v4 implementation
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
 interface AppState {
   activeTab: Tab;
   setActiveTab: (tab: Tab) => void;
@@ -216,7 +229,7 @@ export const useAppStore = create<AppState>()(
       chatError: null,
       sendMessage: async (content) => {
         const userMessage: ChatMessage = {
-          id: crypto.randomUUID(),
+          id: generateUUID(),
           role: 'user',
           content,
           timestamp: new Date(),
@@ -259,7 +272,7 @@ export const useAppStore = create<AppState>()(
           } : undefined;
           
           const assistantMessage: ChatMessage = {
-            id: crypto.randomUUID(),
+            id: generateUUID(),
             role: 'assistant',
             content: messageContent,
             timestamp: new Date(),
