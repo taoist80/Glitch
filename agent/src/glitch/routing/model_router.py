@@ -94,11 +94,11 @@ ROUTING_CONFIG: Dict[TaskCategory, RoutingRule] = {
     },
     "coding": {
         "primary": "glitch",
-        "escalation": ["sonnet-4.5", "opus-4"],
+        "escalation": ["opus-4"],
     },
     "vision": {
         "primary": "vision_agent",
-        "escalation": ["sonnet-4.5"],
+        "escalation": ["glitch"],
     },
     "tool_use": {
         "primary": "tool_agent",
@@ -110,28 +110,28 @@ ROUTING_CONFIG: Dict[TaskCategory, RoutingRule] = {
     },
     "skill_workflow": {
         "primary": "glitch",
-        "escalation": ["sonnet-4.5"],
+        "escalation": ["opus-4"],
     },
 }
 
 MODEL_REGISTRY: Dict[str, ModelConfig] = {
     "glitch": ModelConfig(
         name="glitch",
+        model_id="us.anthropic.claude-sonnet-4-5-20250514-v1:0",
+        tier=CognitiveTier.TIER_1,
+        supports_vision=True,
+        supports_tools=True,
+        max_context_tokens=200000,
+        cost_per_million_tokens=5.0,
+    ),
+    "sonnet-4": ModelConfig(
+        name="sonnet-4",
         model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
         tier=CognitiveTier.TIER_1,
         supports_vision=True,
         supports_tools=True,
         max_context_tokens=200000,
         cost_per_million_tokens=3.0,
-    ),
-    "sonnet-4.5": ModelConfig(
-        name="sonnet-4.5",
-        model_id="us.anthropic.claude-sonnet-4-5-20250514-v1:0",
-        tier=CognitiveTier.TIER_2,
-        supports_vision=True,
-        supports_tools=True,
-        max_context_tokens=200000,
-        cost_per_million_tokens=5.0,
     ),
     "opus-4": ModelConfig(
         name="opus-4",
