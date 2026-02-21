@@ -35,11 +35,15 @@ const secretsStack = new SecretsStack(app, 'GlitchSecretsStack', {
   description: 'Secrets Manager configuration for AgentCore Glitch',
 });
 
+// Bump instanceBootstrapVersion (e.g. to '3') to force EC2 instance replacement on next deploy.
 const tailscaleStack = new TailscaleStack(app, 'GlitchTailscaleStack', {
   env,
   vpc: vpcStack.vpc,
   tailscaleAuthKeySecret: secretsStack.tailscaleAuthKeySecret,
-  description: 'EC2 Tailscale connector for private network access',
+  agentCoreRuntimeArn,
+  enableUiServer: true,
+  instanceBootstrapVersion: '3',
+  description: 'EC2 Tailscale connector with Glitch UI server',
 });
 tailscaleStack.addDependency(vpcStack);
 tailscaleStack.addDependency(secretsStack);
