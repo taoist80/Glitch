@@ -217,6 +217,9 @@ async def invoke(payload: InvocationRequest, context: RequestContext) -> Invocat
         InvocationRequest -> GlitchAgent.process_message() -> InvocationResponse
         or _ui_api_request -> _handle_ui_api_request() -> dict (API response)
 
+    In proxy mode (GLITCH_UI_MODE=proxy), chat prompts are forwarded to the deployed
+    agent via invoke_agent_runtime instead of running locally.
+
     Args:
         payload: InvocationRequest (prompt for chat, or _ui_api_request for API proxy).
         context: RequestContext with session_id, request_headers, etc.
@@ -229,6 +232,22 @@ async def invoke(payload: InvocationRequest, context: RequestContext) -> Invocat
     # Handle UI API requests (for proxy mode)
     if "_ui_api_request" in payload:
         return await _handle_ui_api_request(payload["_ui_api_request"])
+
+    # Proxy mode: forward chat prompts to deployed agent instead of running locally
+    ui_mode = os.getenv("GLITCH_UI_MODE", "local")
+    if ui_mode == "proxy" and "prompt" in payload:
+        from glitch.ui_proxy import invoke_deployed_agent_async
+
+        agent_name = os.environ.get("GLITCH_DEPLOYED_AGENT_NAME") or os.environ.get("GLITCH_AGENT_NAME", "Glitch")
+        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION", "us-west-2")
+        logger.info("Proxy mode: forwarding prompt to deployed agent %s", agent_name)
+        result = await invoke_deployed_agent_async(
+            agent_name=agent_name,
+            region=region,
+            payload=payload,
+            session_id=None,
+        )
+        return result
     
     prompt_preview = (payload.get("prompt") or "")[:80]
     logger.info("Received invocation: prompt=%s session_id=%s", repr(prompt_preview), payload.get("session_id"))
