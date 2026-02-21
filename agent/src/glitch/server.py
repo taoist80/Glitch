@@ -180,7 +180,7 @@ def _setup_ui_routes() -> None:
     If ui/dist doesn't exist and pnpm is available, builds the UI automatically.
     """
     from starlette.staticfiles import StaticFiles
-    from starlette.responses import RedirectResponse
+    from starlette.responses import RedirectResponse, JSONResponse
     from glitch.ui_build import get_ui_paths, auto_build_ui
 
     ui_mode = os.getenv("GLITCH_UI_MODE", "local")
@@ -201,6 +201,17 @@ def _setup_ui_routes() -> None:
         logger.info("Root redirect to /ui enabled")
     elif ui_mode != "dev":
         logger.warning("UI dist not found at %s; /ui will not be available", ui_dist)
+
+    # Debug endpoint to list all routes
+    async def debug_routes(request):
+        routes_info = []
+        for route in app.routes:
+            route_info = {"path": getattr(route, "path", str(route)), "name": getattr(route, "name", None)}
+            if hasattr(route, "methods"):
+                route_info["methods"] = list(route.methods)
+            routes_info.append(route_info)
+        return JSONResponse({"routes": routes_info, "ui_mode": ui_mode})
+    app.add_route("/debug/routes", debug_routes, methods=["GET"])
 
     # Always add /ui-proxy so UI can target deployed agent when desired
     from glitch.ui_proxy_routes import create_proxy_app
