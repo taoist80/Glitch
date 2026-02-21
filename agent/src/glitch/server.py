@@ -151,6 +151,7 @@ def _setup_api_routes() -> None:
     from glitch.api.router import router, setup_api, add_cors_middleware
 
     ui_mode = os.getenv("GLITCH_UI_MODE", "local")
+    logger.info("Setting up API routes with GLITCH_UI_MODE=%s", ui_mode)
 
     if ui_mode == "proxy":
         # Proxy mode: mount proxy app at /api so UI can keep using /api and /invocations
@@ -160,7 +161,7 @@ def _setup_api_routes() -> None:
         # Also mount proxy invocations so POST /invocations goes to deployed agent
         # (BedrockAgentCoreApp may have its own /invocations; we add ours for proxy mode)
         app.add_route("/invocations", proxy_app.invocations_handler, methods=["POST"])
-        logger.info("API and /invocations mounted as proxy to deployed agent")
+        logger.info("API and /invocations mounted as PROXY to deployed agent")
         return
 
     if _agent is not None:
@@ -170,7 +171,7 @@ def _setup_api_routes() -> None:
     add_cors_middleware(api_app)
     api_app.include_router(router)
     app.mount("/api", api_app)
-    logger.info("API routes mounted at /api")
+    logger.info("API routes mounted at /api (LOCAL mode)")
 
 
 def _setup_ui_routes() -> None:
