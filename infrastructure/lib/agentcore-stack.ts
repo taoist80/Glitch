@@ -59,10 +59,17 @@ export class AgentCoreStack extends cdk.Stack {
           'bedrock:InvokeModelWithResponseStream',
         ],
         resources: [
+          // Foundation models in current region
           `arn:aws:bedrock:${this.region}::foundation-model/anthropic.claude-sonnet-4-20250514-v1:0`,
           `arn:aws:bedrock:${this.region}::foundation-model/anthropic.claude-sonnet-4.6*`,
           `arn:aws:bedrock:${this.region}::foundation-model/anthropic.claude-opus-4*`,
+          // Cross-region inference profiles route to us-east-1 foundation models
+          'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-4-20250514-v1:0',
+          'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-4.6*',
+          'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-opus-4*',
+          // Inference profiles (cross-region and account-specific)
           `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/*`,
+          `arn:aws:bedrock:${this.region}::inference-profile/*`,
         ],
       })
     );
