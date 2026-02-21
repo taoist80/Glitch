@@ -117,7 +117,7 @@ ROUTING_CONFIG: Dict[TaskCategory, RoutingRule] = {
 MODEL_REGISTRY: Dict[str, ModelConfig] = {
     "glitch": ModelConfig(
         name="glitch",
-        model_id="us.anthropic.claude-sonnet-4-5-20250514-v1:0",
+        model_id="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
         tier=CognitiveTier.TIER_1,
         supports_vision=True,
         supports_tools=True,
@@ -162,7 +162,7 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
     ),
     "poet": ModelConfig(
         name="poet",
-        model_id="us.anthropic.claude-sonnet-4-5-20250514-v1:0",
+        model_id="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
         tier=CognitiveTier.TIER_2,
         supports_vision=False,
         supports_tools=False,

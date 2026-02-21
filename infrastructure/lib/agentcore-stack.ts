@@ -61,11 +61,11 @@ export class AgentCoreStack extends cdk.Stack {
         resources: [
           // Foundation models in current region (Sonnet 4, Sonnet 4.5, Opus 4)
           `arn:aws:bedrock:${this.region}::foundation-model/anthropic.claude-sonnet-4-20250514-v1:0`,
-          `arn:aws:bedrock:${this.region}::foundation-model/anthropic.claude-sonnet-4-5-20250514-v1:0`,
+          `arn:aws:bedrock:${this.region}::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0`,
           `arn:aws:bedrock:${this.region}::foundation-model/anthropic.claude-opus-4-20250514-v1:0`,
           // Cross-region inference profiles route to us-east-1 foundation models
           'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-4-20250514-v1:0',
-          'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-4-5-20250514-v1:0',
+          'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0',
           'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-opus-4-20250514-v1:0',
           // Inference profiles (cross-region and account-specific)
           `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/*`,
