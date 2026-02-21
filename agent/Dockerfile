@@ -11,6 +11,8 @@ ENV UV_SYSTEM_PYTHON=1 \
 
 COPY requirements.txt .
 RUN uv pip install -r requirements.txt
+
+# OTEL instrumentation for AgentCore Runtime metrics/traces
 RUN uv pip install aws-opentelemetry-distro==0.12.2
 
 RUN useradd -m -u 1000 bedrock_agentcore

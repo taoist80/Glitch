@@ -33,27 +33,13 @@ from typing import Optional, Dict, Any, AsyncIterator
 from strands import Agent
 from strands.agent.conversation_manager import SlidingWindowConversationManager
 
-from glitch.tools.ollama_tools import vision_agent, local_chat, check_ollama_health
-from glitch.tools.network_tools import (
-    query_pihole_stats,
-    check_unifi_network,
-    query_protect_cameras,
-)
-from glitch.tools.soul_tools import load_soul_from_s3, update_soul
-from glitch.tools.telemetry_tools import (
-    telemetry,
-    set_telemetry_threshold,
-    set_telemetry_thresholds,
-    update_telemetry_threshold,
-    list_telemetry_thresholds,
-    remove_telemetry_threshold,
-    clear_telemetry_thresholds,
-    add_telemetry_metric,
-    record_telemetry_metric,
-    list_telemetry_metrics,
-    update_telemetry_aggregation,
-    list_aggregation_periods,
-    create_cloudwatch_metric,
+from glitch.tools.soul_tools import load_soul_from_s3
+from glitch.tools.memory_tools import set_memory_manager
+from glitch.tools.registry import get_all_tools
+from glitch.tools.ollama_tools import check_ollama_health
+from glitch.tools.code_interpreter_tools import (
+    get_code_interpreter_tool,
+    is_code_interpreter_available,
 )
 from glitch.routing.model_router import ModelRouter
 from glitch.memory.sliding_window import GlitchMemoryManager
@@ -149,9 +135,10 @@ GLITCH_TECHNICAL_CONTEXT = """
 
 **Your Tools:**
 - vision_agent: Local LLaVA model for image analysis (10.10.110.137)
-- local_chat: Local Ollama for lightweight tasks (10.10.110.202)
+- local_chat: Local Ollama for lightweight tasks (10.10.110.202, mistral:12b)
 - check_ollama_health: Verify connectivity to on-prem models
 - update_soul: Update persistent SOUL.md (personality/instructions) when the user asks to change how you behave or remember preferences
+- Memory tools: set_session_goal, add_fact, add_constraint, record_decision, add_open_question, resolve_question, update_tool_results_summary, get_memory_state - use these to maintain structured memory during conversations
 - telemetry: Return Strands telemetry; use period='hour'|'day'|'week'|'month' for rolling totals, running_totals=True for this hour/today/week/month, last_n for history; alerts shown when thresholds are exceeded
 - set_telemetry_threshold: Set alert when a metric (input_tokens, total_tokens, invocation_count, etc.) for a period exceeds a limit
 - set_telemetry_thresholds: Set multiple thresholds at once (list of dicts with metric, period, limit); replaces existing
@@ -166,8 +153,17 @@ GLITCH_TECHNICAL_CONTEXT = """
 - list_aggregation_periods: List aggregation periods (hour, day, week, month, plus any custom)
 - create_cloudwatch_metric: Publish a single metric to CloudWatch (metric_name, value, unit)
 - Network tools: Pi-hole, Unifi, Protect (coming in future iterations)
+- code_interpreter: Execute Python code in a secure sandbox (AgentCore Code Interpreter) for calculations, data analysis, and validation
 
-**Tool use:** Only call tools when (1) the user's request requires it (e.g. "what's in this image?" → vision_agent, "is Ollama up?" → check_ollama_health, "remember I prefer X" → update_soul, or routing a task → local_chat), or (2) an active skill instructs you to. Do not call tools on your own initiative for side tasks (e.g. telemetry, thresholds, metrics) unless the user explicitly asks for metrics, usage, or alert configuration. For greetings and simple conversation, respond without using any tools.
+**Tool use:** Only call tools when (1) the user's request requires it (e.g. "what's in this image?" → vision_agent, "is Ollama up?" → check_ollama_health, "remember I prefer X" → update_soul, "calculate X" or "run this code" → code_interpreter, or routing a task → local_chat), or (2) an active skill instructs you to. Do not call tools on your own initiative for side tasks (e.g. telemetry, thresholds, metrics) unless the user explicitly asks for metrics, usage, or alert configuration. For greetings and simple conversation, respond without using any tools.
+
+**Memory Management:** Proactively use memory tools to maintain session context:
+- set_session_goal: When the user states their objective or you identify the main goal
+- add_fact: When the user shares important information (preferences, technical details, requirements)
+- add_constraint: When limitations or restrictions are identified
+- record_decision: When a significant decision is made
+- add_open_question: When questions need follow-up
+- resolve_question: When a previously recorded question is answered
 
 **Routing Guidelines:**
 1. Assess task complexity and confidence before responding
@@ -236,6 +232,9 @@ class GlitchAgent:
             window_size=config.window_size,
         )
         
+        # Wire up memory manager for memory tools
+        set_memory_manager(self.memory_manager)
+        
         self.model_router = ModelRouter(
             confidence_threshold=0.7,
             context_threshold_pct=0.7,
@@ -256,34 +255,20 @@ class GlitchAgent:
         primary_model = self.model_router.get_primary_model("chat")
         self._current_model_name = primary_model.name
         
+        # Build tools list from registry, then Code Interpreter and MCP
+        tools_list = get_all_tools()
+        code_interpreter = get_code_interpreter_tool()
+        if code_interpreter:
+            tools_list.append(code_interpreter)
+            logger.info("Code Interpreter tool enabled")
+        tools_list.extend(self.mcp_manager.get_tool_providers())
+        
         # Strands Agent API: name, system_prompt, model, tools, conversation_manager, trace_attributes
         self.agent = Agent(
             name="glitch",
             system_prompt=self._base_prompt,
             model=primary_model.model_id,
-            tools=[
-                vision_agent,
-                local_chat,
-                check_ollama_health,
-                update_soul,
-                telemetry,
-                set_telemetry_threshold,
-                set_telemetry_thresholds,
-                update_telemetry_threshold,
-                list_telemetry_thresholds,
-                remove_telemetry_threshold,
-                clear_telemetry_thresholds,
-                add_telemetry_metric,
-                record_telemetry_metric,
-                list_telemetry_metrics,
-                update_telemetry_aggregation,
-                list_aggregation_periods,
-                create_cloudwatch_metric,
-                query_pihole_stats,
-                check_unifi_network,
-                query_protect_cameras,
-                *self.mcp_manager.get_tool_providers(),  # MCP server tools
-            ],
+            tools=tools_list,
             conversation_manager=SlidingWindowConversationManager(
                 window_size=config.window_size
             ),
@@ -416,12 +401,12 @@ class GlitchAgent:
             run_kwargs = {} if max_turns <= 0 else {"max_turns": max_turns}
             result = self.agent(enriched_message, **run_kwargs)
             set_last_agent_result(result)
-            append_telemetry(result)
-
-            metrics: InvocationMetrics = extract_metrics_from_result(result)
             
             # Log with skill information
             skill_info = self._get_skill_telemetry()
+            append_telemetry(result, skill_info=skill_info)
+
+            metrics: InvocationMetrics = extract_metrics_from_result(result)
             log_invocation_metrics(
                 metrics=metrics,
                 user_message=user_message[:100],
@@ -499,9 +484,9 @@ class GlitchAgent:
 
             if last_result is not None:
                 set_last_agent_result(last_result)
-                append_telemetry(last_result)
-                metrics: InvocationMetrics = extract_metrics_from_result(last_result)
                 skill_info = self._get_skill_telemetry()
+                append_telemetry(last_result, skill_info=skill_info)
+                metrics: InvocationMetrics = extract_metrics_from_result(last_result)
                 log_invocation_metrics(
                     metrics=metrics,
                     user_message=user_message[:100],
@@ -557,6 +542,8 @@ class GlitchAgent:
             status["last_skill_selection"] = self.last_skill_selection.to_log_dict()
         # Add MCP server info to status
         status["mcp_servers"] = self.mcp_manager.get_status()
+        # Add Code Interpreter availability
+        status["code_interpreter_available"] = is_code_interpreter_available()
         return status
     
     async def check_connectivity(self) -> ConnectivityStatus:

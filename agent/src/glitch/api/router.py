@@ -4,6 +4,7 @@ Provides endpoints for the dashboard UI to query agent state and configuration.
 """
 
 import logging
+import os
 from typing import Optional, TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException
@@ -23,6 +24,7 @@ from glitch.api.types import (
     SkillToggleRequest,
     SkillToggleResponse,
     TelemetryResponse,
+    StreamingInfoResponse,
 )
 
 if TYPE_CHECKING:
@@ -35,6 +37,60 @@ router = APIRouter(prefix="", tags=["ui"])
 
 _agent: Optional["GlitchAgent"] = None
 _disabled_skills: set[str] = set()
+_dynamodb_table = None
+
+
+def _get_dynamodb_table():
+    """Get DynamoDB table for skill persistence (lazy init)."""
+    global _dynamodb_table
+    if _dynamodb_table is not None:
+        return _dynamodb_table
+    
+    table_name = os.getenv("GLITCH_CONFIG_TABLE", "glitch-telegram-config")
+    if not table_name:
+        return None
+    
+    try:
+        import boto3
+        dynamodb = boto3.resource("dynamodb")
+        _dynamodb_table = dynamodb.Table(table_name)
+        return _dynamodb_table
+    except Exception as e:
+        logger.debug("Failed to connect to DynamoDB for skill persistence: %s", e)
+        return None
+
+
+def _load_disabled_skills_from_dynamodb() -> set[str]:
+    """Load disabled skills from DynamoDB."""
+    table = _get_dynamodb_table()
+    if not table:
+        return set()
+    
+    try:
+        response = table.get_item(Key={"pk": "SKILL_CONFIG", "sk": "disabled_skills"})
+        if "Item" in response:
+            return set(response["Item"].get("skill_ids", []))
+    except Exception as e:
+        logger.debug("Failed to load disabled skills from DynamoDB: %s", e)
+    return set()
+
+
+def _save_disabled_skills_to_dynamodb(disabled_skills: set[str]) -> bool:
+    """Save disabled skills to DynamoDB."""
+    table = _get_dynamodb_table()
+    if not table:
+        return False
+    
+    try:
+        table.put_item(Item={
+            "pk": "SKILL_CONFIG",
+            "sk": "disabled_skills",
+            "skill_ids": list(disabled_skills),
+        })
+        return True
+    except Exception as e:
+        logger.warning("Failed to save disabled skills to DynamoDB: %s", e)
+        return False
 
 
 def setup_api(agent: "GlitchAgent") -> None:
@@ -43,8 +99,14 @@ def setup_api(agent: "GlitchAgent") -> None:
     Args:
         agent: GlitchAgent instance to expose via API
     """
-    global _agent
+    global _agent, _disabled_skills
     _agent = agent
+    
+    # Load disabled skills from DynamoDB if available
+    _disabled_skills = _load_disabled_skills_from_dynamodb()
+    if _disabled_skills:
+        logger.info("Loaded %d disabled skills from DynamoDB", len(_disabled_skills))
+    
     logger.info("API router initialized with agent")
 
 
@@ -63,10 +125,16 @@ def _sanitize_for_json(obj: object) -> object:
         return {str(k): _sanitize_for_json(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
         return [_sanitize_for_json(x) for x in obj]
-    if isinstance(obj, (str, int, float, bool)):
+    if isinstance(obj, bool):
         return obj
-    if isinstance(obj, (int, float)) and (obj != obj or abs(obj) == float("inf")):
-        return 0
+    if isinstance(obj, float):
+        if obj != obj or abs(obj) == float("inf"):
+            return 0
+        return obj
+    if isinstance(obj, int):
+        return obj
+    if isinstance(obj, str):
+        return obj
     return str(obj)
 
 
@@ -305,6 +373,33 @@ async def get_telemetry() -> TelemetryResponse:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/streaming-info", response_model=StreamingInfoResponse)
+async def get_streaming_info() -> StreamingInfoResponse:
+    """Get streaming capabilities and WebSocket URL info.
+    
+    Phase 2 implementation: Returns information about streaming support.
+    HTTP streaming is available via the /invocations endpoint with async generators.
+    WebSocket presigned URL support will be added when AgentCore Runtime supports it.
+    """
+    try:
+        agent = _get_agent()
+        session_id = agent.session_id
+        
+        return StreamingInfoResponse(
+            streaming_enabled=True,
+            http_streaming_supported=True,
+            websocket_url=None,
+            session_id=session_id,
+            expires_in_seconds=None,
+            message="HTTP streaming available via /invocations. WebSocket presigned URLs pending AgentCore Runtime support.",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("get_streaming_info failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/mcp/servers", response_model=MCPServersResponse)
 async def get_mcp_servers() -> MCPServersResponse:
     """Get MCP servers status."""
@@ -377,7 +472,8 @@ async def get_skills() -> SkillsResponse:
 
 @router.post("/skills/{skill_id}/toggle", response_model=SkillToggleResponse)
 async def toggle_skill(skill_id: str, request: SkillToggleRequest) -> SkillToggleResponse:
-    """Enable or disable a skill."""
+    """Enable or disable a skill. Persists to DynamoDB if available."""
+    global _disabled_skills
     agent = _get_agent()
     
     if skill_id not in agent.skill_registry._skills:
@@ -389,6 +485,10 @@ async def toggle_skill(skill_id: str, request: SkillToggleRequest) -> SkillToggl
     else:
         _disabled_skills.add(skill_id)
         message = f"Skill '{skill_id}' disabled"
+    
+    # Persist to DynamoDB
+    if _save_disabled_skills_to_dynamodb(_disabled_skills):
+        message += " (persisted)"
     
     logger.info(message)
     

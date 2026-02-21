@@ -39,8 +39,11 @@ from glitch.types import (
     create_keepalive_response,
 )
 
-# When _ui_api_request is used, the entrypoint returns an API response dict, not InvocationResponse.
-InvocationEntrypointResult = Union[InvocationResponse, dict[str, Any]]
+# Entrypoint return types:
+# - InvocationResponse: Normal chat response
+# - dict[str, Any]: UI API proxy response (from _ui_api_request)
+# - AsyncIterator[dict]: Streaming response (when payload["stream"] is True)
+InvocationEntrypointResult = Union[InvocationResponse, dict[str, Any], AsyncIterator[dict[str, Any]]]
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +81,7 @@ async def _handle_ui_api_request(api_request: UiApiRequest) -> dict:
         get_mcp_servers,
         get_skills,
         toggle_skill,
+        get_streaming_info,
     )
 
     path = api_request.get("path", "")
@@ -114,6 +118,10 @@ async def _handle_ui_api_request(api_request: UiApiRequest) -> dict:
             result = await get_telemetry()
             return result.model_dump()
 
+        elif path == "/streaming-info" and method == "GET":
+            result = await get_streaming_info()
+            return result.model_dump()
+
         elif path == "/mcp/servers" and method == "GET":
             result = await get_mcp_servers()
             return result.model_dump()
@@ -145,24 +153,11 @@ async def _handle_ui_api_request(api_request: UiApiRequest) -> dict:
 def _setup_api_routes() -> None:
     """Mount the API router for UI endpoints.
     BedrockAgentCoreApp is Starlette-based (no include_router); we mount a FastAPI sub-app at /api.
-    When GLITCH_UI_MODE=proxy, mount proxy at /api instead so UI talks to deployed agent.
     """
     from fastapi import FastAPI
     from glitch.api.router import router, setup_api, add_cors_middleware
 
-    ui_mode = os.getenv("GLITCH_UI_MODE", "local")
-    logger.info("Setting up API routes with GLITCH_UI_MODE=%s", ui_mode)
-
-    if ui_mode == "proxy":
-        # Proxy mode: mount proxy app at /api so UI can keep using /api and /invocations
-        from glitch.ui_proxy_routes import create_proxy_app
-        proxy_app = create_proxy_app()
-        app.mount("/api", proxy_app)
-        # Also mount proxy invocations so POST /invocations goes to deployed agent
-        # (BedrockAgentCoreApp may have its own /invocations; we add ours for proxy mode)
-        app.add_route("/invocations", proxy_app.invocations_handler, methods=["POST"])
-        logger.info("API and /invocations mounted as PROXY to deployed agent")
-        return
+    logger.info("Setting up API routes")
 
     if _agent is not None:
         setup_api(_agent)
@@ -171,11 +166,11 @@ def _setup_api_routes() -> None:
     add_cors_middleware(api_app)
     api_app.include_router(router)
     app.mount("/api", api_app)
-    logger.info("API routes mounted at /api (LOCAL mode)")
+    logger.info("API routes mounted at /api")
 
 
 def _setup_ui_routes() -> None:
-    """Mount static UI and /ui-proxy routes when applicable.
+    """Mount static UI routes when applicable.
     
     If ui/dist doesn't exist and pnpm is available, builds the UI automatically.
     """
@@ -213,13 +208,6 @@ def _setup_ui_routes() -> None:
         return JSONResponse({"routes": routes_info, "ui_mode": ui_mode})
     app.add_route("/debug/routes", debug_routes, methods=["GET"])
 
-    # Always add /ui-proxy so UI can target deployed agent when desired
-    from glitch.ui_proxy_routes import create_proxy_app
-    proxy_app = create_proxy_app()
-    app.mount("/ui-proxy/api", proxy_app.api_router, name="ui-proxy-api")
-    app.add_route("/ui-proxy/invocations", proxy_app.invocations_handler, methods=["POST"])
-    logger.info("UI proxy routes mounted at /ui-proxy/api and /ui-proxy/invocations")
-
 
 @app.entrypoint
 async def invoke(payload: InvocationRequest, context: RequestContext) -> InvocationEntrypointResult:
@@ -228,9 +216,6 @@ async def invoke(payload: InvocationRequest, context: RequestContext) -> Invocat
     Dataflow:
         InvocationRequest -> GlitchAgent.process_message() -> InvocationResponse
         or _ui_api_request -> _handle_ui_api_request() -> dict (API response)
-
-    In proxy mode (GLITCH_UI_MODE=proxy), chat prompts are forwarded to the deployed
-    agent via invoke_agent_runtime instead of running locally.
 
     Args:
         payload: InvocationRequest (prompt for chat, or _ui_api_request for API proxy).
@@ -241,25 +226,9 @@ async def invoke(payload: InvocationRequest, context: RequestContext) -> Invocat
     """
     global _agent
 
-    # Handle UI API requests (for proxy mode)
+    # Handle UI API requests (for Lambda UI backend)
     if "_ui_api_request" in payload:
         return await _handle_ui_api_request(payload["_ui_api_request"])
-
-    # Proxy mode: forward chat prompts to deployed agent instead of running locally
-    ui_mode = os.getenv("GLITCH_UI_MODE", "local")
-    if ui_mode == "proxy" and "prompt" in payload:
-        from glitch.ui_proxy import invoke_deployed_agent_async
-
-        agent_name = os.environ.get("GLITCH_DEPLOYED_AGENT_NAME") or os.environ.get("GLITCH_AGENT_NAME", "Glitch")
-        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION", "us-west-2")
-        logger.info("Proxy mode: forwarding prompt to deployed agent %s", agent_name)
-        result = await invoke_deployed_agent_async(
-            agent_name=agent_name,
-            region=region,
-            payload=payload,
-            session_id=None,
-        )
-        return result
     
     prompt_preview = (payload.get("prompt") or "")[:80]
     logger.info("Received invocation: prompt=%s session_id=%s", repr(prompt_preview), payload.get("session_id"))

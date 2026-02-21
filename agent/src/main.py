@@ -102,17 +102,6 @@ def get_telemetry_config() -> TelemetryConfig:
     )
 
 
-def get_ui_mode() -> str:
-    """Determine UI serving mode from environment.
-
-    Returns:
-        'local' - Direct API (agent running locally).
-        'proxy' - Proxy /api and /invocations to deployed agent via boto3.
-        'dev' - Assume Vite dev server (no static UI mount).
-    """
-    return os.getenv("GLITCH_UI_MODE", "local").lower()
-
-
 def get_server_config() -> ServerConfig:
     """Build ServerConfig from environment variables.
     
@@ -323,14 +312,6 @@ async def main() -> None:
     mode = os.getenv("GLITCH_MODE", "server")
     logger.info(f"Mode determined: {mode}")
     print(f"Starting in {mode} mode")
-
-    ui_mode = get_ui_mode()
-    logger.info(f"UI mode: {ui_mode}")
-    if ui_mode == "proxy":
-        deployed_agent = os.getenv("GLITCH_DEPLOYED_AGENT_NAME", "Glitch")
-        logger.info(f"UI will proxy to deployed agent: {deployed_agent}")
-    elif ui_mode == "dev":
-        logger.info("UI dev mode - expecting Vite dev server on :5173")
 
     try:
         if mode == "interactive":

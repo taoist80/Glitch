@@ -7,7 +7,6 @@ export interface TailscaleStackProps extends cdk.StackProps {
     readonly tailscaleAuthKeySecret: secretsmanager.ISecret;
     readonly agentCoreSecurityGroup?: ec2.ISecurityGroup;
     readonly agentCoreRuntimeArn?: string;
-    readonly enableUiServer?: boolean;
     /** Bump this to force EC2 instance replacement (new instance runs user data from scratch). */
     readonly instanceBootstrapVersion?: string;
 }

@@ -8,15 +8,16 @@ Thin wrapper around Strands built-in telemetry. Follows official patterns from:
 Strands tracks: token usage (input/output/cache), cycle count/duration,
 tool_metrics (call_count, success_count, error_count, total_time), latencyMs.
 
-Telemetry export strategy (hybrid approach per AgentCore best practices):
-1. OTEL/ADOT: Automatic traces/spans via opentelemetry-instrument (set env vars)
-2. CloudWatch Logs: Per-invocation JSON events for detailed history (GLITCH_TELEMETRY_LOG_GROUP)
-3. CloudWatch Metrics: Hourly aggregates for long-term retention (15 months)
+Telemetry export strategy (AgentCore-first approach):
+1. AgentCore Runtime: Automatic OTEL traces/spans via AgentCore Observability (CloudWatch Transaction Search)
+2. Local development: In-memory history for debugging
+3. Strands telemetry: Built-in metrics via OpenTelemetry (when strands-agents[otel] is installed)
 
-CloudWatch Metrics retention:
-- 1-minute resolution: 15 days
-- 5-minute resolution: 63 days
-- 1-hour resolution: 455 days (15 months)
+AgentCore Observability provides:
+- Detailed visualizations of each step in the agent workflow
+- Real-time visibility into operational performance through CloudWatch dashboards
+- Telemetry for key metrics such as session count, latency, duration, token usage, and error rates
+- Standardized OpenTelemetry (OTEL)-compatible format
 """
 
 import json
@@ -26,10 +27,10 @@ import logging
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 
-_DEFAULT_TELEMETRY_LOG_GROUP = "/glitch/telemetry"
+# Timeout for CloudWatch Logs Insights queries (seconds)
+_CLOUDWATCH_QUERY_TIMEOUT = int(os.environ.get("GLITCH_CLOUDWATCH_QUERY_TIMEOUT", "30"))
+
 _DEFAULT_METRICS_NAMESPACE = "Glitch/Agent"
-_cloudwatch_sequence_tokens: Dict[str, str] = {}
-_cloudwatch_logs_client: Optional[Any] = None
 _cloudwatch_metrics_client: Optional[Any] = None
 
 from glitch.types import (
@@ -73,15 +74,26 @@ def get_last_agent_result() -> Optional[Any]:
     return _last_agent_result
 
 
-def append_telemetry(result: Any) -> None:
+def append_telemetry(result: Any, skill_info: Optional[Dict[str, Any]] = None) -> None:
     """Append this invocation's metrics to the telemetry history (bounded by count and age).
     
-    Always writes to CloudWatch Logs for persistence across container restarts.
+    In-memory storage for local development and debugging. When deployed to AgentCore Runtime,
+    telemetry is automatically exported via AgentCore Observability (OTEL -> CloudWatch).
+    
     Merges any record_custom_telemetry_metric() values into the entry, then clears them.
+    
+    Args:
+        result: AgentResult from Strands
+        skill_info: Optional skill selection info (selected skills, scores, etc.)
     """
     global _telemetry_history, _current_custom_metrics
     now = time.time()
     metrics = extract_metrics_from_result(result)
+    
+    # Enrich with skill info if provided
+    if skill_info:
+        metrics["skill_info"] = skill_info
+    
     entry: TelemetryHistoryEntry = {"timestamp": now, "metrics": metrics}
     if _current_custom_metrics:
         entry["custom_metrics"] = dict(_current_custom_metrics)
@@ -91,94 +103,16 @@ def append_telemetry(result: Any) -> None:
         _telemetry_history = _telemetry_history[-_MAX_TELEMETRY_HISTORY:]
     cutoff = now - _MAX_HISTORY_AGE_SECONDS
     _telemetry_history = [e for e in _telemetry_history if (e.get("timestamp") or 0) >= cutoff]
-    
-    # Always write to CloudWatch for persistence
-    log_group = os.environ.get("GLITCH_TELEMETRY_LOG_GROUP", _DEFAULT_TELEMETRY_LOG_GROUP)
-    _write_telemetry_to_cloudwatch(entry, event_type="invocation", log_group_override=log_group)
 
 
 def get_telemetry_history(limit: int = 50) -> List[TelemetryHistoryEntry]:
     """Return the last `limit` telemetry entries (newest first).
     
-    If in-memory history is empty, reads from CloudWatch Logs for persistence
-    across container restarts.
+    Returns in-memory history. When deployed to AgentCore Runtime, use CloudWatch
+    Transaction Search for persistent telemetry across container restarts.
     """
     global _telemetry_history
-    
-    # If we have in-memory history, use it
-    if _telemetry_history:
-        n = min(max(0, limit), len(_telemetry_history))
-        if n == 0:
-            return []
-        return list(reversed(_telemetry_history[-n:]))
-    
-    # Try to read from CloudWatch
-    log_group = os.environ.get("GLITCH_TELEMETRY_LOG_GROUP", _DEFAULT_TELEMETRY_LOG_GROUP)
-    entries = _read_telemetry_from_cloudwatch(log_group, limit)
-    if entries:
-        return entries
-    
-    return []
-
-
-def _read_telemetry_from_cloudwatch(log_group: str, limit: int = 50) -> List[TelemetryHistoryEntry]:
-    """Read telemetry entries from CloudWatch Logs.
-    
-    Args:
-        log_group: CloudWatch Logs log group name
-        limit: Maximum number of entries to return
-        
-    Returns:
-        List of telemetry entries (newest first)
-    """
-    client = _get_cloudwatch_logs_client()
-    if not client:
-        return []
-    
-    try:
-        # Query recent log streams (last 7 days)
-        now = time.time()
-        entries = []
-        
-        # Get log streams for the last 7 days
-        for days_ago in range(7):
-            ts = now - (days_ago * 86400)
-            log_stream = _telemetry_log_stream_for_timestamp(ts)
-            
-            try:
-                response = client.get_log_events(
-                    logGroupName=log_group,
-                    logStreamName=log_stream,
-                    limit=min(limit, 100),
-                    startFromHead=False,  # Get newest first
-                )
-                
-                for event in response.get("events", []):
-                    try:
-                        import json
-                        data = json.loads(event.get("message", "{}"))
-                        if "timestamp" in data and "metrics" in data:
-                            entries.append(data)
-                    except (json.JSONDecodeError, KeyError):
-                        continue
-                        
-            except client.exceptions.ResourceNotFoundException:
-                # Log stream doesn't exist for this day
-                continue
-            except Exception as e:
-                logger.debug("Failed to read from log stream %s: %s", log_stream, e)
-                continue
-            
-            if len(entries) >= limit:
-                break
-        
-        # Sort by timestamp descending and limit
-        entries.sort(key=lambda e: e.get("timestamp", 0), reverse=True)
-        return entries[:limit]
-        
-    except Exception as e:
-        logger.warning("Failed to read telemetry from CloudWatch: %s", e)
-        return []
+    return list(reversed(_telemetry_history[-limit:]))
 
 
 def _get_usage(metrics: Optional[InvocationMetrics], key: str) -> int:
@@ -189,19 +123,155 @@ def _get_usage(metrics: Optional[InvocationMetrics], key: str) -> int:
     return int(usage.get(key, 0) or 0)
 
 
-def get_telemetry_for_period(period: str, now_ts: Optional[float] = None) -> List[TelemetryHistoryEntry]:
-    """Return entries in the rolling window for period. period in ('hour','day','week','month')."""
+def _get_logs_client():
+    """Lazy-init boto3 CloudWatch Logs client."""
+    try:
+        import boto3
+        return boto3.client("logs")
+    except Exception as e:
+        logger.debug("Failed to create CloudWatch Logs client: %s", e)
+        return None
+
+
+def query_cloudwatch_telemetry(
+    period: str,
+    log_group: Optional[str] = None,
+) -> List[TelemetryHistoryEntry]:
+    """Query CloudWatch Logs Insights for telemetry entries (invocation_metrics events).
+
+    Uses structured JSON logs emitted by log_invocation_metrics. Falls back gracefully
+    if CloudWatch is unavailable or log group is not set.
+
+    Args:
+        period: One of hour, day, week, month (rolling window).
+        log_group: CloudWatch log group name; defaults to GLITCH_TELEMETRY_LOG_GROUP env.
+
+    Returns:
+        List of TelemetryHistoryEntry parsed from CloudWatch (may be empty).
+    """
+    client = _get_logs_client()
+    log_group = log_group or os.environ.get("GLITCH_TELEMETRY_LOG_GROUP")
+    if not client or not log_group:
+        return []
+    delta = _PERIOD_SECONDS.get(period)
+    if not delta:
+        return []
+    end_ms = int(time.time() * 1000)
+    start_ms = end_ms - (delta * 1000)
+    query = """
+    fields @timestamp, @message
+    | filter @message like /"event_type":\\s*"invocation_metrics"/
+    | sort @timestamp desc
+    | limit 1000
+    """
+    try:
+        resp = client.start_query(
+            logGroupName=log_group,
+            startTime=start_ms,
+            endTime=end_ms,
+            queryString=query.strip(),
+        )
+        query_id = resp.get("queryId")
+        if not query_id:
+            return []
+        deadline = time.time() + _CLOUDWATCH_QUERY_TIMEOUT
+        while time.time() < deadline:
+            result = client.get_query_results(queryId=query_id)
+            status = result.get("status")
+            if status == "Complete":
+                entries: List[TelemetryHistoryEntry] = []
+                for row in result.get("results", []):
+                    msg = None
+                    ts = None
+                    for field in row:
+                        if field.get("field") == "@message":
+                            msg = field.get("value")
+                        elif field.get("field") == "@timestamp":
+                            ts = field.get("value")
+                    if msg and ts:
+                        try:
+                            data = json.loads(msg)
+                            ts_float = int(ts) / 1000.0 if len(ts) == 13 else float(ts)
+                            token_usage = data.get("token_usage") or {}
+                            metrics: InvocationMetrics = {
+                                "duration_seconds": data.get("duration_seconds", 0),
+                                "token_usage": {
+                                    "input_tokens": token_usage.get("input_tokens", 0),
+                                    "output_tokens": token_usage.get("output_tokens", 0),
+                                    "total_tokens": token_usage.get("total_tokens", 0),
+                                    "cache_read_tokens": token_usage.get("cache_read_tokens", 0),
+                                    "cache_write_tokens": token_usage.get("cache_write_tokens", 0),
+                                },
+                                "cycle_count": data.get("cycle_count", 0),
+                                "latency_ms": data.get("latency_ms", 0),
+                                "stop_reason": "",
+                                "tool_usage": {k: {"call_count": 1, "success_count": 1, "error_count": 0, "total_time": 0.0} for k in (data.get("tools_used") or [])},
+                            }
+                            entries.append({"timestamp": ts_float, "metrics": metrics})
+                        except (json.JSONDecodeError, TypeError, KeyError) as e:
+                            logger.debug("Skip CloudWatch log line: %s", e)
+                return entries
+            if status == "Failed" or status == "Cancelled":
+                break
+            time.sleep(0.5)
+        logger.warning("CloudWatch Logs Insights query timed out or failed")
+        return []
+    except Exception as e:
+        logger.warning("CloudWatch telemetry query failed: %s", e)
+        return []
+
+
+def get_cloudwatch_aggregates(
+    period: str,
+    log_group: Optional[str] = None,
+) -> PeriodAggregates:
+    """Query CloudWatch Logs Insights for aggregated metrics over the period.
+
+    Returns PeriodAggregates (invocation_count, token totals, etc.) from
+    structured invocation_metrics logs in the log group.
+    """
+    entries = query_cloudwatch_telemetry(period=period, log_group=log_group)
+    return aggregate_metrics(entries)
+
+
+def get_telemetry_for_period(
+    period: str,
+    now_ts: Optional[float] = None,
+    include_cloudwatch: bool = False,
+) -> List[TelemetryHistoryEntry]:
+    """Return entries in the rolling window for period. period in ('hour','day','week','month').
+
+    Uses in-memory history. When include_cloudwatch=True, supplements with
+    CloudWatch Logs Insights query for persistent telemetry across restarts.
+    """
     global _telemetry_history
     now = now_ts if now_ts is not None else time.time()
     delta = _PERIOD_SECONDS.get(period)
     if not delta:
         return []
     cutoff = now - delta
-    return [e for e in _telemetry_history if (e.get("timestamp") or 0) >= cutoff]
+    entries = [e for e in _telemetry_history if (e.get("timestamp") or 0) >= cutoff]
+    if include_cloudwatch:
+        cw = query_cloudwatch_telemetry(period, None)
+        seen_ts: Dict[float, bool] = {}
+        for e in cw:
+            ts = e.get("timestamp") or 0
+            if ts not in seen_ts:
+                seen_ts[ts] = True
+                entries.append(e)
+        entries.sort(key=lambda x: x.get("timestamp") or 0)
+    return entries
 
 
-def get_running_totals(now_ts: Optional[float] = None) -> Dict[str, PeriodAggregates]:
-    """Return aggregates for calendar periods: this_hour, today, this_week, this_month (UTC)."""
+def get_running_totals(
+    now_ts: Optional[float] = None,
+    include_cloudwatch: bool = False,
+) -> Dict[str, PeriodAggregates]:
+    """Return aggregates for calendar periods: this_hour, today, this_week, this_month (UTC).
+
+    Uses in-memory history. When include_cloudwatch=True, merges in aggregates
+    from CloudWatch Logs Insights for persistent telemetry across restarts.
+    """
     global _telemetry_history
     now = now_ts if now_ts is not None else time.time()
     dt = datetime.fromtimestamp(now, tz=timezone.utc)
@@ -215,10 +285,39 @@ def get_running_totals(now_ts: Optional[float] = None) -> Dict[str, PeriodAggreg
         "this_week": start_of_week,
         "this_month": start_of_month,
     }
+
     out: Dict[str, PeriodAggregates] = {}
     for name, start in buckets.items():
         entries = [e for e in _telemetry_history if (e.get("timestamp") or 0) >= start]
-        out[name] = aggregate_metrics(entries)
+        agg = aggregate_metrics(entries)
+        if include_cloudwatch:
+            period_map = {"this_hour": "hour", "today": "day", "this_week": "week", "this_month": "month"}
+            cw_agg = get_cloudwatch_aggregates(period_map.get(name, "day"), None)
+            agg = _merge_aggregates(agg, cw_agg)
+        out[name] = agg
+    return out
+
+
+def _merge_aggregates(a: PeriodAggregates, b: PeriodAggregates) -> PeriodAggregates:
+    """Merge two PeriodAggregates by summing numeric fields."""
+    out: PeriodAggregates = {
+        "invocation_count": a.get("invocation_count", 0) + b.get("invocation_count", 0),
+        "input_tokens": a.get("input_tokens", 0) + b.get("input_tokens", 0),
+        "output_tokens": a.get("output_tokens", 0) + b.get("output_tokens", 0),
+        "total_tokens": a.get("total_tokens", 0) + b.get("total_tokens", 0),
+        "cache_read_tokens": a.get("cache_read_tokens", 0) + b.get("cache_read_tokens", 0),
+        "cache_write_tokens": a.get("cache_write_tokens", 0) + b.get("cache_write_tokens", 0),
+        "duration_seconds": round((a.get("duration_seconds") or 0) + (b.get("duration_seconds") or 0), 2),
+        "latency_ms_total": (a.get("latency_ms_total") or 0) + (b.get("latency_ms_total") or 0),
+        "latency_ms_avg": 0,
+    }
+    total_inv = out["invocation_count"]
+    out["latency_ms_avg"] = round(out["latency_ms_total"] / total_inv, 0) if total_inv else 0
+    ac = (a.get("custom_metrics") or {}).copy()
+    for k, v in (b.get("custom_metrics") or {}).items():
+        ac[k] = ac.get(k, 0) + v
+    if ac:
+        out["custom_metrics"] = ac
     return out
 
 
@@ -386,167 +485,6 @@ def add_aggregation_period(name: str, period_seconds: int) -> None:
 def get_aggregation_periods() -> Dict[str, int]:
     """Return current rolling period names and their lengths in seconds."""
     return dict(_PERIOD_SECONDS)
-
-
-# ---------------------------------------------------------------------------
-# CloudWatch Logs Export (detailed per-invocation history)
-# ---------------------------------------------------------------------------
-
-
-def _get_cloudwatch_logs_client():
-    """Lazy-init boto3 CloudWatch Logs client."""
-    global _cloudwatch_logs_client
-    if _cloudwatch_logs_client is None:
-        try:
-            import boto3
-            _cloudwatch_logs_client = boto3.client("logs")
-        except Exception as e:
-            logger.debug("Failed to create CloudWatch Logs client: %s", e)
-    return _cloudwatch_logs_client
-
-
-def _get_telemetry_log_group() -> str:
-    """Return the CloudWatch Logs log group name from env or default."""
-    return os.environ.get("GLITCH_TELEMETRY_LOG_GROUP", _DEFAULT_TELEMETRY_LOG_GROUP)
-
-
-def _telemetry_log_stream_for_timestamp(ts: float) -> str:
-    """Return a daily log stream name for the given timestamp (UTC date)."""
-    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-    return dt.strftime("%Y/%m/%d")
-
-
-def _ensure_log_group(log_group: str) -> bool:
-    """Ensure the log group exists, creating it if necessary. Returns True on success."""
-    client = _get_cloudwatch_logs_client()
-    if not client:
-        return False
-    try:
-        client.create_log_group(logGroupName=log_group)
-        logger.info("Created CloudWatch log group: %s", log_group)
-    except client.exceptions.ResourceAlreadyExistsException:
-        pass
-    except Exception as e:
-        logger.debug("Failed to create log group %s: %s", log_group, e)
-        return False
-    return True
-
-
-def _ensure_log_stream(log_group: str, log_stream: str) -> bool:
-    """Ensure the log stream exists, creating it if necessary. Returns True on success."""
-    client = _get_cloudwatch_logs_client()
-    if not client:
-        return False
-    try:
-        client.create_log_stream(logGroupName=log_group, logStreamName=log_stream)
-        logger.debug("Created log stream %s/%s", log_group, log_stream)
-    except client.exceptions.ResourceAlreadyExistsException:
-        pass
-    except Exception as e:
-        logger.warning("Failed to create log stream %s/%s: %s", log_group, log_stream, e)
-        return False
-    return True
-
-
-def _write_telemetry_to_cloudwatch(entry: TelemetryHistoryEntry, event_type: str = "invocation", log_group_override: Optional[str] = None) -> bool:
-    """
-    Write a telemetry entry to CloudWatch Logs.
-    
-    Args:
-        entry: dict with "timestamp" (float epoch) and "metrics" (InvocationMetrics)
-        event_type: "invocation" or "alert"
-        log_group_override: Optional log group name (defaults to GLITCH_TELEMETRY_LOG_GROUP or /glitch/telemetry)
-    
-    Returns:
-        True if written successfully, False otherwise
-    """
-    global _cloudwatch_sequence_tokens
-    client = _get_cloudwatch_logs_client()
-    if not client:
-        return False
-    
-    log_group = log_group_override or _get_telemetry_log_group()
-    ts = entry.get("timestamp") or time.time()
-    log_stream = _telemetry_log_stream_for_timestamp(ts)
-    stream_key = f"{log_group}:{log_stream}"
-    
-    # Ensure log group and stream exist
-    _ensure_log_group(log_group)
-    _ensure_log_stream(log_group, log_stream)
-    
-    log_event = {
-        "timestamp": int(ts * 1000),
-        "message": json.dumps({
-            "event_type": event_type,
-            "timestamp": ts,
-            "timestamp_iso": datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(),
-            "metrics": entry.get("metrics"),
-            "custom_metrics": entry.get("custom_metrics"),
-        }, default=str),
-    }
-    
-    try:
-        kwargs = {
-            "logGroupName": log_group,
-            "logStreamName": log_stream,
-            "logEvents": [log_event],
-        }
-        if stream_key in _cloudwatch_sequence_tokens:
-            kwargs["sequenceToken"] = _cloudwatch_sequence_tokens[stream_key]
-        
-        response = client.put_log_events(**kwargs)
-        _cloudwatch_sequence_tokens[stream_key] = response.get("nextSequenceToken", "")
-        return True
-        
-    except client.exceptions.ResourceNotFoundException:
-        if _ensure_log_stream(log_group, log_stream):
-            try:
-                response = client.put_log_events(
-                    logGroupName=log_group,
-                    logStreamName=log_stream,
-                    logEvents=[log_event],
-                )
-                _cloudwatch_sequence_tokens[stream_key] = response.get("nextSequenceToken", "")
-                return True
-            except Exception as e:
-                logger.warning("Failed to write telemetry after creating stream: %s", e)
-        return False
-        
-    except client.exceptions.InvalidSequenceTokenException as e:
-        expected = getattr(e, "expectedSequenceToken", None)
-        if expected:
-            _cloudwatch_sequence_tokens[stream_key] = expected
-            try:
-                response = client.put_log_events(
-                    logGroupName=log_group,
-                    logStreamName=log_stream,
-                    logEvents=[log_event],
-                    sequenceToken=expected,
-                )
-                _cloudwatch_sequence_tokens[stream_key] = response.get("nextSequenceToken", "")
-                return True
-            except Exception as e2:
-                logger.warning("Failed to write telemetry after token refresh: %s", e2)
-        return False
-        
-    except Exception as e:
-        logger.warning("Failed to write telemetry to CloudWatch Logs: %s", e)
-        return False
-
-
-def write_telemetry_alert_to_cloudwatch(alert_message: str, period: str, metric: str, value: float, limit: float) -> bool:
-    """Write a threshold alert event to CloudWatch Logs."""
-    entry = {
-        "timestamp": time.time(),
-        "metrics": {
-            "alert_message": alert_message,
-            "period": period,
-            "metric": metric,
-            "value": value,
-            "limit": limit,
-        },
-    }
-    return _write_telemetry_to_cloudwatch(entry, event_type="alert")
 
 
 # ---------------------------------------------------------------------------
@@ -819,11 +757,31 @@ def log_invocation_metrics(
         f"duration: {metrics.get('duration_seconds', 0):.2f}s | "
         f"latency: {metrics.get('latency_ms', 0):.0f}ms"
     )
-    
+
+    structured_log: Dict[str, Any] = {
+        "event_type": "invocation_metrics",
+        "timestamp": time.time(),
+        "session_id": session_id,
+        "token_usage": {
+            "input_tokens": token_usage.get("input_tokens", 0),
+            "output_tokens": token_usage.get("output_tokens", 0),
+            "total_tokens": token_usage.get("total_tokens", 0),
+            "cache_read_tokens": token_usage.get("cache_read_tokens", 0),
+            "cache_write_tokens": token_usage.get("cache_write_tokens", 0),
+        },
+        "duration_seconds": metrics.get("duration_seconds", 0),
+        "cycle_count": metrics.get("cycle_count", 0),
+        "latency_ms": metrics.get("latency_ms", 0),
+        "tools_used": list((metrics.get("tool_usage") or {}).keys()),
+    }
+    if extra:
+        structured_log["skill_info"] = extra
+    logger.info(json.dumps(structured_log))
+
     tool_usage = metrics.get("tool_usage", {})
     if tool_usage:
         logger.info(f"Tools used: {list(tool_usage.keys())}")
-    
+
     # Log skill selection info if provided
     if extra:
         skills_injected = extra.get("skills_injected", 0)

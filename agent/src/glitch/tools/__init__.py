@@ -39,6 +39,19 @@ from glitch.tools.network_tools import (
     ProtectCamera,
 )
 
+from glitch.tools.memory_tools import (
+    set_memory_manager,
+    get_memory_manager,
+    set_session_goal,
+    add_fact,
+    add_constraint,
+    record_decision,
+    add_open_question,
+    resolve_question,
+    update_tool_results_summary,
+    get_memory_state,
+)
+
 __all__ = [
     # Ollama tools
     "vision_agent",
@@ -59,4 +72,15 @@ __all__ = [
     "PiholeStats",
     "UnifiDevice",
     "ProtectCamera",
+    # Memory tools
+    "set_memory_manager",
+    "get_memory_manager",
+    "set_session_goal",
+    "add_fact",
+    "add_constraint",
+    "record_decision",
+    "add_open_question",
+    "resolve_question",
+    "update_tool_results_summary",
+    "get_memory_state",
 ]

@@ -142,7 +142,7 @@ async def vision_agent(
 @tool
 async def local_chat(
     prompt: str,
-    model: str = "llama3.2",
+    model: str = "mistral:12b",
     system_prompt: Optional[str] = None,
     temperature: float = 0.7,
 ) -> str:
@@ -155,7 +155,7 @@ async def local_chat(
     
     Args:
         prompt: The user's message or query
-        model: Ollama model to use (default: llama3.2)
+        model: Ollama model to use (default: mistral:12b)
         system_prompt: Optional system instructions for the model
         temperature: Sampling temperature (0.0 to 1.0)
     

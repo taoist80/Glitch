@@ -8,9 +8,7 @@
     "build": "tsc -b && vite build",
     "predeploy": "pnpm build",
     "lint": "eslint .",
-    "preview": "vite preview",
-    "check": "node scripts/agent-proxy.cjs",
-    "proxy": "node scripts/agent-proxy.cjs proxy"
+    "preview": "vite preview"
   },
   "dependencies": {
     "react": "^18.3.1",

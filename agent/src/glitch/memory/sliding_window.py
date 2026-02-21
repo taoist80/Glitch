@@ -5,7 +5,9 @@ Uses the official bedrock_agentcore.memory.MemoryClient SDK for all memory opera
 Dataflow:
     User Message -> create_event() -> AgentCore Memory (short-term)
     Query -> retrieve_long_term_memories() -> AgentCore Memory (semantic search)
+    Structured updates -> create_structured_event() -> AgentCore Memory (persistent)
     Context Request -> get_summary_for_context() -> StructuredMemory -> String
+    Startup / reload -> load_structured_from_agentcore() -> StructuredMemory (hydrate from Memory)
 """
 
 from typing import Dict, List, Any, Optional, Tuple
@@ -17,6 +19,9 @@ import logging
 from glitch.types import EventType
 
 logger = logging.getLogger(__name__)
+
+# Prefix for structured memory events stored in AgentCore Memory (for retrieval).
+STRUCTURED_EVENT_PREFIX = "_structured:"
 
 
 @dataclass
@@ -349,6 +354,90 @@ class GlitchMemoryManager:
         except Exception as e:
             logger.error(f"Failed to retrieve long-term memories: {e}")
             return []
+
+    def _session_namespaces(self) -> List[str]:
+        """Namespaces for this session's structured data in AgentCore Memory."""
+        return [f"/session/{self.session_id}/"]
+
+    def create_structured_event(self, kind: str, value: Any) -> Optional[str]:
+        """Persist a structured memory update to AgentCore Memory (sync).
+
+        Stores as a single event so retrieve() can find it by semantic search.
+        Use kind in {"session_goal", "fact", "constraint", "decision", "open_question"}.
+
+        Args:
+            kind: Type of structured data (session_goal, fact, constraint, etc.)
+            value: Value to store (string or serializable structure)
+
+        Returns:
+            Event ID if successful, None otherwise
+        """
+        if not self.memory_client:
+            return None
+        try:
+            content = json.dumps({"_structured": kind, "value": value})
+            role = "assistant"
+            response = self.memory_client.create_event(
+                memory_id=self.memory_id,
+                actor_id=self.actor_id,
+                session_id=self.session_id,
+                messages=[(content, role)],
+            )
+            event_id = response.get("eventId") if isinstance(response, dict) else None
+            logger.debug("Created structured event kind=%s in session %s", kind, self.session_id)
+            return event_id
+        except Exception as e:
+            logger.warning("Failed to create_structured_event: %s", e)
+            return None
+
+    async def load_structured_from_agentcore(self) -> None:
+        """Hydrate structured memory from AgentCore Memory (e.g. after restart).
+
+        Calls retrieve() with session-scoped query and merges results into
+        self.structured_memory so get_summary_for_context() and tools see persisted state.
+        """
+        if not self.memory_client:
+            return
+        try:
+            memories = await self.retrieve_long_term_memories(
+                query="session goal facts constraints decisions open questions",
+                max_results=50,
+                namespaces=self._session_namespaces(),
+            )
+            if not memories:
+                return
+            for m in memories:
+                content = (m.get("content") or m.get("text") or m.get("message") or m.get("body") or "") if isinstance(m, dict) else str(m)
+                if not content:
+                    continue
+                try:
+                    if isinstance(content, str) and content.strip().startswith("{"):
+                        data = json.loads(content)
+                    elif isinstance(content, dict):
+                        data = content
+                    else:
+                        continue
+                    if not isinstance(data, dict) or data.get("_structured") is None or "value" not in data:
+                        continue
+                    kind = data["_structured"]
+                    value = data["value"]
+                    if kind == "session_goal" and value:
+                        self.structured_memory.session_goal = value
+                    elif kind == "fact" and value and value not in self.structured_memory.facts:
+                        self.structured_memory.facts.append(value)
+                    elif kind == "constraint" and value and value not in self.structured_memory.constraints:
+                        self.structured_memory.constraints.append(value)
+                    elif kind == "decision" and value:
+                        entry = value if isinstance(value, dict) else {"decision": value, "rationale": "", "timestamp": datetime.utcnow().isoformat()}
+                        if entry not in self.structured_memory.decisions:
+                            self.structured_memory.decisions.append(entry)
+                    elif kind == "open_question" and value and value not in self.structured_memory.open_questions:
+                        self.structured_memory.open_questions.append(value)
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.debug("Skip parsing structured memory item: %s", e)
+            logger.info("Loaded structured memory from AgentCore for session %s", self.session_id)
+        except Exception as e:
+            logger.warning("load_structured_from_agentcore failed: %s", e)
     
     def compress_for_escalation(self) -> MemoryCapsule:
         """Compress memory for escalation to higher tier.

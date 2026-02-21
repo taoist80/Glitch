@@ -52,38 +52,11 @@ cd ../agent && PYTHONPATH=src python3 src/main.py
 # Open http://localhost:8080/ui
 ```
 
-### Option C: Deployed Agent (proxy mode)
+### Option C: Deployed Agent (Lambda UI Backend)
 
-Use the agent process as a local server that proxies all API and chat traffic to your deployed AgentCore runtime (boto3). No AgentCore CLI needed.
+When deployed to AWS, the UI is served via a Lambda Function URL. The Lambda handles session management and proxies requests to the AgentCore Runtime. See `infrastructure/lib/ui-backend-stack.ts` for the CDK stack.
 
-```bash
-# Set proxy mode and deployed agent name
-export GLITCH_UI_MODE=proxy
-export GLITCH_DEPLOYED_AGENT_NAME=Glitch
-export AWS_REGION=us-west-2
-
-# Optional: set runtime ARN to skip control-plane lookup
-# export GLITCH_AGENT_RUNTIME_ARN=arn:aws:bedrock-agentcore:us-west-2:ACCOUNT:runtime/Glitch-XXX
-
-# From the repo root: build UI and start agent (serves UI at /ui, proxies to deployed agent)
-cd ui && pnpm build
-cd ../agent && GLITCH_UI_MODE=proxy PYTHONPATH=src python3 src/main.py
-
-# Open http://localhost:8080/ui
-```
-
-### Legacy: Node.js proxy (deprecated)
-
-The standalone Node.js proxy (`pnpm proxy`) is deprecated. Use Option C (Python proxy) instead. See `ui/scripts/agent-proxy.cjs` for the deprecated script.
-
-## UI modes (environment)
-
-| Variable | Values | Description |
-|----------|--------|-------------|
-| `GLITCH_UI_MODE` | `local` (default), `proxy`, `dev` | `local`: direct `/api` from this process. `proxy`: proxy `/api` and `/invocations` to deployed agent. `dev`: do not mount static UI (use Vite). |
-| `GLITCH_DEPLOYED_AGENT_NAME` | e.g. `Glitch` | Agent name when in `proxy` mode (used to resolve runtime ARN). |
-| `GLITCH_AGENT_RUNTIME_ARN` | Full ARN | Optional; skip control-plane lookup when set. |
-| `AWS_REGION` | e.g. `us-west-2` | AWS region for proxy mode. |
+Set `VITE_API_BASE_URL` to the Lambda Function URL when building the UI for production deployment.
 
 ## API Endpoints
 
@@ -98,7 +71,11 @@ The standalone Node.js proxy (`pnpm proxy`) is deprecated. Use Option C (Python 
 | `/api/skills/{id}/toggle` | POST | Enable/disable skill |
 | `/invocations` | POST | Send message to Glitch |
 
-When in proxy mode, `/ui-proxy/api/*` and `/ui-proxy/invocations` are also available and behave the same as `/api` and `/invocations`.
+## Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `VITE_API_BASE_URL` | API base URL for production builds (Lambda Function URL) |
 
 ## Scripts
 
@@ -106,8 +83,6 @@ When in proxy mode, `/ui-proxy/api/*` and `/ui-proxy/invocations` are also avail
 |---------|-------------|
 | `pnpm dev` | Start Vite dev server |
 | `pnpm build` | Build for production |
-| `pnpm check` | Check agent connection status (legacy) |
-| `pnpm proxy` | Start legacy Node proxy (deprecated) |
 | `pnpm preview` | Preview production build |
 
 ## Tech Stack

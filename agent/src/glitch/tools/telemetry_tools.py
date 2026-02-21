@@ -18,6 +18,7 @@ from glitch.telemetry import (
     check_thresholds,
     clear_telemetry_thresholds as clear_thresholds_impl,
     get_aggregation_periods,
+    get_cloudwatch_aggregates,
     get_last_agent_result,
     get_metrics_to_string,
     get_registered_custom_metrics,
@@ -27,6 +28,7 @@ from glitch.telemetry import (
     get_running_totals,
     invocation_metrics_to_telegram_string,
     publish_custom_metric_to_cloudwatch,
+    query_cloudwatch_telemetry,
     record_custom_telemetry_metric,
     register_custom_telemetry_metric,
     remove_telemetry_threshold as remove_threshold_impl,
@@ -61,6 +63,7 @@ def telemetry(
     last_n: int = 0,
     period: str = "",
     running_totals: bool = False,
+    include_cloudwatch: bool = False,
 ) -> str:
     """Return Strands telemetry: latest invocation, optional history, and optional aggregates by time period.
 
@@ -69,6 +72,7 @@ def telemetry(
     - last_n > 0: append last N invocations (newest first) with one-line summaries.
     - period: one of 'hour','day','week','month' to add rolling aggregates for that window (e.g. total tokens in last 24h).
     - running_totals: if True, add aggregates for this hour, today, this week, this month (UTC calendar).
+    - include_cloudwatch: if True, also query CloudWatch Logs Insights for persistent telemetry across restarts.
 
     After any period or running totals, configured thresholds are checked and ALERT lines are appended if exceeded.
 
@@ -76,6 +80,7 @@ def telemetry(
         last_n: Number of past invocations to list (0 = skip). Max 50.
         period: Optional. One of hour, day, week, month for rolling-window totals.
         running_totals: If True, include this_hour, today, this_week, this_month running totals.
+        include_cloudwatch: If True, supplement with CloudWatch for persistent data.
 
     Returns:
         Formatted telemetry and, if thresholds are set, any alerts.
@@ -137,14 +142,14 @@ def telemetry(
 
     if period and period.lower() in ("hour", "day", "week", "month"):
         p = period.lower()
-        entries = get_telemetry_for_period(p, now_ts)
+        entries = get_telemetry_for_period(p, now_ts, include_cloudwatch=include_cloudwatch)
         agg = aggregate_metrics(entries)
         period_aggregates[p] = agg
         parts.append("\n=== Rolling total (last %s) ===" % p)
         parts.append(_format_aggregate(agg, p))
 
     if running_totals:
-        totals = get_running_totals(now_ts)
+        totals = get_running_totals(now_ts, include_cloudwatch=include_cloudwatch)
         parts.append("\n=== Running totals (UTC calendar) ===")
         for name in ("this_hour", "today", "this_week", "this_month"):
             period_aggregates[name] = totals[name]
@@ -154,11 +159,11 @@ def telemetry(
     if thresholds:
         for p in ("hour", "day", "week", "month"):
             if p not in period_aggregates:
-                entries = get_telemetry_for_period(p, now_ts)
+                entries = get_telemetry_for_period(p, now_ts, include_cloudwatch=include_cloudwatch)
                 period_aggregates[p] = aggregate_metrics(entries)
         for name in ("this_hour", "today", "this_week", "this_month"):
             if name not in period_aggregates:
-                totals = get_running_totals(now_ts)
+                totals = get_running_totals(now_ts, include_cloudwatch=include_cloudwatch)
                 period_aggregates[name] = totals[name]
         alerts = check_thresholds(period_aggregates)
         if alerts:
@@ -167,6 +172,35 @@ def telemetry(
                 parts.append(a)
 
     return "\n".join(parts)
+
+
+@tool
+def query_persistent_telemetry(
+    period: str = "day",
+    include_in_memory: bool = True,
+) -> str:
+    """Query persistent telemetry from CloudWatch Logs Insights.
+
+    Use when the user asks for historical telemetry across sessions, or when
+    the container has restarted and in-memory history is empty. Set
+    GLITCH_TELEMETRY_LOG_GROUP to the log group name for CloudWatch queries.
+
+    Args:
+        period: One of hour, day, week, month - time range to query.
+        include_in_memory: If True, merge with in-memory history for the period.
+
+    Returns:
+        Aggregated telemetry from CloudWatch and optionally in-memory.
+    """
+    p = period.lower() if period else "day"
+    if p not in ("hour", "day", "week", "month"):
+        return "Invalid period. Use one of: hour, day, week, month."
+    if include_in_memory:
+        entries = get_telemetry_for_period(p, time.time(), include_cloudwatch=True)
+        agg = aggregate_metrics(entries)
+    else:
+        agg = get_cloudwatch_aggregates(p, None)
+    return _format_aggregate(agg, "Persistent telemetry (last %s)" % p)
 
 
 @tool

@@ -115,3 +115,17 @@ class TelemetryResponse(BaseModel):
     running_totals: Dict[str, Dict[str, Any]] = {}
     thresholds: List[Dict[str, Any]] = []
     alerts: List[str] = []
+
+
+class StreamingInfoResponse(BaseModel):
+    """Response from GET /api/streaming-info.
+    
+    Provides information about streaming capabilities for the UI.
+    Phase 2 will add presigned WebSocket URL support.
+    """
+    streaming_enabled: bool = False
+    http_streaming_supported: bool = True
+    websocket_url: Optional[str] = None
+    session_id: Optional[str] = None
+    expires_in_seconds: Optional[int] = None
+    message: str = "HTTP streaming available. WebSocket streaming coming in Phase 2."

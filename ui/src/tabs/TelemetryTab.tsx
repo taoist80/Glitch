@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { RefreshCw, BarChart3, AlertTriangle, Clock, Hash } from 'lucide-react';
+import { RefreshCw, BarChart3, AlertTriangle, Clock, Hash, Wrench } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
 import type { TelemetryHistoryEntry, PeriodAggregates } from '../types';
 
@@ -51,6 +51,35 @@ export function TelemetryTab() {
     fetchTelemetry();
   }, [fetchTelemetry]);
 
+  // Extract tool usage from history
+  const toolUsage: Record<string, { calls: number; successes: number; errors: number; totalTime: number }> = {};
+  const skillUsage: Record<string, number> = {};
+  
+  if (telemetryData?.history) {
+    for (const entry of telemetryData.history as TelemetryHistoryEntry[]) {
+      const m = entry.metrics ?? {};
+      // Count tool usage from tool_usage field
+      if (m.tool_usage && typeof m.tool_usage === 'object') {
+        for (const [name, stats] of Object.entries(m.tool_usage)) {
+          if (!toolUsage[name]) {
+            toolUsage[name] = { calls: 0, successes: 0, errors: 0, totalTime: 0 };
+          }
+          toolUsage[name].calls += stats.call_count ?? 0;
+          toolUsage[name].successes += stats.success_count ?? 0;
+          toolUsage[name].errors += stats.error_count ?? 0;
+          toolUsage[name].totalTime += stats.total_time ?? 0;
+        }
+      }
+      // Count skill usage
+      if (m.skill_info?.selected_skills && Array.isArray(m.skill_info.selected_skills)) {
+        for (const skill of m.skill_info.selected_skills) {
+          const name = typeof skill === 'string' ? skill : skill?.name || 'unknown';
+          skillUsage[name] = (skillUsage[name] || 0) + 1;
+        }
+      }
+    }
+  }
+
   return (
     <div className="p-6 h-full overflow-y-auto">
       <div className="flex items-center justify-between mb-6">
@@ -60,7 +89,7 @@ export function TelemetryTab() {
             Telemetry
           </h2>
           <p className="text-sm text-base-content/60">
-            Collected invocation metrics, running totals, and thresholds
+            Invocation metrics, tool usage, and cost tracking
           </p>
         </div>
         <button
@@ -113,6 +142,63 @@ export function TelemetryTab() {
               <p className="text-base-content/60 text-sm">No running totals yet.</p>
             )}
           </div>
+
+          {/* Tool Usage Section */}
+          {Object.keys(toolUsage).length > 0 && (
+            <div>
+              <h3 className="text-lg font-semibold mb-3 flex items-center gap-2">
+                <Wrench size={20} />
+                Tool Usage (from history)
+              </h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                {Object.entries(toolUsage)
+                  .sort(([, a], [, b]) => b.calls - a.calls)
+                  .map(([tool, stats]) => (
+                    <div key={tool} className="bg-base-200 rounded-lg p-3">
+                      <div className="font-mono text-sm truncate mb-2" title={tool}>{tool}</div>
+                      <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
+                        <span className="text-base-content/70">Calls</span>
+                        <span className="font-mono text-primary">{stats.calls}</span>
+                        <span className="text-base-content/70">Success</span>
+                        <span className="font-mono text-success">{stats.successes}</span>
+                        {stats.errors > 0 && (
+                          <>
+                            <span className="text-base-content/70">Errors</span>
+                            <span className="font-mono text-error">{stats.errors}</span>
+                          </>
+                        )}
+                        {stats.totalTime > 0 && (
+                          <>
+                            <span className="text-base-content/70">Time</span>
+                            <span className="font-mono">{stats.totalTime.toFixed(2)}s</span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          )}
+
+          {/* Skill Usage Section */}
+          {Object.keys(skillUsage).length > 0 && (
+            <div>
+              <h3 className="text-lg font-semibold mb-3 flex items-center gap-2">
+                <BarChart3 size={20} />
+                Skill Usage (from history)
+              </h3>
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+                {Object.entries(skillUsage)
+                  .sort(([, a], [, b]) => b - a)
+                  .map(([skill, count]) => (
+                    <div key={skill} className="bg-base-200 rounded-lg p-3">
+                      <div className="font-mono text-sm truncate" title={skill}>{skill}</div>
+                      <div className="text-2xl font-bold text-secondary">{count}</div>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          )}
 
           {telemetryData.thresholds.length > 0 && (
             <div>

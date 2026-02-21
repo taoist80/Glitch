@@ -16,6 +16,12 @@ Dataflow Overview:
                                     v
                             InvocationMetrics -> TelemetryHistoryEntry -> PeriodAggregates
     TelemetryThreshold (list) + PeriodAggregates -> check_thresholds() -> List[str] (alerts)
+
+Session Management:
+    Channel + Identity -> SessionKey -> SessionManager.get_or_create_session() -> session_id
+
+Gateway Lambda:
+    GatewayEvent -> route_request() -> GatewayResponse
 """
 
 from dataclasses import dataclass, field
@@ -32,6 +38,62 @@ class UiApiRequest(TypedDict, total=False):
     path: str
     method: str
     body: Optional[Dict[str, Any]]
+
+
+# =============================================================================
+# Session Management Types
+# =============================================================================
+
+
+class SessionRecord(TypedDict, total=False):
+    """DynamoDB record for a session.
+
+    Stored in glitch-telegram-config table with pk=SESSION#{channel}:{identity}.
+    """
+    pk: str
+    sk: str
+    session_id: str
+    channel: str
+    identity: str
+    created_at: int
+    ttl: int
+
+
+# =============================================================================
+# Gateway Lambda Types
+# =============================================================================
+
+
+class GatewayEvent(TypedDict, total=False):
+    """Lambda Function URL event structure.
+
+    Normalized from API Gateway v2 or direct Lambda invocation.
+    """
+    rawPath: str
+    requestContext: Dict[str, Any]
+    headers: Dict[str, str]
+    body: str
+    isBase64Encoded: bool
+    source: str
+    detail_type: str
+
+
+class GatewayResponse(TypedDict):
+    """Lambda Function URL response structure."""
+    statusCode: int
+    body: str
+    headers: Dict[str, str]
+
+
+class GatewayRouteResult(TypedDict):
+    """Result from a gateway route handler."""
+    status: int
+    body: str
+
+
+# =============================================================================
+# Token and Metrics Types
+# =============================================================================
 
 
 class TokenUsage(TypedDict):
@@ -108,6 +170,34 @@ class PeriodAggregates(_PeriodAggregatesRequired, total=False):
     custom_metrics: Dict[str, float]
 
 
+class CloudWatchQueryResult(TypedDict, total=False):
+    """Result from a CloudWatch Logs Insights query.
+
+    Used by query_cloudwatch_telemetry() for persistent telemetry retrieval.
+    """
+    status: str
+    results: List[Dict[str, str]]
+    statistics: Dict[str, Any]
+
+
+class CloudWatchAggregates(TypedDict, total=False):
+    """Aggregated metrics from CloudWatch Logs Insights.
+
+    Returned by get_cloudwatch_aggregates() for merging with in-memory telemetry.
+    """
+    invocation_count: int
+    total_input_tokens: int
+    total_output_tokens: int
+    total_tokens: int
+    avg_duration_seconds: float
+    query_time_range: str
+
+
+# =============================================================================
+# Invocation Request/Response Types
+# =============================================================================
+
+
 class InvocationRequest(TypedDict, total=False):
     """Request payload for agent invocation.
     
@@ -133,7 +223,7 @@ class InvocationResponse(TypedDict, total=False):
     error: Optional[str]  # Error message if failed
 
 
-class AgentStatus(TypedDict):
+class AgentStatus(TypedDict, total=False):
     """Agent status information.
     
     Returned by GlitchAgent.get_status().
@@ -142,6 +232,9 @@ class AgentStatus(TypedDict):
     memory_id: str
     routing_stats: Dict[str, Any]
     structured_memory: Dict[str, Any]
+    skills_loaded: int
+    mcp_servers: Dict[str, Any]
+    code_interpreter_available: bool
 
 
 class ConnectivityStatus(TypedDict):
@@ -151,6 +244,44 @@ class ConnectivityStatus(TypedDict):
     """
     ollama_health: bool
     agentcore_memory: bool
+
+
+class StreamingInfo(TypedDict, total=False):
+    """Streaming capabilities information.
+
+    Internal type matching StreamingInfoResponse API model.
+    """
+    streaming_enabled: bool
+    http_streaming_supported: bool
+    websocket_url: Optional[str]
+    session_id: Optional[str]
+    expires_in_seconds: Optional[int]
+    message: str
+
+
+# =============================================================================
+# Tool Registry Types
+# =============================================================================
+
+
+class ToolGroupInfo(TypedDict):
+    """Information about a tool group in the registry."""
+    name: str
+    tool_count: int
+    enabled: bool
+
+
+class ToolRegistryStatus(TypedDict):
+    """Status of the tool registry."""
+    total_tools: int
+    enabled_tools: int
+    groups: List[ToolGroupInfo]
+    disabled_groups: List[str]
+
+
+# =============================================================================
+# Enums
+# =============================================================================
 
 
 class EventType(str, Enum):
@@ -167,6 +298,19 @@ class MetricType(str, Enum):
     COUNTER = "counter"
     GAUGE = "gauge"
     HISTOGRAM = "histogram"
+
+
+class IntegrationStatus(str, Enum):
+    """Status of an external integration."""
+    NOT_IMPLEMENTED = "not_implemented"
+    CONFIGURED = "configured"
+    CONNECTED = "connected"
+    ERROR = "error"
+
+
+# =============================================================================
+# Configuration Dataclasses
+# =============================================================================
 
 
 @dataclass
@@ -258,4 +402,14 @@ def create_keepalive_response(session_id: str = "", memory_id: str = "") -> Invo
         session_id=session_id,
         memory_id=memory_id,
         metrics=create_empty_metrics(),
+    )
+
+
+def create_gateway_response(status: int, body: Any) -> GatewayResponse:
+    """Create a Lambda Function URL response."""
+    import json
+    return GatewayResponse(
+        statusCode=status,
+        body=body if isinstance(body, str) else json.dumps(body),
+        headers={"Content-Type": "application/json"},
     )

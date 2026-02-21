@@ -34,8 +34,7 @@ Review of the code that enables the dashboard UI to work on localhost: entry poi
 ### What it does
 
 - **`get_server_config()`** – Reads `GLITCH_HOST` (default `0.0.0.0`), `GLITCH_PORT` (default `8080`), `GLITCH_DEBUG`. So by default the server binds to all interfaces on 8080, which makes **http://localhost:8080** work from the same machine.
-- **`get_ui_mode()`** – Returns `GLITCH_UI_MODE` (default `local`); used for logging and for server behavior (proxy vs local API, static UI vs dev).
-- **`main()`** – Sets up telemetry, creates agent, optionally Telegram, then either `run_server_async(agent, server_config)` or interactive mode. Logs UI mode and, in proxy mode, deployed agent name.
+- **`main()`** – Sets up telemetry, creates agent, optionally Telegram, then either `run_server_async(agent, server_config)` or interactive mode.
 
 ### Issues and suggestions
 
@@ -52,7 +51,7 @@ Review of the code that enables the dashboard UI to work on localhost: entry poi
 
 ### What it does
 
-- **`_setup_ui_routes()`** – Resolves repo root and `ui/dist`, optionally calls `_auto_build_ui(ui_dir)` when not in dev mode and dist is missing, mounts static files at `/ui` and proxy routes at `/ui-proxy/api` and `/ui-proxy/invocations`.
+- **`_setup_ui_routes()`** – Resolves repo root and `ui/dist`, optionally calls `_auto_build_ui(ui_dir)` when not in dev mode and dist is missing, mounts static files at `/ui`.
 - **`_auto_build_ui(ui_dir)`** – Runs `pnpm install` (if node_modules missing) and `pnpm build`; returns True on success. Logs and swallows errors (no re-raise).
 - **`run_server()` / `run_server_async()`** – Call `_setup_api_routes()` and `_setup_ui_routes()`, then start the app with `config.host` and `config.port` (so localhost:8080 when using defaults).
 

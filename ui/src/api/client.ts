@@ -6,10 +6,23 @@ import type {
   TelemetryData,
   MCPServersResponse,
   SkillsResponse,
+  SkillToggleResponse,
   InvocationResponse,
+  StreamingInfo,
+  StreamEvent,
 } from '../types';
 
-const API_BASE = '/api';
+// API base URL: use environment variable for Lambda Function URL, or default to relative path
+// In production, set VITE_API_BASE_URL to the Lambda Function URL
+const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
+const INVOCATIONS_BASE = import.meta.env.VITE_API_BASE_URL || '';
+
+// Generate a unique client ID for session tracking
+const CLIENT_ID = localStorage.getItem('glitch_client_id') || (() => {
+  const id = `web-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  localStorage.setItem('glitch_client_id', id);
+  return id;
+})();
 
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
   let response: Response;
@@ -18,13 +31,14 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
       ...options,
       headers: {
         'Content-Type': 'application/json',
+        'X-Client-Id': CLIENT_ID,
         ...options?.headers,
       },
     });
   } catch (networkError) {
     const msg =
       networkError instanceof TypeError && (networkError as Error).message === 'Failed to fetch'
-        ? 'Cannot reach the server. Is the agent running? In proxy mode use GLITCH_UI_MODE=proxy and ensure the deployed agent is ready.'
+        ? 'Cannot reach the server. Is the agent running?'
         : (networkError as Error).message;
     throw new Error(msg);
   }
@@ -91,17 +105,83 @@ export const api = {
     return fetchJson<SkillsResponse>(`${API_BASE}/skills`);
   },
 
-  async toggleSkill(skillId: string, enabled: boolean): Promise<{ skill_id: string; enabled: boolean; message: string }> {
-    return fetchJson(`${API_BASE}/skills/${skillId}/toggle`, {
+  async toggleSkill(skillId: string, enabled: boolean): Promise<SkillToggleResponse> {
+    return fetchJson<SkillToggleResponse>(`${API_BASE}/skills/${skillId}/toggle`, {
       method: 'POST',
       body: JSON.stringify({ enabled }),
     });
   },
 
   async sendMessage(prompt: string): Promise<InvocationResponse> {
-    return fetchJson<InvocationResponse>('/invocations', {
+    return fetchJson<InvocationResponse>(`${INVOCATIONS_BASE}/invocations`, {
       method: 'POST',
       body: JSON.stringify({ prompt }),
     });
+  },
+
+  async getStreamingInfo(): Promise<StreamingInfo> {
+    return fetchJson<StreamingInfo>(`${API_BASE}/streaming-info`);
+  },
+
+  async *sendMessageStream(prompt: string): AsyncGenerator<StreamEvent, void, unknown> {
+    const response = await fetch(`${INVOCATIONS_BASE}/invocations`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Client-Id': CLIENT_ID,
+      },
+      body: JSON.stringify({ prompt, stream: true }),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      yield { type: 'error', error: text || `HTTP ${response.status}` };
+      return;
+    }
+
+    if (!response.body) {
+      yield { type: 'error', error: 'No response body for streaming' };
+      return;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const event = JSON.parse(line) as StreamEvent;
+            yield event;
+          } catch {
+            yield { type: 'text', data: line };
+          }
+        }
+      }
+
+      if (buffer.trim()) {
+        try {
+          const event = JSON.parse(buffer) as StreamEvent;
+          yield event;
+        } catch {
+          yield { type: 'text', data: buffer };
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  },
+
+  getClientId(): string {
+    return CLIENT_ID;
   },
 };
