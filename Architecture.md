@@ -66,6 +66,7 @@ A hybrid AI agent system combining AWS AgentCore Runtime with on-premises Ollama
 - **Tool use:** Agent calls tools only when the user’s request or an active skill requires it; telemetry/threshold tools are not invoked unless the user explicitly asks for metrics or alerts. `GLITCH_MAX_TURNS` (default 3) caps agent cycles per invocation.
 - **Server:** HTTP access logging is disabled so runtime logs are not filled with `GET /ping` lines. Per-reply telemetry is not shown in chat.
 - **MCP:** Optional integration via `mcp_servers.yaml` and `MCPServerManager`; stdio transport with env expansion and tool filters.
+- **Cleaner UI (AgentCore-first):** To avoid making EC2 the central router for the web UI, a preferred approach is to serve the UI from S3 + CloudFront and use a **Lambda** as the backend-for-frontend (same `InvokeAgentRuntime` pattern as the Telegram webhook). EC2 then runs only Tailscale (and optionally a minimal Ollama-health endpoint). See [Cleaner UI Architecture: AgentCore-First](docs/cleaner-ui-architecture-agentcore-first.md).
 
 ## Communication Channels
 
@@ -161,6 +162,44 @@ When the bot is deployed with the Telegram webhook stack, Telegram sends updates
 - **IDs:** Owner and user IDs from DynamoDB are normalized to integers so owner/allowed checks work (DynamoDB may return numeric types that would otherwise break equality).
 
 **Stack:** `TelegramWebhookStack` (CDK) creates the Lambda, Function URL, DynamoDB config table, and S3 soul bucket; the Lambda receives `AGENTCORE_RUNTIME_ARN` and invokes the runtime via the Bedrock AgentCore API.
+
+### Unified Session Management
+
+Sessions are managed consistently across all channels using the `SESSION#{channel}:{identity}` pattern in DynamoDB:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Session Key Structure                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  DynamoDB Partition Key Pattern:                                │
+│  SESSION#{channel}:{identity}                                  │
+│                                                                 │
+│  Examples:                                                      │
+│  SESSION#telegram#dm:123456789 (Telegram DM)                    │
+│  SESSION#telegram#group:-100123456 (Telegram group)             │
+│  SESSION#ui#client:abc123 (Web UI)                             │
+│  SESSION#api#key:xyz789 (API key)                              │
+│                                                                 │
+│  Dataflow:                                                      │
+│  Channel + Identity -> SessionKey -> SessionManager             │
+│       |                                                         │
+│       v                                                         │
+│  DynamoDB get_item                                              │
+│       |                                                         │
+│  ┌────┴────┐                                                    │
+│  v         v                                                    │
+│  Existing  New session                                          │
+│  session   (put_item)                                           │
+│  (return)                                                       │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+This enables:
+- Single session view per user across channels
+- Future cross-channel identity linking
+- Consistent memory context regardless of channel
 
 ### Telegram Commands
 
@@ -383,41 +422,38 @@ The agent does **not** call tools on its own for side tasks (e.g. telemetry, thr
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                   Three-Layer Memory System                     │
+│                   Two-Layer Memory System                       │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  Layer 1: Active Window (Strands SDK)                           │
 │  ┌───────────────────────────────────────────────────────────┐  │
-│  │  Sliding window of last N conversation turns              │  │
-│  │  • Default: 20 turns                                      │  │
-│  │  • Managed by SlidingWindowConversationManager            │  │
-│  │  • In-memory, session-scoped                              │  │
+│  │  Sliding window of last N conversation turns               │  │
+│  │  • Default: 20 turns                                       │  │
+│  │  • Managed by SlidingWindowConversationManager             │  │
+│  │  • In-memory, session-scoped                               │  │
 │  └───────────────────────────────────────────────────────────┘  │
 │                              │                                  │
 │                              ▼                                  │
-│  Layer 2: Structured Memory (Local)                             │
+│  Layer 2: AgentCore Memory (Persistent + Structured)           │
 │  ┌───────────────────────────────────────────────────────────┐  │
-│  │  JSON state maintained across turns                       │  │
-│  │  • session_goal: Current objective                        │  │
-│  │  • facts: Accumulated knowledge                           │  │
-│  │  • constraints: Rules to respect                          │  │
-│  │  • decisions: Choices made with rationale                 │  │
-│  │  • open_questions: Unresolved items                       │  │
-│  │  • tool_results_summary: Tool execution history           │  │
+│  │  AWS AgentCore Memory API with structured data             │  │
+│  │  • Short-term: Recent events via create_event()            │  │
+│  │  • Long-term: Semantic search via retrieve()               │  │
+│  │  • Structured: session_goal, facts, constraints,           │  │
+│  │    decisions, open_questions persisted as special events   │  │
+│  │  • Cross-session persistence                               │  │
+│  │  • Namespaced storage (/session/{id}/, /user/facts/)        │  │
 │  └───────────────────────────────────────────────────────────┘  │
-│                              │                                  │
-│                              ▼                                  │
-│  Layer 3: AgentCore Memory (Persistent)                         │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │  AWS AgentCore Memory API                                 │  │
-│  │  • Short-term: Recent events via create_event()           │  │
-│  │  • Long-term: Semantic search via retrieve()              │  │
-│  │  • Cross-session persistence                              │  │
-│  │  • Namespaced storage (/user/facts/, /user/preferences/)  │  │
-│  └───────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│  Dataflow:                                                      │
+│  User Message -> create_event() -> AgentCore Memory             │
+│  Structured update -> create_structured_event() -> Memory       │
+│  Startup -> load_structured_from_agentcore() -> Hydrate         │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+**Note:** Structured memory (session_goal, facts, constraints, decisions, open_questions) is persisted directly to AgentCore Memory and hydrated on startup.
 
 ## Data Flow
 
@@ -591,6 +627,33 @@ The agent does **not** call tools on its own for side tasks (e.g. telemetry, thr
 │                        Type Hierarchy                           │
 └─────────────────────────────────────────────────────────────────┘
 
+Session Management Types
+├── Channel (Enum): TELEGRAM_DM, TELEGRAM_GROUP, UI, API
+├── SessionKey (dataclass)
+│   ├── channel: Channel
+│   ├── identity: str
+│   └── pk: str (property -> SESSION#{channel}:{identity})
+├── SessionRecord (TypedDict)
+│   ├── pk, sk: str
+│   ├── session_id: str
+│   ├── channel, identity: str
+│   └── created_at, ttl: int
+└── SessionManager (class)
+    └── get_or_create_session(key) -> session_id
+
+Gateway Lambda Types
+├── GatewayEvent (TypedDict)
+│   ├── rawPath, body: str
+│   ├── headers: Dict[str, str]
+│   └── source, detail_type: str (EventBridge)
+├── GatewayResponse (TypedDict)
+│   ├── statusCode: int
+│   ├── body: str
+│   └── headers: Dict[str, str]
+└── GatewayRouteResult (TypedDict)
+    ├── status: int
+    └── body: str
+
 Configuration Types (dataclass)
 ├── TelemetryConfig
 │   ├── service_name: str
@@ -606,14 +669,8 @@ Configuration Types (dataclass)
 │   ├── host: str
 │   ├── port: int
 │   └── debug: bool
-├── RouterConfig
-│   ├── confidence_threshold: float
-│   ├── context_threshold_pct: float
-│   ├── max_escalations_per_turn: int
-│   └── max_escalations_per_session: int
 └── MemoryConfig
-    ├── session_id: str
-    ├── memory_id: str
+    ├── session_id, memory_id: str
     ├── region: str
     ├── window_size: int
     ├── compression_threshold_pct: float
@@ -623,31 +680,64 @@ API Types (TypedDict)
 ├── InvocationRequest
 │   ├── prompt: str (required)
 │   ├── session_id: Optional[str]
-│   └── context: Optional[Dict]
+│   ├── context: Optional[Dict]
+│   ├── stream: bool
+│   └── _ui_api_request: UiApiRequest
 ├── InvocationResponse
 │   ├── message: str
-│   ├── session_id: str
-│   ├── memory_id: str
+│   ├── session_id, memory_id: str
 │   ├── metrics: InvocationMetrics
 │   └── error: Optional[str]
 ├── InvocationMetrics
 │   ├── duration_seconds: float
 │   ├── token_usage: TokenUsage
-│   ├── cycle_count: int
-│   ├── latency_ms: int
+│   ├── cycle_count, latency_ms: int
 │   ├── stop_reason: str
 │   └── tool_usage: Dict[str, ToolUsageStats]
 ├── TokenUsage
-│   ├── input_tokens: int
-│   ├── output_tokens: int
-│   ├── total_tokens: int
-│   ├── cache_read_tokens: int
-│   └── cache_write_tokens: int
+│   ├── input_tokens, output_tokens, total_tokens: int
+│   └── cache_read_tokens, cache_write_tokens: int
 └── ToolUsageStats
-    ├── call_count: int
-    ├── success_count: int
-    ├── error_count: int
+    ├── call_count, success_count, error_count: int
     └── total_time: float
+
+Telemetry Types (TypedDict)
+├── TelemetryThreshold
+│   ├── metric, period: str
+│   └── limit: float
+├── TelemetryHistoryEntry
+│   ├── timestamp: float
+│   ├── metrics: InvocationMetrics
+│   └── custom_metrics: Dict[str, float] (optional)
+├── PeriodAggregates
+│   ├── invocation_count: int
+│   ├── input/output/total_tokens: int
+│   ├── duration_seconds, latency_ms_avg: float
+│   └── custom_metrics: Dict[str, float] (optional)
+├── CloudWatchQueryResult
+│   ├── status: str
+│   ├── results: List[Dict]
+│   └── statistics: Dict
+└── CloudWatchAggregates
+    ├── invocation_count: int
+    ├── total_input/output_tokens: int
+    ├── avg_duration_seconds: float
+    └── query_time_range: str
+
+Tool Registry Types
+├── ToolGroupInfo (TypedDict)
+│   ├── name: str
+│   ├── tool_count: int
+│   └── enabled: bool
+├── ToolRegistryStatus (TypedDict)
+│   ├── total_tools, enabled_tools: int
+│   ├── groups: List[ToolGroupInfo]
+│   └── disabled_groups: List[str]
+└── ToolRegistry (class)
+    ├── register_group(name, tools)
+    ├── disable_group(name) / enable_group(name)
+    ├── get_all_tools() -> List[Callable]
+    └── list_groups() -> Dict[str, int]
 
 Enums
 ├── EventType: USER_MESSAGE, AGENT_RESPONSE, TOOL_CALL, TOOL_RESULT, SYSTEM
@@ -697,11 +787,24 @@ mcp_servers:
 
 | Stack | Purpose | Key Resources |
 |-------|---------|---------------|
-| `GlitchVpcStack` | Network foundation | VPC, Subnets, VPC Endpoints |
-| `GlitchSecretsStack` | Credential management | Secrets Manager secrets |
-| `GlitchTailscaleStack` | Hybrid connectivity | EC2 instance, Security Groups |
-| `GlitchAgentCoreStack` | Agent runtime | IAM roles, Security Groups |
-| `GlitchTelegramWebhookStack` | Telegram webhook | Lambda (Function URL), DynamoDB config table, S3 soul bucket |
+| `GlitchVpcStack` | Network foundation | VPC, Subnets, VPC Endpoints (S3, ECR, CloudWatch, Secrets Manager, Bedrock) |
+| `GlitchSecretsStack` | Credential management | Secrets Manager secrets (Tailscale auth, API keys, Telegram token) |
+| `GlitchTailscaleStack` | Hybrid connectivity | EC2 t4g.nano instance, Security Groups (no dedicated EBS—uses AMI root volume only) |
+| `GlitchAgentCoreStack` | Agent runtime support | IAM roles, Security Groups |
+| `GlitchStorageStack` | Persistent storage | DynamoDB config table, S3 soul bucket, SSM parameters, CloudWatch telemetry log group |
+| `GlitchGatewayStack` | Gateway | Lambda Function URL (invocations, /api/*, keepalive) |
+
+**Note:** The Tailscale EC2 instance uses only the minimal root volume from the AMI. No dedicated EBS volumes are provisioned.
+
+### Potentially Unused Resources
+
+Resources that may exist from earlier architectures or one-off setups and are not currently referenced by the CDK app:
+
+- **Telegram webhook stack**: If a standalone `TelegramWebhookStack` (or similar) was previously deployed, it may still exist in the account. The current app uses `GlitchGatewayStack` for the UI; Telegram webhook could be consolidated into the gateway in a future change (see below).
+
+### Future Gateway Consolidation
+
+The gateway Lambda (`GlitchGatewayStack`) currently serves the web UI (invocations, `/api/*`, keepalive). A possible next step is to consolidate the Telegram webhook into the same gateway: one Lambda handling both UI traffic and Telegram webhook callbacks, reducing stacks and simplifying routing. This would require adding a webhook path (e.g. `/webhook/telegram`), DynamoDB config access, and Telegram API permissions to the gateway function.
 
 ### VPC Endpoints (Single AZ for cost optimization)
 
@@ -796,19 +899,20 @@ AgentCore-Glitch/
 │   ├── lib/
 │   │   ├── vpc-stack.ts        # VPC, subnets, endpoints
 │   │   ├── secrets-stack.ts    # Secrets Manager
-│   │   ├── tailscale-stack.ts  # EC2 Tailscale connector
+│   │   ├── tailscale-stack.ts  # EC2 Tailscale connector (no dedicated EBS)
 │   │   ├── agentcore-stack.ts  # IAM, security groups
-│   │   └── telegram-webhook-stack.ts  # Lambda webhook, DynamoDB config, S3 soul bucket
+│   │   ├── storage-stack.ts    # DynamoDB, S3, SSM, CloudWatch logs
+│   │   └── gateway-stack.ts   # Gateway Lambda (invocations, /api/*, keepalive)
 │   └── package.json
 ├── agent/                       # Python Strands agent
 │   ├── src/
 │   │   ├── main.py             # Entry point
 │   │   └── glitch/
 │   │       ├── __init__.py     # Package exports
-│   │       ├── types.py        # Type definitions
+│   │       ├── types.py        # Type definitions (TypedDict, dataclass, Enum)
 │   │       ├── agent.py        # GlitchAgent orchestrator
 │   │       ├── server.py       # HTTP server (access log disabled)
-│   │       ├── telemetry.py    # OpenTelemetry setup
+│   │       ├── telemetry.py    # OpenTelemetry + CloudWatch Logs Insights
 │   │       ├── cli.py          # CLI commands
 │   │       ├── channels/       # Communication channels
 │   │       │   ├── __init__.py
@@ -817,27 +921,41 @@ AgentCore-Glitch/
 │   │       │   ├── config_manager.py    # Config persistence
 │   │       │   ├── dynamodb_config.py   # DynamoDB config (webhook mode)
 │   │       │   ├── bootstrap.py         # Owner pairing codes
-│   │       │   ├── telegram.py          # Telegram channel (external webhook only)
+│   │       │   ├── telegram.py          # Telegram channel
 │   │       │   └── telegram_commands.py # /config handlers
 │   │       ├── memory/
-│   │       │   └── sliding_window.py
+│   │       │   └── sliding_window.py   # Two-layer memory (Active + AgentCore)
 │   │       ├── mcp/                      # MCP (Model Context Protocol)
 │   │       │   ├── __init__.py
 │   │       │   ├── types.py              # MCPServerConfig, MCPConfig
 │   │       │   ├── loader.py             # YAML loader, env expansion
-│   │       │   └── manager.py            # MCPServerManager, MCPClient lifecycle
+│   │       │   └── manager.py            # MCPServerManager
 │   │       ├── routing/
 │   │       │   └── model_router.py
+│   │       ├── skills/                   # Skill system
+│   │       │   ├── types.py
+│   │       │   ├── loader.py, registry.py, selector.py, planner.py, prompt_builder.py
 │   │       └── tools/
+│   │           ├── registry.py           # ToolRegistry (grouped tools)
 │   │           ├── ollama_tools.py
 │   │           ├── network_tools.py
 │   │           ├── soul_tools.py
-│   │           └── telemetry_tools.py
+│   │           ├── memory_tools.py
+│   │           ├── telemetry_tools.py
+│   │           └── code_interpreter_tools.py
 │   ├── mcp_servers.yaml        # MCP server definitions (optional)
 │   ├── Dockerfile
 │   ├── requirements.txt
 │   ├── SOUL.md                 # Agent personality
 │   └── .bedrock_agentcore.yaml # Toolkit config
+├── ui/                         # React + DaisyUI dashboard
+│   ├── src/
+│   │   ├── App.tsx
+│   │   ├── api/client.ts
+│   │   ├── components/
+│   │   ├── tabs/
+│   │   └── store/
+│   └── package.json
 ├── .gitignore
 ├── pnpm-workspace.yaml
 └── Architecture.md             # This file
@@ -921,7 +1039,7 @@ curl http://10.10.110.202:11434/api/tags
 
 ## Dashboard UI
 
-A React + DaisyUI dashboard for monitoring and interacting with Glitch. The agent can serve the built UI and proxy API/chat traffic to a deployed AgentCore runtime (boto3), so no separate Node.js proxy or manual tunnel is required.
+A React + DaisyUI dashboard for monitoring and interacting with Glitch.
 
 ### Running Modes
 
@@ -929,16 +1047,12 @@ A React + DaisyUI dashboard for monitoring and interacting with Glitch. The agen
 |------|------|------------|
 | **Local dev** | UI development with hot reload | From repo root: Agent: `cd agent && PYTHONPATH=src python3 src/main.py`. UI: `cd ui && pnpm dev`. Open http://localhost:5173. |
 | **Production** | Single process, built UI | From repo root: `cd ui && pnpm build` then `cd agent && PYTHONPATH=src python3 src/main.py`. Open http://localhost:8080/ui. |
-| **Proxy** | Connect to deployed agent | From repo root: `cd ui && pnpm build` then `cd agent && GLITCH_UI_MODE=proxy PYTHONPATH=src python3 src/main.py`. Open http://localhost:8080/ui. `/api` and `/invocations` are proxied via boto3 to the deployed runtime. |
+| **Deployed** | Gateway Lambda | When deployed to AWS, the UI is served via a Lambda Function URL. See `infrastructure/lib/gateway-stack.ts`. |
 
-### Environment (UI / proxy)
+### Environment (UI)
 
-- `GLITCH_UI_MODE`: `local` (default), `proxy`, or `dev`.
-- `GLITCH_DEPLOYED_AGENT_NAME`: Agent name in proxy mode (e.g. `Glitch`).
-- `GLITCH_AGENT_RUNTIME_ARN`: Optional; skip control-plane lookup when set.
-- `AWS_REGION`: Used for proxy mode.
-
-**After redeploy (proxy mode):** The proxy resolves the runtime ARN by name (cached 60s). If chat shows "Cannot reach the server" or a proxy error, ensure (1) the local proxy process is running with `GLITCH_UI_MODE=proxy`, (2) the deployed agent is ready, and (3) IAM allows `bedrock-agentcore:InvokeAgentRuntime` and `bedrock-agentcore-control:ListAgentRuntimes`. To pin the new runtime, set `GLITCH_AGENT_RUNTIME_ARN` to the runtime ARN from the deploy output.
+- `GLITCH_UI_MODE`: `local` (default) or `dev` (skip static UI mount for Vite dev server).
+- `VITE_API_BASE_URL`: API base URL for production builds (Lambda Function URL).
 
 ### Features
 
@@ -956,7 +1070,7 @@ A React + DaisyUI dashboard for monitoring and interacting with Glitch. The agen
 
 ### API Endpoints
 
-The UI uses REST endpoints at `/api` (and, when in proxy mode, `/ui-proxy/api` and `/ui-proxy/invocations`):
+The UI uses REST endpoints at `/api`:
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -967,6 +1081,7 @@ The UI uses REST endpoints at `/api` (and, when in proxy mode, `/ui-proxy/api` a
 | `/api/mcp/servers` | GET | MCP server status |
 | `/api/skills` | GET | List all skills |
 | `/api/skills/{id}/toggle` | POST | Enable/disable skill |
+| `/api/streaming-info` | GET | Streaming capabilities info |
 | `/invocations` | POST | Send message to Glitch |
 
 ## License

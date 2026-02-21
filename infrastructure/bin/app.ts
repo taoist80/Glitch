@@ -5,7 +5,8 @@ import { VpcStack } from '../lib/vpc-stack';
 import { SecretsStack } from '../lib/secrets-stack';
 import { TailscaleStack } from '../lib/tailscale-stack';
 import { AgentCoreStack } from '../lib/agentcore-stack';
-import { TelegramWebhookStack } from '../lib/telegram-webhook-stack';
+import { GlitchStorageStack } from '../lib/storage-stack';
+import { GlitchGatewayStack } from '../lib/gateway-stack';
 
 const app = new cdk.App();
 
@@ -35,15 +36,14 @@ const secretsStack = new SecretsStack(app, 'GlitchSecretsStack', {
   description: 'Secrets Manager configuration for AgentCore Glitch',
 });
 
-// Bump instanceBootstrapVersion (e.g. to '4') to force EC2 instance replacement on next deploy.
+// Bump instanceBootstrapVersion (e.g. to '5') to force EC2 instance replacement on next deploy.
 const tailscaleStack = new TailscaleStack(app, 'GlitchTailscaleStack', {
   env,
   vpc: vpcStack.vpc,
   tailscaleAuthKeySecret: secretsStack.tailscaleAuthKeySecret,
   agentCoreRuntimeArn,
-  enableUiServer: true,
-  instanceBootstrapVersion: '4',
-  description: 'EC2 Tailscale connector with Glitch UI server',
+  instanceBootstrapVersion: '5',
+  description: 'EC2 Tailscale connector for on-premises network access',
 });
 tailscaleStack.addDependency(vpcStack);
 tailscaleStack.addDependency(secretsStack);
@@ -60,14 +60,19 @@ agentCoreStack.addDependency(vpcStack);
 agentCoreStack.addDependency(secretsStack);
 agentCoreStack.addDependency(tailscaleStack);
 
-const telegramWebhookStack = new TelegramWebhookStack(app, 'GlitchTelegramWebhookStack', {
+const storageStack = new GlitchStorageStack(app, 'GlitchStorageStack', {
   env,
-  telegramBotTokenSecret: secretsStack.telegramBotTokenSecret,
-  agentCoreRuntimeArn,
   defaultExecutionRoleArn,
-  description: 'Telegram webhook Lambda with Function URL and DynamoDB config',
+  description: 'DynamoDB, S3, SSM, and telemetry log group for Glitch',
 });
-telegramWebhookStack.addDependency(secretsStack);
+
+const gatewayStack = new GlitchGatewayStack(app, 'GlitchGatewayStack', {
+  env,
+  configTable: storageStack.configTable,
+  agentCoreRuntimeArn,
+  description: 'Gateway Lambda (invocations, /api/*, keepalive)',
+});
+gatewayStack.addDependency(storageStack);
 
 cdk.Tags.of(app).add('Project', 'AgentCore-Glitch');
 cdk.Tags.of(app).add('ManagedBy', 'CDK');
