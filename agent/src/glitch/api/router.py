@@ -292,6 +292,8 @@ async def get_telemetry() -> TelemetryResponse:
         running_totals = get_running_totals()
         thresholds = get_telemetry_thresholds()
         alerts = check_thresholds(running_totals)
+        logger.info("Telemetry: history=%d entries, running_totals=%s, thresholds=%d",
+                    len(history), list(running_totals.keys()), len(thresholds))
         return TelemetryResponse(
             history=_sanitize_for_json(history) if isinstance(history, list) else [],
             running_totals=_sanitize_for_json(running_totals) if isinstance(running_totals, dict) else {},
