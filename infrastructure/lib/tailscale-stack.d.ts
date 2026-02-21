@@ -9,6 +9,10 @@ export interface TailscaleStackProps extends cdk.StackProps {
     readonly agentCoreRuntimeArn?: string;
     /** Bump this to force EC2 instance replacement (new instance runs user data from scratch). */
     readonly instanceBootstrapVersion?: string;
+    /** Gateway Lambda Function URL for nginx proxy (UI API and invocations). */
+    readonly gatewayFunctionUrl?: string;
+    /** S3 UI bucket name for nginx to proxy static files. */
+    readonly uiBucketName?: string;
 }
 export declare class TailscaleStack extends cdk.Stack {
     readonly instance: ec2.Instance;

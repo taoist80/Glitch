@@ -11,6 +11,10 @@ export interface TailscaleStackProps extends cdk.StackProps {
   readonly agentCoreRuntimeArn?: string;
   /** Bump this to force EC2 instance replacement (new instance runs user data from scratch). */
   readonly instanceBootstrapVersion?: string;
+  /** Gateway Lambda Function URL for nginx proxy (UI API and invocations). */
+  readonly gatewayFunctionUrl?: string;
+  /** S3 UI bucket name for nginx to proxy static files. */
+  readonly uiBucketName?: string;
 }
 
 export class TailscaleStack extends cdk.Stack {
@@ -20,9 +24,10 @@ export class TailscaleStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: TailscaleStackProps) {
     super(scope, id, props);
 
-    const { vpc, tailscaleAuthKeySecret } = props;
+    const { vpc, tailscaleAuthKeySecret, gatewayFunctionUrl, uiBucketName } = props;
     const bootstrapVersion = props.instanceBootstrapVersion ??
       this.node.tryGetContext('glitchTailscaleBootstrapVersion') ?? '5';
+    const enableUiProxy = Boolean(gatewayFunctionUrl && uiBucketName);
 
     this.securityGroup = new ec2.SecurityGroup(this, 'TailscaleSecurityGroup', {
       vpc,
@@ -89,6 +94,9 @@ export class TailscaleStack extends cdk.Stack {
       '',
       `TAILSCALE_AUTH_KEY=$(aws secretsmanager get-secret-value --secret-id ${tailscaleAuthKeySecret.secretName} --query SecretString --output text --region ${this.region})`,
       '',
+      'echo "Setting hostname for predictable Tailscale URL..."',
+      'hostnamectl set-hostname glitch-tailscale',
+      '',
       'echo "Installing Tailscale..."',
       'curl -fsSL https://tailscale.com/install.sh | sh',
       '',
@@ -106,6 +114,65 @@ export class TailscaleStack extends cdk.Stack {
       'echo "Tailscale setup complete!"',
       'tailscale status',
     ];
+
+    if (enableUiProxy) {
+      const gatewayUrl = gatewayFunctionUrl!.replace(/\/$/, '');
+      userDataCommands.push(
+        '',
+        'echo "Setting up nginx UI proxy..."',
+        'yum install -y nginx',
+        '',
+        `cat > /etc/nginx/conf.d/glitch-proxy.conf << 'NGINXEOF'`,
+        'server {',
+        '    listen 80;',
+        '    server_name _;',
+        '',
+        '    location / {',
+        `        proxy_pass http://${uiBucketName}.s3-website-${this.region}.amazonaws.com;`,
+        `        proxy_set_header Host ${uiBucketName}.s3-website-${this.region}.amazonaws.com;`,
+        '        proxy_set_header X-Real-IP $remote_addr;',
+        '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+        '        proxy_set_header X-Forwarded-Proto $scheme;',
+        '    }',
+        '',
+        '    location /api/ {',
+        `        proxy_pass ${gatewayUrl}/api/;`,
+        '        proxy_set_header Host $host;',
+        '        proxy_set_header X-Real-IP $remote_addr;',
+        '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+        '        proxy_set_header X-Forwarded-Proto $scheme;',
+        '        proxy_ssl_server_name on;',
+        '    }',
+        '',
+        '    location /invocations {',
+        `        proxy_pass ${gatewayUrl}/invocations;`,
+        '        proxy_set_header Host $host;',
+        '        proxy_set_header X-Real-IP $remote_addr;',
+        '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+        '        proxy_set_header X-Forwarded-Proto $scheme;',
+        '        proxy_ssl_server_name on;',
+        '    }',
+        '',
+        '    location /health {',
+        `        proxy_pass ${gatewayUrl}/health;`,
+        '        proxy_set_header Host $host;',
+        '        proxy_set_header X-Real-IP $remote_addr;',
+        '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+        '        proxy_set_header X-Forwarded-Proto $scheme;',
+        '        proxy_ssl_server_name on;',
+        '    }',
+        '}',
+        'NGINXEOF',
+        '',
+        'rm -f /etc/nginx/conf.d/default.conf',
+        'systemctl enable nginx',
+        'systemctl start nginx',
+        '',
+        'echo "Enabling Tailscale Serve for HTTPS..."',
+        'tailscale serve --bg http://127.0.0.1:80',
+        'echo "Tailscale Serve enabled. UI available via Tailscale HTTPS URL."'
+      );
+    }
 
     userData.addCommands(...userDataCommands);
 
@@ -147,5 +214,12 @@ export class TailscaleStack extends cdk.Stack {
       value: this.instance.instancePublicIp,
       description: 'Tailscale EC2 public IP',
     });
+
+    if (enableUiProxy) {
+      new cdk.CfnOutput(this, 'TailscaleUiUrl', {
+        value: 'https://glitch-tailscale.YOUR_TAILNET.ts.net',
+        description: 'Glitch UI via Tailscale Serve. Replace YOUR_TAILNET with your Tailscale network name (e.g. from admin.tailscale.com or tailscale status). Use only on a device joined to the same Tailscale network.',
+      });
+    }
   }
 }
