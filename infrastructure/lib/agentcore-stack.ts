@@ -62,6 +62,7 @@ export class AgentCoreStack extends cdk.Stack {
           `arn:aws:bedrock:${this.region}::foundation-model/anthropic.claude-sonnet-4-20250514-v1:0`,
           `arn:aws:bedrock:${this.region}::foundation-model/anthropic.claude-sonnet-4.6*`,
           `arn:aws:bedrock:${this.region}::foundation-model/anthropic.claude-opus-4*`,
+          `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/*`,
         ],
       })
     );
