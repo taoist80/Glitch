@@ -13,6 +13,8 @@ export interface TailscaleStackProps extends cdk.StackProps {
   readonly instanceBootstrapVersion?: string;
   /** Gateway Lambda Function URL for nginx proxy (UI API and invocations). */
   readonly gatewayFunctionUrl?: string;
+  /** Gateway Lambda hostname (e.g. xxx.lambda-url.region.on.aws) for Host header. Use Fn.select(2, Fn.split('/', url)) in app. */
+  readonly gatewayHostname?: string;
   /** S3 UI bucket name for nginx to proxy static files. */
   readonly uiBucketName?: string;
   /** Custom domain for the UI (e.g. glitch.awoo.agency). Used in nginx server_name and TLS cert. */
@@ -30,7 +32,7 @@ export class TailscaleStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: TailscaleStackProps) {
     super(scope, id, props);
 
-    const { vpc, tailscaleAuthKeySecret, gatewayFunctionUrl, uiBucketName, customDomain, porkbunApiSecret, certbotEmail } = props;
+    const { vpc, tailscaleAuthKeySecret, gatewayFunctionUrl, gatewayHostname, uiBucketName, customDomain, porkbunApiSecret, certbotEmail } = props;
     const bootstrapVersion = props.instanceBootstrapVersion ??
       this.node.tryGetContext('glitchTailscaleBootstrapVersion') ?? '5';
     const enableUiProxy = Boolean(gatewayFunctionUrl && uiBucketName);
@@ -127,8 +129,8 @@ export class TailscaleStack extends cdk.Stack {
 
     if (enableUiProxy) {
       const gatewayUrl = gatewayFunctionUrl!.replace(/\/$/, '');
-      // Extract hostname from Lambda URL (e.g., "abc123.lambda-url.us-west-2.on.aws" from "https://abc123.lambda-url.us-west-2.on.aws")
-      const gatewayHostname = gatewayUrl.replace(/^https?:\/\//, '');
+      // Use explicit hostname for Host header (Lambda Function URLs require correct Host). Passed from app via Fn.select/Fn.split.
+      const lambdaHost = gatewayHostname ?? gatewayUrl.replace(/^https?:\/\//, '');
       const serverNames = customDomain ? `${customDomain} _` : '_';
       
       userDataCommands.push(
@@ -187,7 +189,8 @@ export class TailscaleStack extends cdk.Stack {
           '}',
           '',
           'server {',
-          '    listen 443 ssl http2;',
+          '    listen 443 ssl;',
+          '    http2 on;',
           `    server_name ${serverNames};`,
           '',
           `    ssl_certificate /etc/letsencrypt/live/${customDomain}/fullchain.pem;`,
@@ -206,7 +209,7 @@ export class TailscaleStack extends cdk.Stack {
           '',
           '    location /api/ {',
           `        proxy_pass ${gatewayUrl}/api/;`,
-          `        proxy_set_header Host ${gatewayHostname};`,
+          `        proxy_set_header Host ${lambdaHost};`,
           '        proxy_set_header X-Real-IP $remote_addr;',
           '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
           '        proxy_set_header X-Forwarded-Proto https;',
@@ -215,7 +218,7 @@ export class TailscaleStack extends cdk.Stack {
           '',
           '    location /invocations {',
           `        proxy_pass ${gatewayUrl}/invocations;`,
-          `        proxy_set_header Host ${gatewayHostname};`,
+          `        proxy_set_header Host ${lambdaHost};`,
           '        proxy_set_header X-Real-IP $remote_addr;',
           '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
           '        proxy_set_header X-Forwarded-Proto https;',
@@ -224,7 +227,7 @@ export class TailscaleStack extends cdk.Stack {
           '',
           '    location /health {',
           `        proxy_pass ${gatewayUrl}/health;`,
-          `        proxy_set_header Host ${gatewayHostname};`,
+          `        proxy_set_header Host ${lambdaHost};`,
           '        proxy_set_header X-Real-IP $remote_addr;',
           '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
           '        proxy_set_header X-Forwarded-Proto https;',
@@ -251,7 +254,7 @@ export class TailscaleStack extends cdk.Stack {
           '',
           '    location /api/ {',
           `        proxy_pass ${gatewayUrl}/api/;`,
-          `        proxy_set_header Host ${gatewayHostname};`,
+          `        proxy_set_header Host ${lambdaHost};`,
           '        proxy_set_header X-Real-IP $remote_addr;',
           '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
           '        proxy_set_header X-Forwarded-Proto https;',
@@ -260,7 +263,7 @@ export class TailscaleStack extends cdk.Stack {
           '',
           '    location /invocations {',
           `        proxy_pass ${gatewayUrl}/invocations;`,
-          `        proxy_set_header Host ${gatewayHostname};`,
+          `        proxy_set_header Host ${lambdaHost};`,
           '        proxy_set_header X-Real-IP $remote_addr;',
           '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
           '        proxy_set_header X-Forwarded-Proto https;',
@@ -269,7 +272,7 @@ export class TailscaleStack extends cdk.Stack {
           '',
           '    location /health {',
           `        proxy_pass ${gatewayUrl}/health;`,
-          `        proxy_set_header Host ${gatewayHostname};`,
+          `        proxy_set_header Host ${lambdaHost};`,
           '        proxy_set_header X-Real-IP $remote_addr;',
           '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
           '        proxy_set_header X-Forwarded-Proto https;',

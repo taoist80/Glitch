@@ -88,6 +88,7 @@ const tailscaleStack = new TailscaleStack(app, 'GlitchTailscaleStack', {
   agentCoreRuntimeArn,
   instanceBootstrapVersion: '8',
   gatewayFunctionUrl: gatewayStack.functionUrl,
+  gatewayHostname: gatewayUrlHostname,
   uiBucketName: uiHostingStack.uiBucket.bucketName,
   customDomain,
   porkbunApiSecret: secretsStack.porkbunApiSecret,
