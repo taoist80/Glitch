@@ -125,9 +125,13 @@ export class AgentCoreStack extends cdk.Stack {
           'logs:CreateLogGroup',
           'logs:CreateLogStream',
           'logs:PutLogEvents',
+          'logs:GetLogEvents',
+          'logs:DescribeLogStreams',
         ],
         resources: [
           `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/bedrock/agentcore/*`,
+          `arn:aws:logs:${this.region}:${this.account}:log-group:/glitch/*`,
+          `arn:aws:logs:${this.region}:${this.account}:log-group:/glitch/*:*`,
         ],
       })
     );

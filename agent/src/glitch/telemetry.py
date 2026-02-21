@@ -76,7 +76,7 @@ def get_last_agent_result() -> Optional[Any]:
 def append_telemetry(result: Any) -> None:
     """Append this invocation's metrics to the telemetry history (bounded by count and age).
     
-    Also writes to CloudWatch Logs if GLITCH_TELEMETRY_LOG_GROUP is set.
+    Always writes to CloudWatch Logs for persistence across container restarts.
     Merges any record_custom_telemetry_metric() values into the entry, then clears them.
     """
     global _telemetry_history, _current_custom_metrics
@@ -92,17 +92,93 @@ def append_telemetry(result: Any) -> None:
     cutoff = now - _MAX_HISTORY_AGE_SECONDS
     _telemetry_history = [e for e in _telemetry_history if (e.get("timestamp") or 0) >= cutoff]
     
-    if os.environ.get("GLITCH_TELEMETRY_LOG_GROUP"):
-        _write_telemetry_to_cloudwatch(entry, event_type="invocation")
+    # Always write to CloudWatch for persistence
+    log_group = os.environ.get("GLITCH_TELEMETRY_LOG_GROUP", _DEFAULT_TELEMETRY_LOG_GROUP)
+    _write_telemetry_to_cloudwatch(entry, event_type="invocation", log_group_override=log_group)
 
 
 def get_telemetry_history(limit: int = 50) -> List[TelemetryHistoryEntry]:
-    """Return the last `limit` telemetry entries (newest first)."""
+    """Return the last `limit` telemetry entries (newest first).
+    
+    If in-memory history is empty, reads from CloudWatch Logs for persistence
+    across container restarts.
+    """
     global _telemetry_history
-    n = min(max(0, limit), len(_telemetry_history))
-    if n == 0:
+    
+    # If we have in-memory history, use it
+    if _telemetry_history:
+        n = min(max(0, limit), len(_telemetry_history))
+        if n == 0:
+            return []
+        return list(reversed(_telemetry_history[-n:]))
+    
+    # Try to read from CloudWatch
+    log_group = os.environ.get("GLITCH_TELEMETRY_LOG_GROUP", _DEFAULT_TELEMETRY_LOG_GROUP)
+    entries = _read_telemetry_from_cloudwatch(log_group, limit)
+    if entries:
+        return entries
+    
+    return []
+
+
+def _read_telemetry_from_cloudwatch(log_group: str, limit: int = 50) -> List[TelemetryHistoryEntry]:
+    """Read telemetry entries from CloudWatch Logs.
+    
+    Args:
+        log_group: CloudWatch Logs log group name
+        limit: Maximum number of entries to return
+        
+    Returns:
+        List of telemetry entries (newest first)
+    """
+    client = _get_cloudwatch_logs_client()
+    if not client:
         return []
-    return list(reversed(_telemetry_history[-n:]))
+    
+    try:
+        # Query recent log streams (last 7 days)
+        now = time.time()
+        entries = []
+        
+        # Get log streams for the last 7 days
+        for days_ago in range(7):
+            ts = now - (days_ago * 86400)
+            log_stream = _telemetry_log_stream_for_timestamp(ts)
+            
+            try:
+                response = client.get_log_events(
+                    logGroupName=log_group,
+                    logStreamName=log_stream,
+                    limit=min(limit, 100),
+                    startFromHead=False,  # Get newest first
+                )
+                
+                for event in response.get("events", []):
+                    try:
+                        import json
+                        data = json.loads(event.get("message", "{}"))
+                        if "timestamp" in data and "metrics" in data:
+                            entries.append(data)
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+                        
+            except client.exceptions.ResourceNotFoundException:
+                # Log stream doesn't exist for this day
+                continue
+            except Exception as e:
+                logger.debug("Failed to read from log stream %s: %s", log_stream, e)
+                continue
+            
+            if len(entries) >= limit:
+                break
+        
+        # Sort by timestamp descending and limit
+        entries.sort(key=lambda e: e.get("timestamp", 0), reverse=True)
+        return entries[:limit]
+        
+    except Exception as e:
+        logger.warning("Failed to read telemetry from CloudWatch: %s", e)
+        return []
 
 
 def _get_usage(metrics: Optional[InvocationMetrics], key: str) -> int:
@@ -340,6 +416,22 @@ def _telemetry_log_stream_for_timestamp(ts: float) -> str:
     return dt.strftime("%Y/%m/%d")
 
 
+def _ensure_log_group(log_group: str) -> bool:
+    """Ensure the log group exists, creating it if necessary. Returns True on success."""
+    client = _get_cloudwatch_logs_client()
+    if not client:
+        return False
+    try:
+        client.create_log_group(logGroupName=log_group)
+        logger.info("Created CloudWatch log group: %s", log_group)
+    except client.exceptions.ResourceAlreadyExistsException:
+        pass
+    except Exception as e:
+        logger.debug("Failed to create log group %s: %s", log_group, e)
+        return False
+    return True
+
+
 def _ensure_log_stream(log_group: str, log_stream: str) -> bool:
     """Ensure the log stream exists, creating it if necessary. Returns True on success."""
     client = _get_cloudwatch_logs_client()
@@ -356,13 +448,14 @@ def _ensure_log_stream(log_group: str, log_stream: str) -> bool:
     return True
 
 
-def _write_telemetry_to_cloudwatch(entry: TelemetryHistoryEntry, event_type: str = "invocation") -> bool:
+def _write_telemetry_to_cloudwatch(entry: TelemetryHistoryEntry, event_type: str = "invocation", log_group_override: Optional[str] = None) -> bool:
     """
     Write a telemetry entry to CloudWatch Logs.
     
     Args:
         entry: dict with "timestamp" (float epoch) and "metrics" (InvocationMetrics)
         event_type: "invocation" or "alert"
+        log_group_override: Optional log group name (defaults to GLITCH_TELEMETRY_LOG_GROUP or /glitch/telemetry)
     
     Returns:
         True if written successfully, False otherwise
@@ -372,17 +465,23 @@ def _write_telemetry_to_cloudwatch(entry: TelemetryHistoryEntry, event_type: str
     if not client:
         return False
     
-    log_group = _get_telemetry_log_group()
+    log_group = log_group_override or _get_telemetry_log_group()
     ts = entry.get("timestamp") or time.time()
     log_stream = _telemetry_log_stream_for_timestamp(ts)
     stream_key = f"{log_group}:{log_stream}"
+    
+    # Ensure log group and stream exist
+    _ensure_log_group(log_group)
+    _ensure_log_stream(log_group, log_stream)
     
     log_event = {
         "timestamp": int(ts * 1000),
         "message": json.dumps({
             "event_type": event_type,
+            "timestamp": ts,
             "timestamp_iso": datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(),
             "metrics": entry.get("metrics"),
+            "custom_metrics": entry.get("custom_metrics"),
         }, default=str),
     }
     
