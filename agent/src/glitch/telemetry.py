@@ -124,10 +124,11 @@ def _get_usage(metrics: Optional[InvocationMetrics], key: str) -> int:
 
 
 def _get_logs_client():
-    """Lazy-init boto3 CloudWatch Logs client."""
+    """Lazy-init boto3 CloudWatch Logs client (region required in AgentCore)."""
     try:
         import boto3
-        return boto3.client("logs")
+        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-west-2"
+        return boto3.client("logs", region_name=region)
     except Exception as e:
         logger.debug("Failed to create CloudWatch Logs client: %s", e)
         return None

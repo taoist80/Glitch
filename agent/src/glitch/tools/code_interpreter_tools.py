@@ -11,6 +11,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 _code_interpreter_tool = None
+_code_interpreter_warned = False
 
 
 def get_code_interpreter_tool():
@@ -37,13 +38,19 @@ def get_code_interpreter_tool():
         return _code_interpreter_tool
         
     except ImportError:
-        logger.warning(
-            "strands_tools.code_interpreter not available. "
-            "Install with: pip install 'strands-agents-tools[agent_core_code_interpreter]'"
-        )
+        global _code_interpreter_warned
+        if not _code_interpreter_warned:
+            _code_interpreter_warned = True
+            logger.warning(
+                "strands_tools.code_interpreter not available. "
+                "Install with: pip install 'strands-agents-tools[agent_core_code_interpreter]'"
+            )
         return None
     except Exception as e:
-        logger.warning(f"Failed to initialize Code Interpreter: {e}")
+        global _code_interpreter_warned
+        if not _code_interpreter_warned:
+            _code_interpreter_warned = True
+            logger.warning("Failed to initialize Code Interpreter: %s", e)
         return None
 
 

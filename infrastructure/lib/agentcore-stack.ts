@@ -1,14 +1,11 @@
 import * as cdk from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as iam from 'aws-cdk-lib/aws-iam';
-import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from 'constructs';
 
 export interface AgentCoreStackProps extends cdk.StackProps {
   readonly vpc: ec2.IVpc;
   readonly tailscaleSecurityGroup: ec2.ISecurityGroup;
-  readonly apiKeysSecret: secretsmanager.ISecret;
-  readonly telegramBotTokenSecret: secretsmanager.ISecret;
 }
 
 export class AgentCoreStack extends cdk.Stack {
@@ -18,7 +15,7 @@ export class AgentCoreStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: AgentCoreStackProps) {
     super(scope, id, props);
 
-    const { vpc, tailscaleSecurityGroup, apiKeysSecret, telegramBotTokenSecret } = props;
+    const { vpc, tailscaleSecurityGroup } = props;
 
     this.agentCoreSecurityGroup = new ec2.SecurityGroup(this, 'AgentCoreSecurityGroup', {
       vpc,
@@ -36,6 +33,19 @@ export class AgentCoreStack extends cdk.Stack {
       tailscaleSecurityGroup,
       ec2.Port.allTraffic(),
       'Allow all traffic to Tailscale connector'
+    );
+
+    // On-prem Ollama hosts via Tailscale routing (10.10.110.0/24 routes through Tailscale ENI)
+    // AgentCore needs explicit egress to the destination CIDR, not just to the Tailscale SG
+    this.agentCoreSecurityGroup.addEgressRule(
+      ec2.Peer.ipv4('10.10.110.0/24'),
+      ec2.Port.tcp(11434),
+      'Ollama native API to on-prem chat host (10.10.110.202)'
+    );
+    this.agentCoreSecurityGroup.addEgressRule(
+      ec2.Peer.ipv4('10.10.110.0/24'),
+      ec2.Port.tcp(8080),
+      'OpenAI-compatible API to on-prem vision host (10.10.110.137)'
     );
 
     this.agentCoreSecurityGroup.addIngressRule(
@@ -114,8 +124,20 @@ export class AgentCoreStack extends cdk.Stack {
       })
     );
 
-    apiKeysSecret.grantRead(this.agentRuntimeRole);
-    telegramBotTokenSecret.grantRead(this.agentRuntimeRole);
+    // Grant secrets access via explicit policy (avoids circular dependency with SecretsStack)
+    // Use wildcard ARNs to match the secret's full ARN (AWS appends 6-char suffix)
+    this.agentRuntimeRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'SecretsManagerAccess',
+        effect: iam.Effect.ALLOW,
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: [
+          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:glitch/api-keys*`,
+          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:glitch/telegram-bot-token*`,
+          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:glitch/pihole-api*`,
+        ],
+      })
+    );
 
     this.agentRuntimeRole.addToPolicy(
       new iam.PolicyStatement({

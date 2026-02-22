@@ -1,7 +1,6 @@
 import * as cdk from 'aws-cdk-lib';
 import { Template, Match } from 'aws-cdk-lib/assertions';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
-import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { AgentCoreStack } from '../lib/agentcore-stack';
 
 describe('AgentCoreStack', () => {
@@ -9,8 +8,6 @@ describe('AgentCoreStack', () => {
   let vpcStack: cdk.Stack;
   let vpc: ec2.Vpc;
   let tailscaleSg: ec2.SecurityGroup;
-  let apiKeysSecret: secretsmanager.Secret;
-  let telegramSecret: secretsmanager.Secret;
 
   beforeEach(() => {
     app = new cdk.App();
@@ -29,20 +26,12 @@ describe('AgentCoreStack', () => {
       vpc,
       description: 'Tailscale SG',
     });
-    apiKeysSecret = new secretsmanager.Secret(vpcStack, 'ApiKeys', {
-      secretName: 'glitch/api-keys',
-    });
-    telegramSecret = new secretsmanager.Secret(vpcStack, 'TelegramToken', {
-      secretName: 'glitch/telegram-bot-token',
-    });
   });
 
   function createStack() {
     return new AgentCoreStack(app, 'TestAgentCoreStack', {
       vpc,
       tailscaleSecurityGroup: tailscaleSg,
-      apiKeysSecret,
-      telegramBotTokenSecret: telegramSecret,
       env: { account: '123456789012', region: 'us-west-2' },
     });
   }

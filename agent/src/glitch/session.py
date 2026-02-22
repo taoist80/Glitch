@@ -78,7 +78,8 @@ class SessionManager:
         if self._table is None:
             import boto3
 
-            self._table = boto3.resource("dynamodb").Table(self._table_name)
+            region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-west-2"
+            self._table = boto3.resource("dynamodb", region_name=region).Table(self._table_name)
         return self._table
 
     def get_or_create_session(self, key: SessionKey) -> str:

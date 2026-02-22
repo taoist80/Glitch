@@ -48,19 +48,25 @@ _disabled_skills: set[str] = set()
 _dynamodb_table = None
 
 
+def _get_dynamodb_region() -> str:
+    """Region for DynamoDB (required in AgentCore where default may be unset)."""
+    return os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "us-west-2"
+
+
 def _get_dynamodb_table():
     """Get DynamoDB table for skill persistence (lazy init)."""
     global _dynamodb_table
     if _dynamodb_table is not None:
         return _dynamodb_table
-    
+
     table_name = os.getenv("GLITCH_CONFIG_TABLE", "glitch-telegram-config")
     if not table_name:
         return None
-    
+
     try:
         import boto3
-        dynamodb = boto3.resource("dynamodb")
+        region = _get_dynamodb_region()
+        dynamodb = boto3.resource("dynamodb", region_name=region)
         _dynamodb_table = dynamodb.Table(table_name)
         return _dynamodb_table
     except Exception as e:
@@ -297,7 +303,8 @@ def _load_telegram_config_for_api():
     # Try to read from DynamoDB if we have a table name
     if config_table or webhook_url_env or is_agentcore:
         try:
-            dynamodb = boto3.resource("dynamodb")
+            region = _get_dynamodb_region()
+            dynamodb = boto3.resource("dynamodb", region_name=region)
             table = dynamodb.Table(table_name)
             response = table.get_item(Key={"pk": "CONFIG", "sk": "telegram"})
             if "Item" in response:

@@ -153,12 +153,9 @@ const agentCoreStack = new AgentCoreStack(app, 'GlitchAgentCoreStack', {
   env,
   vpc: vpcStack.vpc,
   tailscaleSecurityGroup: tailscaleStack.securityGroup,
-  apiKeysSecret: secretsStack.apiKeysSecret,
-  telegramBotTokenSecret: secretsStack.telegramBotTokenSecret,
   description: 'AgentCore Runtime resources',
 });
 agentCoreStack.addDependency(vpcStack);
-agentCoreStack.addDependency(secretsStack);
 agentCoreStack.addDependency(tailscaleStack);
 
 cdk.Tags.of(app).add('Project', 'AgentCore-Glitch');

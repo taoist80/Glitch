@@ -91,7 +91,9 @@ async def _handle_ui_api_request(api_request: UiApiRequest) -> dict:
         list_modes,
     )
 
-    path = api_request.get("path", "")
+    path = (api_request.get("path") or "").rstrip("/")
+    if path.startswith("/api/") and len(path) > 5:
+        path = "/" + path[5:]
     method = api_request.get("method", "GET").upper()
     body = api_request.get("body")
 

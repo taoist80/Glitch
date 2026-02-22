@@ -153,10 +153,10 @@ def get_or_create_session(client_id: str) -> str:
 
 def get_session_agent_mode(session_id: str) -> tuple:
     """Load agent_id and mode_id for session from DynamoDB. Returns (agent_id, mode_id)."""
-    if not TABLE:
+    if not table:
         return (None, None)
     try:
-        r = TABLE.get_item(Key={"pk": "SESSION_AGENT", "sk": session_id})
+        r = table.get_item(Key={"pk": "SESSION_AGENT", "sk": session_id})
         if "Item" not in r:
             return (None, None)
         item = r["Item"]
@@ -317,13 +317,13 @@ def handler(event, context):
             else:
                 response_body = invoke_agent(prompt, session_id, stream=stream, agent_id=agent_id, mode_id=mode_id)
         
-        # API proxy routes: /api/* (from nginx) or direct /status, /telegram/config, etc. (from UI with Lambda base URL)
+        # API proxy routes: /api/* (from nginx) or direct paths (from UI with Lambda base URL)
         elif path.startswith('/api/'):
             api_path = '/' + path[5:]
             response_body = invoke_api(api_path, http_method, body, session_id)
-        elif path in ('/status', '/telegram/config', '/ollama/health', '/memory/summary', '/telemetry', '/streaming-info', '/mcp/servers') or path.startswith('/skills'):
+        elif (path in ('/status', '/telegram/config', '/ollama/health', '/memory/summary', '/telemetry', '/streaming-info', '/mcp/servers', '/agents', '/modes') or
+              path.startswith('/skills') or path.startswith('/sessions/')):
             response_body = invoke_api(path, http_method, body, session_id)
-        
         else:
             response_body = {'error': f'Unknown path: {path}'}
             status_code = 404

@@ -1,10 +1,15 @@
-# CDK
+# CDK (compiled TypeScript output — build with: pnpm run build)
 infrastructure/node_modules/
 infrastructure/cdk.out/
 infrastructure/*.js
+infrastructure/**/*.js
 infrastructure/*.d.ts
+infrastructure/**/*.d.ts
 infrastructure/.cdk.staging/
 cdk.context.json
+
+# Docs (local/generated)
+docs/
 
 # Node.js
 node_modules/
