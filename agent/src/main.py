@@ -89,16 +89,22 @@ def get_telemetry_config() -> TelemetryConfig:
     
     Environment Variables:
         OTEL_CONSOLE_ENABLED: Enable console exporter (default: false)
-        OTEL_OTLP_ENABLED: Enable OTLP exporter (default: true)
+        OTEL_OTLP_ENABLED: Enable OTLP exporter (default: false in AgentCore, true if endpoint set)
         OTEL_EXPORTER_OTLP_ENDPOINT: OTLP endpoint URL
     
     Returns:
         TelemetryConfig instance
     """
+    # Only enable OTLP if explicitly requested OR if an endpoint is configured
+    # This avoids connection errors to localhost:4318 in AgentCore where no collector runs
+    has_endpoint = bool(os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+    otlp_enabled_env = os.getenv("OTEL_OTLP_ENABLED", "").lower()
+    enable_otlp = otlp_enabled_env == "true" if otlp_enabled_env else has_endpoint
+    
     return TelemetryConfig(
         service_name="glitch-agent",
         enable_console=os.getenv("OTEL_CONSOLE_ENABLED", "false").lower() == "true",
-        enable_otlp=os.getenv("OTEL_OTLP_ENABLED", "true").lower() == "true",
+        enable_otlp=enable_otlp,
     )
 
 

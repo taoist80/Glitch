@@ -245,10 +245,35 @@ def _load_telegram_config_for_api():
                     "webhook_url": item.get("webhook_url"),
                     "mode": item.get("mode", "webhook"),
                 }, True
+            else:
+                # DynamoDB query succeeded but no config item exists yet
+                # Still return enabled=True since we're in webhook mode
+                logger.info("DynamoDB query succeeded but no CONFIG item found, assuming webhook mode")
+                return {
+                    "mode": "webhook",
+                    "dm_policy": "pairing",
+                    "group_policy": "allowlist",
+                    "require_mention": True,
+                }, True
         except ClientError as e:
             logger.warning("DynamoDB Telegram config load failed: %s", e)
+            # If we have a config table name, assume webhook mode is enabled even if we can't read it
+            # (the agent container may not have DynamoDB permissions, but the webhook Lambda does)
+            return {
+                "mode": "webhook",
+                "dm_policy": "pairing",
+                "group_policy": "allowlist",
+                "require_mention": True,
+            }, True
         except Exception as e:
             logger.warning("DynamoDB Telegram config load failed: %s", e)
+            # Same fallback for other exceptions
+            return {
+                "mode": "webhook",
+                "dm_policy": "pairing",
+                "group_policy": "allowlist",
+                "require_mention": True,
+            }, True
 
     has_token = bool(
         os.environ.get("GLITCH_TELEGRAM_BOT_TOKEN") or

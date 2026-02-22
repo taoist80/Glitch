@@ -61,6 +61,13 @@ A hybrid AI agent system combining AWS AgentCore Runtime with on-premises Ollama
 
 ### Recent Architecture and Behavior Updates
 
+- **Dynamic ARN resolution:** `infrastructure/bin/app.ts` now reads the AgentCore runtime ARN and execution role from `agent/.bedrock_agentcore.yaml` automatically. No more hardcoded ARNs after agent destroy/recreate.
+- **Step tracking for debugging:** `agent.py` and `server.py` now include `step=` prefixes in error messages to pinpoint exact failure locations.
+- **Defensive memory handling:** `get_summary_for_context()` in `sliding_window.py` handles malformed data (strings instead of dicts) gracefully.
+- **Session ID padding:** Telegram webhook pads session IDs to >= 33 characters (AgentCore requirement).
+- **OTLP disabled by default:** OTLP export only enabled if `OTEL_EXPORTER_OTLP_ENDPOINT` is set or `OTEL_OTLP_ENABLED=true`, avoiding connection errors to localhost:4318 in AgentCore.
+- **Tailscale EC2:** Optional nginx UI proxy with Let's Encrypt TLS (Porkbun DNS-01). User data installs Tailscale, nginx, certbot; configures HTTPS and proxy to S3 (UI) and Lambda (API). Fully automated on redeploy.
+- **Pi-hole DNS:** Agent can manage custom DNS records on Pi-hole (10.10.100.70, 10.10.100.71) via tools `pihole_list_dns_records`, `pihole_add_dns_record`, `pihole_delete_dns_record`, `pihole_update_dns_record`. Credentials from Secrets Manager (`glitch/pihole-api`). Use case: update `glitch.awoo.agency` after EC2 redeploy.
 - **Telegram:** Webhook is always external (Lambda); the runtime never runs a local webhook server. Config can be stored in DynamoDB (`glitch-telegram-config`) for webhook deployments. In groups, the bot responds only when @mentioned; in DMs, owner and allowlisted users can message without a mention.
 - **Lambda webhook:** Retries setWebhook on 429; normalizes owner/user IDs for DynamoDB; always returns 200 to Telegram; does not send a per-message metrics line—only the agent reply is sent.
 - **Tool use:** Agent calls tools only when the user’s request or an active skill requires it; telemetry/threshold tools are not invoked unless the user explicitly asks for metrics or alerts. `GLITCH_MAX_TURNS` (default 3) caps agent cycles per invocation.
@@ -122,9 +129,11 @@ A hybrid AI agent system combining AWS AgentCore Runtime with on-premises Ollama
 - **Local/polling:** `~/.glitch/config.json`; auto-saves on all changes; permissions: 600 (owner read/write only).
 
 **Session Isolation**:
-- DM: `telegram:dm:{user_id}`
-- Group: `telegram:group:{chat_id}`
+- DM: `telegram:dm:{user_id}` (padded to 33 chars)
+- Group: `telegram:group:{chat_id}` (padded to 33 chars)
 - Forum Topic: `telegram:group:{chat_id}:topic:{thread_id}`
+
+**Note:** AgentCore requires session IDs to be at least 33 characters. The Telegram webhook Lambda pads shorter IDs with zeros using `.ljust(33, '0')`.
 
 ### Access Control Policies
 
@@ -146,7 +155,7 @@ A hybrid AI agent system combining AWS AgentCore Runtime with on-premises Ollama
 
 ### Telegram Webhook (Lambda) and External-Only Mode
 
-When the bot is deployed with the Telegram webhook stack, Telegram sends updates to an **AWS Lambda Function URL** (not to the agent runtime). The runtime never runs a local webhook server.
+When the bot is deployed with the Telegram webhook stack, Telegram sends updates to an **AWS Lambda Function URL** (not to the agent runtime). **Troubleshooting:** If the UI shows Telegram as offline or the bot does not respond, see [docs/telegram-troubleshooting.md](docs/telegram-troubleshooting.md). The runtime never runs a local webhook server.
 
 **Flow:**
 1. User sends a message in Telegram (DM or group).
@@ -338,6 +347,9 @@ python -m glitch.cli status --verbose
 | `GLITCH_SOUL_S3_KEY` | No | `soul.md` | S3 object key for SOUL.md |
 | `GLITCH_POET_SOUL_S3_KEY` | No | (SSM or `poet-soul.md`) | S3 object key for poet-soul.md (Poet sub-agent) |
 | `AWS_REGION` | No | `us-west-2` | AWS region |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | No | None | OTLP collector endpoint; if set, enables OTLP export |
+| `OTEL_OTLP_ENABLED` | No | `false` | Explicitly enable/disable OTLP export (`true`/`false`) |
+| `OTEL_CONSOLE_ENABLED` | No | `false` | Enable console telemetry output |
 
 **SOUL and poet-soul S3 configuration**
 
@@ -788,19 +800,36 @@ mcp_servers:
 | Stack | Purpose | Key Resources |
 |-------|---------|---------------|
 | `GlitchVpcStack` | Network foundation | VPC, Subnets, VPC Endpoints (S3, ECR, CloudWatch, Secrets Manager, Bedrock) |
-| `GlitchSecretsStack` | Credential management | Secrets Manager secrets (Tailscale auth, API keys, Telegram token) |
-| `GlitchTailscaleStack` | Hybrid connectivity | EC2 t4g.nano instance, Security Groups (no dedicated EBS—uses AMI root volume only) |
+| `GlitchSecretsStack` | Credential management | Secrets Manager (Tailscale auth, API keys, Telegram token, Porkbun API, Pi-hole API) |
+| `GlitchTailscaleStack` | Hybrid connectivity | EC2 t4g.nano, Security Groups; optional nginx UI proxy + Let's Encrypt (Porkbun DNS) |
+| `GlitchUiHostingStack` | UI static hosting | S3 bucket for built UI, optional CloudFront |
 | `GlitchAgentCoreStack` | Agent runtime support | IAM roles, Security Groups |
 | `GlitchStorageStack` | Persistent storage | DynamoDB config table, S3 soul bucket, SSM parameters, CloudWatch telemetry log group |
 | `GlitchGatewayStack` | Gateway | Lambda Function URL (invocations, /api/*, keepalive) |
+| `GlitchTelegramWebhookStack` | Telegram integration | Lambda Function URL for Telegram webhook, DynamoDB config |
 
 **Note:** The Tailscale EC2 instance uses only the minimal root volume from the AMI. No dedicated EBS volumes are provisioned.
+
+### Dynamic ARN Resolution
+
+`infrastructure/bin/app.ts` reads the AgentCore runtime ARN and execution role from `agent/.bedrock_agentcore.yaml` at synth/deploy time. This eliminates hardcoded ARNs and ensures the Gateway and Telegram stacks always use the current agent ARN after `agentcore deploy` or `agentcore destroy`/recreate cycles.
+
+```typescript
+function getAgentCoreConfig(agentName: string = 'Glitch') {
+  const configPath = path.resolve(__dirname, '../../agent/.bedrock_agentcore.yaml');
+  const config = yaml.parse(fs.readFileSync(configPath, 'utf8'));
+  return {
+    runtimeArn: config?.agents?.[agentName]?.bedrock_agentcore?.agent_arn ?? null,
+    executionRoleArn: config?.agents?.[agentName]?.aws?.execution_role ?? null,
+  };
+}
+```
 
 ### Potentially Unused Resources
 
 Resources that may exist from earlier architectures or one-off setups and are not currently referenced by the CDK app:
 
-- **Telegram webhook stack**: If a standalone `TelegramWebhookStack` (or similar) was previously deployed, it may still exist in the account. The current app uses `GlitchGatewayStack` for the UI; Telegram webhook could be consolidated into the gateway in a future change (see below).
+- **Old AgentCore runtimes**: After `agentcore destroy` and recreate, old runtime log groups (e.g., `/aws/bedrock-agentcore/runtimes/Glitch-OLD_ID-DEFAULT`) may remain in CloudWatch. These can be deleted manually.
 
 ### Future Gateway Consolidation
 
@@ -827,13 +856,24 @@ The gateway Lambda (`GlitchGatewayStack`) currently serves the web UI (invocatio
 | `vision_agent` | 10.10.110.137:11434 | LLaVA | Image analysis |
 | `check_ollama_health` | Both | N/A | Connectivity verification |
 
-### Network Tools (Planned)
+### Pi-hole DNS Tools
+
+| Tool | Hosts | Purpose |
+|------|-------|---------|
+| `pihole_list_dns_records` | 10.10.100.70, 10.10.100.71 | List custom DNS records from both Pi-hole servers |
+| `pihole_add_dns_record` | Both | Add a custom DNS record (domain → IP) |
+| `pihole_delete_dns_record` | Both | Delete a custom DNS record |
+| `pihole_update_dns_record` | Both | Update a record (delete old IP, add new IP) |
+
+Credentials from Secrets Manager (`glitch/pihole-api`). Agent reaches Pi-hole via Tailscale mesh. Skill: `.cursor/skills/pihole-dns/SKILL.md`.
+
+### Network Tools
 
 | Tool | Service | Status |
 |------|---------|--------|
-| `query_pihole_stats` | Pi-hole DNS | Not implemented |
-| `check_unifi_network` | Unifi Controller | Not implemented |
-| `query_protect_cameras` | Unifi Protect | Not implemented |
+| `query_pihole_stats` | Pi-hole DNS stats | Placeholder / planned |
+| `check_unifi_network` | Unifi Controller | Placeholder / planned |
+| `query_protect_cameras` | Unifi Protect | Placeholder / planned |
 
 ## Observability
 
@@ -859,6 +899,302 @@ The gateway Lambda (`GlitchGatewayStack`) currently serves the web UI (invocatio
 - **Log Group**: `/aws/bedrock-agentcore/runtimes/{agent-id}-DEFAULT`
 - **Metrics Namespace**: `glitch-agent`
 - **Trace Service**: `glitch-agent`
+
+## Logging Reference
+
+### Log Groups Overview
+
+| Log Group | Purpose | Who Writes | Retention |
+|-----------|---------|------------|-----------|
+| `/aws/bedrock-agentcore/runtimes/Glitch-TeGZF0HlNC-DEFAULT` | Container stdout/stderr, OTEL logs | AgentCore platform | Platform-managed |
+| `/aws/lambda/glitch-gateway` | Gateway Lambda execution logs | Lambda service | 14 days |
+| `/aws/lambda/glitch-telegram-webhook` | Telegram webhook Lambda logs | Lambda service | 14 days |
+| `/glitch/telemetry` | Invocation metrics (tokens, duration) | Agent code (direct writes) | 30 days |
+
+### Finding Logs - Quick Commands
+
+**1. List recent AgentCore runtime log streams:**
+```bash
+aws logs describe-log-streams \
+  --log-group-name "/aws/bedrock-agentcore/runtimes/Glitch-TeGZF0HlNC-DEFAULT" \
+  --order-by LastEventTime --descending --limit 10 \
+  --region us-west-2 --output table
+```
+
+**2. Tail the most recent runtime log stream:**
+```bash
+# Get the latest stream name first, then:
+aws logs tail "/aws/bedrock-agentcore/runtimes/Glitch-TeGZF0HlNC-DEFAULT" \
+  --log-stream-name-prefix "$(date -u +%Y/%m/%d)/[runtime-logs]" \
+  --since 1h --follow --region us-west-2
+```
+
+**3. Search for chat invocations (should show `GLITCH_INVOKE_ENTRY`):**
+```bash
+aws logs filter-log-events \
+  --log-group-name "/aws/bedrock-agentcore/runtimes/Glitch-TeGZF0HlNC-DEFAULT" \
+  --filter-pattern "GLITCH_INVOKE_ENTRY" \
+  --start-time $(($(date +%s) - 3600))000 \
+  --region us-west-2
+```
+
+**4. Check Gateway Lambda for errors:**
+```bash
+aws logs filter-log-events \
+  --log-group-name "/aws/lambda/glitch-gateway" \
+  --filter-pattern "ERROR" \
+  --start-time $(($(date +%s) - 3600))000 \
+  --region us-west-2
+```
+
+**5. Check for timeout errors specifically:**
+```bash
+aws logs filter-log-events \
+  --log-group-name "/aws/lambda/glitch-gateway" \
+  --filter-pattern "timed out" \
+  --start-time $(($(date +%s) - 86400))000 \
+  --region us-west-2
+```
+
+### Runtime Log Streams Explained
+
+The AgentCore runtime log group contains multiple stream types:
+
+**`YYYY/MM/DD/[runtime-logs]<UUID>`** - Container stdout/stderr
+- A **new stream** is created each time a **new container** starts
+- Contains: startup logs, `logger.info()` output, print statements
+- Short-lived containers (terminated after idle timeout) create many streams
+- Example: `2026/02/21/[runtime-logs]5a972b74-1b1d-408b-921a-d78661dc2997`
+
+**`otel-rt-logs`** - OpenTelemetry structured logs
+- Single persistent stream for all OTEL-formatted logs
+- Contains: structured JSON logs with trace IDs, span IDs
+- Updated continuously as containers process requests
+
+### Why You Might Not See Logs
+
+**Symptom: No `GLITCH_INVOKE_ENTRY` logs after sending a chat message**
+
+This means chat invocations are NOT reaching the container. Check:
+
+1. **Gateway Lambda timeout** - The gateway may be timing out before the container responds
+   ```bash
+   aws logs filter-log-events \
+     --log-group-name "/aws/lambda/glitch-gateway" \
+     --filter-pattern "timed out" \
+     --start-time $(($(date +%s) - 3600))000 \
+     --region us-west-2
+   ```
+
+2. **Gateway Lambda errors** - Check for any errors in the gateway
+   ```bash
+   aws logs filter-log-events \
+     --log-group-name "/aws/lambda/glitch-gateway" \
+     --filter-pattern "ERROR" \
+     --start-time $(($(date +%s) - 3600))000 \
+     --region us-west-2
+   ```
+
+3. **nginx proxy errors** - SSH to Tailscale EC2 and check nginx logs
+   ```bash
+   sudo tail -f /var/log/nginx/error.log
+   ```
+
+**Symptom: Only startup logs, no invocation logs**
+
+The container is starting but not receiving requests. This happens when:
+- Containers are being churned (created/terminated rapidly)
+- Health checks are the only traffic reaching containers
+- The "Invocation completed (0.000s)" logs are health checks, not real chat
+
+**Symptom: Logs exist but are from hours/days ago**
+
+Check if containers are running:
+```bash
+# Look for recent log streams (last hour)
+aws logs describe-log-streams \
+  --log-group-name "/aws/bedrock-agentcore/runtimes/Glitch-TeGZF0HlNC-DEFAULT" \
+  --order-by LastEventTime --descending --limit 5 \
+  --region us-west-2 \
+  --query 'logStreams[*].[logStreamName,lastEventTimestamp]'
+```
+
+### What Each Log Contains
+
+**Container startup sequence (in `[runtime-logs]<UUID>`):**
+```
+============================================================
+GLITCH AGENT STARTUP
+============================================================
+GLITCH_MODE env var: NOT_SET
+Python version: 3.10.19
+Current working directory: /app
+============================================================
+2026-02-21 06:00:29 - __main__ - INFO - Starting Glitch agent...
+2026-02-21 06:00:29 - strands.telemetry.config - INFO - Initializing tracer
+2026-02-21 06:00:29 - glitch.telemetry - INFO - OTLP exporter enabled
+2026-02-21 06:00:29 - bedrock_agentcore.memory.client - INFO - Initialized MemoryClient
+2026-02-21 06:00:29 - glitch.server - INFO - Starting AgentCore HTTP server
+INFO:     Uvicorn running on http://0.0.0.0:8080 (Press CTRL+C to quit)
+```
+
+**Chat invocation (when working):**
+```
+2026-02-21 06:05:00 - glitch.server - INFO - GLITCH_INVOKE_ENTRY session_id=abc123...
+2026-02-21 06:05:00 - glitch.agent - INFO - Processing message: "Hello"
+2026-02-21 06:05:05 - strands.agent - INFO - Agent response generated
+2026-02-21 06:05:05 - glitch.telemetry - INFO - {"event_type": "invocation_metrics", ...}
+2026-02-21 06:05:05 - bedrock_agentcore.app - INFO - Invocation completed successfully (5.123s)
+```
+
+**Health check (0.000s duration = NOT a real chat):**
+```
+2026-02-21 06:00:33 - bedrock_agentcore.app - INFO - Invocation completed successfully (0.000s)
+```
+
+### CloudWatch Logs Insights Queries
+
+**Find all chat invocations in last 24 hours:**
+```
+fields @timestamp, @message
+| filter @message like /GLITCH_INVOKE_ENTRY/
+| sort @timestamp desc
+| limit 100
+```
+
+**Find errors in last hour:**
+```
+fields @timestamp, @message
+| filter @message like /ERROR/ or @message like /Exception/ or @message like /Traceback/
+| sort @timestamp desc
+| limit 50
+```
+
+**Measure invocation duration:**
+```
+fields @timestamp, @message
+| filter @message like /Invocation completed successfully/
+| parse @message /\((?<duration>[\d.]+)s\)/
+| filter duration > 0.1
+| sort @timestamp desc
+| limit 50
+```
+
+**Where logs go (summary)**
+
+| What | Log group | Who writes | Who reads |
+|------|-----------|------------|-----------|
+| **Invocation telemetry** (metrics, token counts, duration) | `/glitch/telemetry` | Agent code: `log_invocation_metrics()` → direct `put_log_events` + `logger.info()`. Stream: `invocations/YYYY-MM-DD`. | `query_persistent_telemetry` / `query_cloudwatch_telemetry` using `GLITCH_TELEMETRY_LOG_GROUP` (default `/glitch/telemetry`). |
+| **Runtime logs** (startup, reasoning, tool calls, stdout) | `/aws/bedrock-agentcore/runtimes/{agent-id}-DEFAULT` | AgentCore platform (captures container stdout/OTEL). Not written by our IAM role. | You (tail, Logs Insights). |
+| **Gateway Lambda logs** | `/aws/lambda/glitch-gateway` | Lambda service | You (check for routing/timeout errors). |
+| **Telegram webhook logs** | `/aws/lambda/glitch-telegram-webhook` | Lambda service | You (check for webhook errors). |
+
+- **Telemetry log group** is created/referenced in `storage-stack.ts` (`/glitch/telemetry`); runtime role has `GlitchTelemetryAccess` (PutLogEvents, etc.). `GLITCH_TELEMETRY_LOG_GROUP` is not set in `.bedrock_agentcore.yaml`, so the agent defaults to `/glitch/telemetry`.
+- **Runtime log group** is created and owned by the Bedrock AgentCore service. Our CDK grants the runtime role access to `/aws/bedrock/agentcore/*` (different path); the runtime log group is `/aws/bedrock-agentcore/...`. If that group exists but stays empty after invocations, the platform is not delivering container logs there (or they are routed elsewhere / buffered).
+
+### Request Routing Chain
+
+Chat messages from the UI follow this path:
+
+```
+┌─────────┐    ┌─────────────┐    ┌─────────────────┐    ┌──────────────────┐    ┌───────────────┐
+│   UI    │───▶│   nginx     │───▶│ Gateway Lambda  │───▶│ AgentCore        │───▶│  Container    │
+│ (React) │    │ (Tailscale) │    │ (glitch-gateway)│    │ Runtime API      │    │  (Glitch)     │
+└─────────┘    └─────────────┘    └─────────────────┘    └──────────────────┘    └───────────────┘
+     │               │                    │                      │                      │
+     │  POST /invocations                 │                      │                      │
+     │──────────────▶│                    │                      │                      │
+     │               │  proxy_pass        │                      │                      │
+     │               │─────────────────▶  │                      │                      │
+     │               │                    │  invoke_agent()      │                      │
+     │               │                    │  timeout=90s         │                      │
+     │               │                    │─────────────────────▶│                      │
+     │               │                    │                      │  /invocations        │
+     │               │                    │                      │─────────────────────▶│
+     │               │                    │                      │                      │ process_message()
+     │               │                    │                      │◀─────────────────────│
+     │               │                    │◀─────────────────────│                      │
+     │               │◀───────────────────│                      │                      │
+     │◀──────────────│                    │                      │                      │
+```
+
+**Timeout Configuration:**
+
+| Component | Timeout | Config Location |
+|-----------|---------|-----------------|
+| UI fetch | None (browser default) | `ui/src/api/client.ts` |
+| nginx proxy_read_timeout | 300s | `infrastructure/lib/tailscale-stack.ts` |
+| Gateway Lambda function | 300s | `infrastructure/lib/gateway-stack.ts` (line 32) |
+| Gateway `invoke_agent()` urllib | 180s | `gateway-stack.ts` inline code (line 182) |
+| Gateway `invoke_api()` urllib | 60s | `gateway-stack.ts` inline code (line 223) |
+| AgentCore Runtime | Platform-managed | N/A |
+
+**UI API requests** (`/api/status`, `/api/memory/summary`, etc.) use `invoke_api()` with 60s timeout and go through the same chain but call `_ui_api_request` handler in the container.
+
+**Known Issue: Gateway Timeout on Chat Invocations**
+
+The Gateway Lambda's `invoke_agent()` has a 90-second timeout for the HTTP request to AgentCore Runtime. If the container takes longer than 90 seconds to respond (due to cold start + LLM processing time), the gateway returns a timeout error even though the container may still be processing.
+
+Symptoms:
+- Gateway Lambda logs show: `Failed to invoke agent: The read operation timed out`
+- No `GLITCH_INVOKE_ENTRY` logs in runtime log group
+- UI receives 504 Gateway Timeout (from nginx) or error response
+
+Diagnosis commands:
+```bash
+# Check for timeout errors in gateway
+aws logs filter-log-events \
+  --log-group-name "/aws/lambda/glitch-gateway" \
+  --filter-pattern "timed out" \
+  --start-time $(($(date +%s) - 3600))000 \
+  --region us-west-2
+
+# Check for actual chat invocations reaching container
+aws logs filter-log-events \
+  --log-group-name "/aws/bedrock-agentcore/runtimes/Glitch-TeGZF0HlNC-DEFAULT" \
+  --filter-pattern "GLITCH_INVOKE_ENTRY" \
+  --start-time $(($(date +%s) - 3600))000 \
+  --region us-west-2
+```
+
+**Fix Options:**
+
+1. **Increase Gateway timeout** (applied): Changed `timeout=90` to `timeout=180` in `invoke_agent()` and Lambda function timeout from 120s to 300s in `gateway-stack.ts`.
+
+2. **Keep containers warm**: The 5-minute EventBridge keepalive rule keeps the Gateway Lambda warm, but doesn't keep AgentCore containers warm. Consider adding a periodic `/invocations` call with a simple prompt to keep containers alive.
+
+3. **Optimize cold start**: Current cold start is ~2 seconds (fast). The issue is not cold start time but total request processing time for LLM calls.
+
+## Troubleshooting
+
+### Common Issues
+
+**HTTP 404: Agent not found**
+- **Cause:** Gateway or Telegram Lambda configured with old AgentCore runtime ARN after `agentcore destroy`/recreate.
+- **Fix:** Redeploy CDK stacks (`pnpm cdk deploy GlitchGatewayStack GlitchTelegramWebhookStack`). The ARN is now read dynamically from `.bedrock_agentcore.yaml`.
+
+**HTTP 400: Bad Request from Telegram**
+- **Cause:** Session ID shorter than 33 characters (AgentCore requirement).
+- **Fix:** Telegram webhook now pads session IDs with `.ljust(33, '0')`.
+
+**"string indices must be integers" error**
+- **Cause:** Code expecting a dict received a string (often in memory/telemetry processing).
+- **Fix:** Defensive `isinstance` checks added in `sliding_window.py`. Error messages now include `step=` prefix to pinpoint location.
+
+**Container crash on startup (no logs)**
+- **Cause:** Import error or missing dependency (e.g., `model_validator` not imported from Pydantic).
+- **Fix:** Check `agentcore invoke` output for `RuntimeClientError`. Fix import errors and redeploy.
+
+**OTLP connection refused (localhost:4318)**
+- **Cause:** OpenTelemetry OTLP exporter trying to connect to non-existent local collector.
+- **Fix:** OTLP now disabled by default unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set or `OTEL_OTLP_ENABLED=true`.
+
+**No CloudWatch logs appearing**
+- **Cause:** Multiple possible causes: IAM policy incorrect, container crashing, or stale AgentCore runtime.
+- **Fix:** 
+  1. Check IAM policy uses `/aws/bedrock-agentcore/*` (not `/aws/bedrock/agentcore/*`).
+  2. Verify container starts with `agentcore invoke '{"prompt":"test"}'`.
+  3. If persistent, run `agentcore destroy` then `agentcore deploy --auto-update-on-conflict`.
 
 ## Cost Optimization
 
@@ -888,6 +1224,8 @@ The gateway Lambda (`GlitchGatewayStack`) currently serves the web UI (invocatio
 - `glitch/tailscale-auth-key`: Ephemeral Tailscale auth key
 - `glitch/api-keys`: API credentials (if needed)
 - `glitch/telegram-bot-token`: Telegram bot token from @BotFather
+- `glitch/porkbun-api`: Porkbun API key/secret for Let's Encrypt DNS-01 (Tailscale EC2 TLS)
+- `glitch/pihole-api`: Pi-hole admin credentials (username, password, hosts) for DNS record management by agent
 - All secrets in AWS Secrets Manager with rotation support
 
 ## Project Structure
@@ -899,10 +1237,11 @@ AgentCore-Glitch/
 │   ├── lib/
 │   │   ├── vpc-stack.ts        # VPC, subnets, endpoints
 │   │   ├── secrets-stack.ts    # Secrets Manager
-│   │   ├── tailscale-stack.ts  # EC2 Tailscale connector (no dedicated EBS)
+│   │   ├── tailscale-stack.ts  # EC2 Tailscale connector, optional nginx + Let's Encrypt
+│   │   ├── ui-hosting-stack.ts # S3 (and optional CloudFront) for UI
 │   │   ├── agentcore-stack.ts  # IAM, security groups
 │   │   ├── storage-stack.ts    # DynamoDB, S3, SSM, CloudWatch logs
-│   │   └── gateway-stack.ts   # Gateway Lambda (invocations, /api/*, keepalive)
+│   │   └── gateway-stack.ts    # Gateway Lambda (invocations, /api/*, keepalive)
 │   └── package.json
 ├── agent/                       # Python Strands agent
 │   ├── src/
@@ -939,6 +1278,7 @@ AgentCore-Glitch/
 │   │           ├── registry.py           # ToolRegistry (grouped tools)
 │   │           ├── ollama_tools.py
 │   │           ├── network_tools.py
+│   │           ├── pihole_tools.py       # Pi-hole DNS record management (list/add/delete/update)
 │   │           ├── soul_tools.py
 │   │           ├── memory_tools.py
 │   │           ├── telemetry_tools.py
@@ -1065,7 +1405,7 @@ A React + DaisyUI dashboard for monitoring and interacting with Glitch.
 | MCP | Model Context Protocol server status |
 | Skills | Enable/disable agent skills |
 | Unifi | Network monitoring (Coming Soon) |
-| Pi-hole | DNS filtering stats (Coming Soon) |
+| Pi-hole | DNS record management via agent tools (e.g. update glitch.awoo.agency after redeploy); stats tab (Coming Soon) |
 | Settings | Agent configuration |
 
 ### API Endpoints
