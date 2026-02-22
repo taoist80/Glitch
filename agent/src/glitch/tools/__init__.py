@@ -52,6 +52,14 @@ from glitch.tools.memory_tools import (
     get_memory_state,
 )
 
+from glitch.tools.pihole_tools import (
+    pihole_list_dns_records,
+    pihole_add_dns_record,
+    pihole_delete_dns_record,
+    pihole_update_dns_record,
+    PiholeConfig,
+)
+
 __all__ = [
     # Ollama tools
     "vision_agent",
@@ -83,4 +91,10 @@ __all__ = [
     "resolve_question",
     "update_tool_results_summary",
     "get_memory_state",
+    # Pi-hole DNS tools
+    "pihole_list_dns_records",
+    "pihole_add_dns_record",
+    "pihole_delete_dns_record",
+    "pihole_update_dns_record",
+    "PiholeConfig",
 ]

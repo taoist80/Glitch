@@ -34,6 +34,12 @@ from glitch.tools.network_tools import (
     check_unifi_network,
     query_protect_cameras,
 )
+from glitch.tools.pihole_tools import (
+    pihole_list_dns_records,
+    pihole_add_dns_record,
+    pihole_delete_dns_record,
+    pihole_update_dns_record,
+)
 from glitch.tools.soul_tools import update_soul
 
 
@@ -77,6 +83,12 @@ class ToolRegistry:
             query_pihole_stats,
             check_unifi_network,
             query_protect_cameras,
+        ]
+        self._groups["pihole_dns"] = [
+            pihole_list_dns_records,
+            pihole_add_dns_record,
+            pihole_delete_dns_record,
+            pihole_update_dns_record,
         ]
         self._groups["soul"] = [update_soul]
 

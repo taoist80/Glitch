@@ -17,6 +17,7 @@ export class SecretsStack extends cdk.Stack {
   public readonly apiKeysSecret: secretsmanager.ISecret;
   public readonly telegramBotTokenSecret: secretsmanager.ISecret;
   public readonly porkbunApiSecret: secretsmanager.ISecret;
+  public readonly piholeApiSecret: secretsmanager.ISecret;
 
   constructor(scope: Construct, id: string, props?: SecretsStackProps) {
     super(scope, id, props);
@@ -45,6 +46,12 @@ export class SecretsStack extends cdk.Stack {
       'glitch/porkbun-api'
     );
 
+    this.piholeApiSecret = secretsmanager.Secret.fromSecretNameV2(
+      this,
+      'PiholeApi',
+      'glitch/pihole-api'
+    );
+
     new cdk.CfnOutput(this, 'TailscaleAuthKeySecretArn', {
       value: this.tailscaleAuthKeySecret.secretArn,
       description: 'ARN of Tailscale auth key secret',
@@ -63,7 +70,13 @@ export class SecretsStack extends cdk.Stack {
       exportName: 'GlitchTelegramBotTokenArn',
     });
 
-    // Grant default AgentCore execution role read access to Telegram token (no env vars needed)
+    new cdk.CfnOutput(this, 'PiholeApiSecretArn', {
+      value: this.piholeApiSecret.secretArn,
+      description: 'ARN of Pi-hole API credentials secret',
+      exportName: 'GlitchPiholeApiArn',
+    });
+
+    // Grant default AgentCore execution role read access to secrets (no env vars needed)
     const defaultRoleArn = props?.defaultExecutionRoleArn;
     if (defaultRoleArn) {
       const defaultRole = iam.Role.fromRoleArn(
@@ -71,9 +84,10 @@ export class SecretsStack extends cdk.Stack {
         'DefaultAgentCoreRuntimeRole',
         defaultRoleArn
       );
-      // Use wildcard ARN so we match the secret's full ARN (AWS appends 6-char suffix to secret names)
+      // Use wildcard ARNs so we match the secret's full ARN (AWS appends 6-char suffix to secret names)
       const telegramSecretArn = `arn:aws:secretsmanager:${this.region}:${this.account}:secret:glitch/telegram-bot-token*`;
-      new iam.ManagedPolicy(this, 'GlitchDefaultRoleTelegramSecretPolicy', {
+      const piholeSecretArn = `arn:aws:secretsmanager:${this.region}:${this.account}:secret:glitch/pihole-api*`;
+      new iam.ManagedPolicy(this, 'GlitchDefaultRoleSecretsPolicy', {
         roles: [defaultRole],
         document: new iam.PolicyDocument({
           statements: [
@@ -82,6 +96,12 @@ export class SecretsStack extends cdk.Stack {
               effect: iam.Effect.ALLOW,
               actions: ['secretsmanager:GetSecretValue'],
               resources: [telegramSecretArn],
+            }),
+            new iam.PolicyStatement({
+              sid: 'PiholeApiSecret',
+              effect: iam.Effect.ALLOW,
+              actions: ['secretsmanager:GetSecretValue'],
+              resources: [piholeSecretArn],
             }),
           ],
         }),
