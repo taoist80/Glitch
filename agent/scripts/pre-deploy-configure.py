@@ -100,12 +100,15 @@ def main():
         sys.exit(0)
     
     # Check if already configured with CORRECT field names (subnets, security_groups)
+    # Always update security group in case it changed (e.g. stack recreated)
     mode_config = network_config.get('network_mode_config', {})
-    if mode_config.get('subnets') and mode_config.get('security_groups'):
-        log("VPC configuration already present with correct field names.")
-        sys.exit(0)
+    has_subnets = bool(mode_config.get('subnets'))
+    has_security_groups = bool(mode_config.get('security_groups'))
     
-    log("VPC mode enabled but configuration missing or using wrong field names. Fetching from CloudFormation...")
+    if has_subnets and has_security_groups:
+        log("VPC configuration already present. Checking if security group needs update...")
+    else:
+        log("VPC mode enabled but configuration missing or using wrong field names. Fetching from CloudFormation...")
     
     # Fetch from CloudFormation
     try:
@@ -141,6 +144,11 @@ def main():
         # The toolkit expects these exact names, not subnet_ids/security_group_ids
         if 'network_mode_config' not in network_config:
             network_config['network_mode_config'] = {}
+        
+        # Check if security group changed
+        current_sg = mode_config.get('security_groups', [])
+        if current_sg and current_sg[0] != security_group_id:
+            log(f"Security group changed: {current_sg[0]} → {security_group_id}")
         
         network_config['network_mode_config']['subnets'] = subnet_ids
         network_config['network_mode_config']['security_groups'] = [security_group_id]

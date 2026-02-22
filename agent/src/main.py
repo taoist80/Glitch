@@ -268,7 +268,11 @@ async def main() -> None:
     telegram_channel = None
     telegram_token = get_telegram_bot_token()
     
-    if telegram_token:
+    # In AgentCore mode, skip Telegram channel init (webhook Lambda handles it)
+    is_agentcore = os.path.exists("/app") or "agentcore" in os.getenv("AWS_EXECUTION_ENV", "").lower()
+    webhook_url = get_webhook_url()
+    
+    if telegram_token and not (is_agentcore and webhook_url):
         try:
             logger.info("Telegram bot token retrieved from Secrets Manager, initializing Telegram channel...")
             
@@ -320,6 +324,8 @@ async def main() -> None:
         except Exception as e:
             logger.error(f"Failed to initialize Telegram channel: {e}", exc_info=True)
             # Continue without Telegram if it fails
+    elif is_agentcore and webhook_url:
+        logger.info("AgentCore webhook mode detected - Telegram handled by webhook Lambda, skipping channel init")
     else:
         logger.info("No Telegram bot token found in Secrets Manager (glitch/telegram-bot-token), skipping Telegram channel")
     
