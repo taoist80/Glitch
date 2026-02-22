@@ -13,5 +13,7 @@ export declare class SecretsStack extends cdk.Stack {
     readonly tailscaleAuthKeySecret: secretsmanager.ISecret;
     readonly apiKeysSecret: secretsmanager.ISecret;
     readonly telegramBotTokenSecret: secretsmanager.ISecret;
+    readonly porkbunApiSecret: secretsmanager.ISecret;
+    readonly piholeApiSecret: secretsmanager.ISecret;
     constructor(scope: Construct, id: string, props?: SecretsStackProps);
 }

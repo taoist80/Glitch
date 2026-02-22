@@ -6,6 +6,7 @@ import {
   BarChart3,
   Plug,
   Zap,
+  Bot,
   Wifi,
   Shield,
   Settings,
@@ -26,6 +27,7 @@ interface NavItem {
 
 const navItems: NavItem[] = [
   { id: 'chat', label: 'Chat', icon: <MessageSquare size={20} /> },
+  { id: 'agents', label: 'Agents', icon: <Bot size={20} /> },
   { id: 'telegram', label: 'Telegram', icon: <Send size={20} /> },
   { id: 'ollama', label: 'Ollama', icon: <Server size={20} /> },
   { id: 'memory', label: 'Memory', icon: <Brain size={20} /> },

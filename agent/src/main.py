@@ -32,7 +32,8 @@ import urllib.error
 from pathlib import Path
 from typing import Optional
 
-from glitch.agent import create_glitch_agent, GlitchAgent
+from glitch.agent import GlitchAgent
+from glitch.agent_factory import bootstrap_agents_and_register
 from glitch.poet_agent import create_poet_agent
 from glitch.telemetry import setup_telemetry, write_startup_heartbeat_to_cloudwatch
 from glitch.types import (
@@ -248,9 +249,9 @@ async def main() -> None:
     telemetry_config = get_telemetry_config()
     setup_telemetry(telemetry_config)
     
-    agent = create_glitch_agent()
-    
-    logger.info(f"Glitch agent initialized for session: {agent.session_id}")
+    agent = bootstrap_agents_and_register()
+
+    logger.info("Glitch agent initialized for session: %s", agent.session_id)
     sys.stdout.flush()
     sys.stderr.flush()
 

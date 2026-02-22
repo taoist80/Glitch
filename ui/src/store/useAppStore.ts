@@ -9,6 +9,9 @@ import type {
   TelemetryData,
   MCPServersResponse,
   SkillsResponse,
+  AgentsResponse,
+  SessionAgentResponse,
+  ModesResponse,
   ChatMessage,
   InvocationResponse,
 } from '../types';
@@ -75,7 +78,22 @@ interface AppState {
   skillsError: string | null;
   fetchSkills: () => Promise<void>;
   toggleSkill: (skillId: string, enabled: boolean) => Promise<void>;
-  
+
+  agents: AgentsResponse | null;
+  agentsLoading: boolean;
+  agentsError: string | null;
+  fetchAgents: () => Promise<void>;
+  modes: ModesResponse | null;
+  modesLoading: boolean;
+  modesError: string | null;
+  fetchModes: () => Promise<void>;
+  sessionAgent: SessionAgentResponse | null;
+  sessionAgentLoading: boolean;
+  sessionAgentError: string | null;
+  fetchSessionAgent: (sessionId: string) => Promise<void>;
+  putSessionAgent: (sessionId: string, agentId: string) => Promise<void>;
+  putSessionMode: (sessionId: string, modeId: string) => Promise<void>;
+
   chatMessages: ChatMessage[];
   chatLoading: boolean;
   chatError: string | null;
@@ -218,12 +236,82 @@ export const useAppStore = create<AppState>()(
           await api.toggleSkill(skillId, enabled);
           await get().fetchSkills();
         } catch (error) {
-          set({ 
+          set({
             skillsError: error instanceof Error ? error.message : 'Failed to toggle skill',
           });
         }
       },
-      
+
+      agents: null,
+      agentsLoading: false,
+      agentsError: null,
+      fetchAgents: async () => {
+        set({ agentsLoading: true, agentsError: null });
+        try {
+          const agents = await api.getAgents();
+          set({ agents, agentsLoading: false });
+        } catch (error) {
+          set({
+            agentsError: error instanceof Error ? error.message : 'Failed to fetch agents',
+            agentsLoading: false,
+          });
+        }
+      },
+      modes: null,
+      modesLoading: false,
+      modesError: null,
+      fetchModes: async () => {
+        set({ modesLoading: true, modesError: null });
+        try {
+          const modes = await api.getModes();
+          set({ modes, modesLoading: false });
+        } catch (error) {
+          set({
+            modesError: error instanceof Error ? error.message : 'Failed to fetch modes',
+            modesLoading: false,
+          });
+        }
+      },
+      sessionAgent: null,
+      sessionAgentLoading: false,
+      sessionAgentError: null,
+      fetchSessionAgent: async (sessionId) => {
+        set({ sessionAgentLoading: true, sessionAgentError: null });
+        try {
+          const sessionAgent = await api.getSessionAgent(sessionId);
+          set({ sessionAgent, sessionAgentLoading: false });
+        } catch (error) {
+          set({
+            sessionAgentError: error instanceof Error ? error.message : 'Failed to fetch session agent',
+            sessionAgentLoading: false,
+          });
+        }
+      },
+      putSessionAgent: async (sessionId, agentId) => {
+        try {
+          const sessionAgent = await api.putSessionAgent(sessionId, agentId);
+          set({ sessionAgent });
+        } catch (error) {
+          set({
+            sessionAgentError: error instanceof Error ? error.message : 'Failed to set session agent',
+          });
+        }
+      },
+      putSessionMode: async (sessionId, modeId) => {
+        try {
+          const modeResp = await api.putSessionMode(sessionId, modeId);
+          set((state) => ({
+            sessionAgent: state.sessionAgent
+              ? { ...state.sessionAgent, mode_id: modeResp.mode_id }
+              : { agent_id: 'mistral', mode_id: modeResp.mode_id },
+          }));
+        } catch (error) {
+          set({
+            sessionAgentError: error instanceof Error ? error.message : 'Failed to set session mode',
+          });
+        }
+      },
+
       chatMessages: [],
       chatLoading: false,
       chatError: null,
@@ -242,7 +330,15 @@ export const useAppStore = create<AppState>()(
         }));
         
         try {
-          const response = await api.sendMessage(content);
+          const state = get();
+          const sessionId = state.status?.session_id;
+          const agentId = state.sessionAgent?.agent_id;
+          const modeId = state.sessionAgent?.mode_id;
+          const response = await api.sendMessage(content, {
+            ...(sessionId && { session_id: sessionId }),
+            ...(agentId && { agent_id: agentId }),
+            ...(modeId && { mode_id: modeId }),
+          });
           
           // Extract the actual message content from various possible response formats
           let messageContent = '';

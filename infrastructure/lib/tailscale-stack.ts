@@ -1,4 +1,5 @@
 import * as cdk from 'aws-cdk-lib';
+import * as cr from 'aws-cdk-lib/custom-resources';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
@@ -68,6 +69,17 @@ export class TailscaleStack extends cdk.Stack {
       'HTTP fallback and captive portal detection'
     );
 
+    this.securityGroup.addEgressRule(
+      ec2.Peer.ipv4('10.10.110.0/24'),
+      ec2.Port.tcp(11434),
+      'Ollama native API to on-prem (e.g. 10.10.110.202)'
+    );
+    this.securityGroup.addEgressRule(
+      ec2.Peer.ipv4('10.10.110.0/24'),
+      ec2.Port.tcp(8080),
+      'OpenAI-compatible API to on-prem (e.g. 10.10.110.137 LLaVA)'
+    );
+
     this.securityGroup.addIngressRule(
       ec2.Peer.anyIpv4(),
       ec2.Port.udp(41641),
@@ -118,7 +130,7 @@ export class TailscaleStack extends cdk.Stack {
       'sysctl -p /etc/sysctl.conf',
       '',
       'echo "Starting Tailscale with auth key..."',
-      'tailscale up --authkey="$TAILSCALE_AUTH_KEY" --advertise-tags=tag:aws-agent --accept-routes',
+      'tailscale up --authkey="$TAILSCALE_AUTH_KEY" --advertise-tags=tag:aws-agent --accept-routes --advertise-routes=10.10.110.0/24',
       '',
       'echo "Clearing auth key from memory..."',
       'unset TAILSCALE_AUTH_KEY',
@@ -223,6 +235,9 @@ export class TailscaleStack extends cdk.Stack {
           '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
           '        proxy_set_header X-Forwarded-Proto https;',
           '        proxy_ssl_server_name on;',
+          '        proxy_read_timeout 300s;',
+          '        proxy_connect_timeout 60s;',
+          '        proxy_send_timeout 60s;',
           '    }',
           '',
           '    location /health {',
@@ -268,6 +283,9 @@ export class TailscaleStack extends cdk.Stack {
           '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
           '        proxy_set_header X-Forwarded-Proto https;',
           '        proxy_ssl_server_name on;',
+          '        proxy_read_timeout 300s;',
+          '        proxy_connect_timeout 60s;',
+          '        proxy_send_timeout 60s;',
           '    }',
           '',
           '    location /health {',
@@ -322,10 +340,44 @@ export class TailscaleStack extends cdk.Stack {
       requireImdsv2: true,
       ssmSessionPermissions: true,
       associatePublicIpAddress: true,
+      sourceDestCheck: false,
     });
 
     cdk.Tags.of(this.instance).add('Name', 'GlitchTailscaleConnector');
     cdk.Tags.of(this.instance).add('Purpose', 'Tailscale-AWS-Bridge');
+
+    const eniLookup = new cr.AwsCustomResource(this, 'TailscalePrimaryEniLookup', {
+      onUpdate: {
+        service: 'EC2',
+        action: 'describeInstances',
+        parameters: {
+          InstanceIds: [this.instance.instanceId],
+        },
+        physicalResourceId: cr.PhysicalResourceId.of(this.instance.instanceId),
+        // CloudFormation custom resource response limit is 4KB; return only the ENI ID to stay under it
+        outputPaths: ['Reservations.0.Instances.0.NetworkInterfaces.0.NetworkInterfaceId'],
+      },
+      policy: cr.AwsCustomResourcePolicy.fromSdkCalls({
+        resources: cr.AwsCustomResourcePolicy.ANY_RESOURCE,
+      }),
+    });
+    eniLookup.node.addDependency(this.instance);
+
+    const primaryEniId = eniLookup.getResponseField(
+      'Reservations.0.Instances.0.NetworkInterfaces.0.NetworkInterfaceId'
+    );
+
+    const isolatedSubnets = vpc.isolatedSubnets;
+    for (let i = 0; i < isolatedSubnets.length; i++) {
+      const subnet = isolatedSubnets[i];
+      const routeTable = (subnet as ec2.PrivateSubnet).routeTable;
+      if (!routeTable) continue;
+      new ec2.CfnRoute(this, `OnPremRoute${i}`, {
+        routeTableId: routeTable.routeTableId,
+        destinationCidrBlock: '10.10.110.0/24',
+        networkInterfaceId: primaryEniId,
+      });
+    }
 
     new cdk.CfnOutput(this, 'InstanceId', {
       value: this.instance.instanceId,

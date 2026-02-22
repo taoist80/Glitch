@@ -27,6 +27,8 @@ from glitch.channels.bot_policy import check_access
 from glitch.channels.bootstrap import OwnerBootstrap
 from glitch.channels.config_manager import ConfigManager
 from glitch.channels.telegram_commands import TelegramCommandHandler
+from glitch.agent_registry import get_agent as registry_get_agent, get_default_agent_id
+from glitch.modes import apply_mode_to_prompt, MODE_DEFAULT, MODE_POET
 
 logger = logging.getLogger(__name__)
 
@@ -99,14 +101,14 @@ class TelegramChannel(ChannelAdapter):
         self.config_manager = config_manager
         self.bootstrap = bootstrap
         self.agent = agent
-        self.poet_agent = poet_agent
-        self._session_agent: Dict[str, str] = {}  # session_id -> "glitch" | "poet"
+        self.poet_agent = poet_agent  # kept for optional one-shot /poet <prompt>; routing uses registry + mode
+        self._session_agent: Dict[str, str] = {}  # session_id -> agent_id (glitch | mistral | llava)
+        self._session_mode: Dict[str, str] = {}   # session_id -> mode_id (default | poet)
         self.config = config_manager.config.telegram
-        
+
         if not self.config or not self.config.bot_token:
             raise ValueError("Telegram bot token not configured")
-        
-        # Initialize command handler (pass poet_agent so help lists /poet and /glitch)
+
         self.command_handler = TelegramCommandHandler(
             config_manager=config_manager,
             bootstrap=bootstrap,
@@ -122,46 +124,86 @@ class TelegramChannel(ChannelAdapter):
         
         logger.info(f"Telegram channel initialized (mode: {self.config.mode})")
     
+    def _get_agent_id(self, session_id: str) -> str:
+        """Return agent_id for this session (default from registry)."""
+        return self._session_agent.get(session_id) or get_default_agent_id()
+
+    def _get_mode_id(self, session_id: str) -> str:
+        """Return mode_id for this session."""
+        return self._session_mode.get(session_id) or MODE_DEFAULT
+
     def _get_agent(self, session_id: str) -> Optional[Any]:
-        """Return the agent to use for this session (Glitch or Poet)."""
-        if self.poet_agent is None:
-            return self.agent
-        current = self._session_agent.get(session_id, "glitch")
-        return self.poet_agent if current == "poet" else self.agent
+        """Return the agent instance for this session (from registry)."""
+        agent_id = self._get_agent_id(session_id)
+        a = registry_get_agent(agent_id)
+        return a if a is not None else self.agent
 
     async def _handle_poet_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /poet — switch to Poet or run Poet with optional prompt."""
+        """Handle /poet — set mode to Poet; optionally run one message in poet mode."""
         if not await self._check_access(update):
             return
         session_id = self.get_session_id(update)
+        self._session_mode[session_id] = MODE_POET
+        logger.info("Session mode selected", extra={"session_id": session_id, "mode_id": MODE_POET, "channel": "telegram"})
         if context.args:
             prompt = " ".join(context.args)
-            if self.poet_agent:
+            prompt_out, system_prompt_out = apply_mode_to_prompt(MODE_POET, prompt, system_prompt=None)
+            agent = self._get_agent(session_id)
+            if agent:
                 try:
-                    response = await self.poet_agent.process_message(prompt)
+                    response = await agent.process_message(
+                        prompt_out, session_id=session_id, system_prompt=system_prompt_out
+                    )
                     text = response.get("message") if isinstance(response, dict) else str(response)
                     if text:
                         await self.send_message(session_id, text)
                     else:
-                        await update.message.reply_text("❌ Poet had no response.")
+                        await update.message.reply_text("❌ No response.")
                 except Exception as e:
-                    logger.error("Poet command error: %s", e, exc_info=True)
+                    logger.error("Poet mode command error: %s", e, exc_info=True)
                     await update.message.reply_text(f"❌ Error: {e}")
             else:
-                await update.message.reply_text("❌ Poet is not configured.")
+                await update.message.reply_text("❌ No agent available.")
         else:
-            self._session_agent[session_id] = "poet"
             await update.message.reply_text(
-                "Poet here. Send me a theme, a line, or a mood and I'll write for you. Use /glitch to switch back."
+                "Poet mode on. Send me a theme, a line, or a mood and I'll write for you. Use /default to switch back."
             )
 
     async def _handle_glitch_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /glitch — switch back to Glitch."""
+        """Handle /glitch — set session agent to Glitch."""
         if not await self._check_access(update):
             return
         session_id = self.get_session_id(update)
         self._session_agent[session_id] = "glitch"
-        await update.message.reply_text("Switched back to Glitch.")
+        logger.info("Session agent selected", extra={"session_id": session_id, "agent_id": "glitch", "channel": "telegram"})
+        await update.message.reply_text("Switched to Glitch.")
+
+    async def _handle_mistral_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /mistral — set session agent to Mistral."""
+        if not await self._check_access(update):
+            return
+        session_id = self.get_session_id(update)
+        self._session_agent[session_id] = "mistral"
+        logger.info("Session agent selected", extra={"session_id": session_id, "agent_id": "mistral", "channel": "telegram"})
+        await update.message.reply_text("Switched to Mistral.")
+
+    async def _handle_llava_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /llava — set session agent to LLaVA (vision)."""
+        if not await self._check_access(update):
+            return
+        session_id = self.get_session_id(update)
+        self._session_agent[session_id] = "llava"
+        logger.info("Session agent selected", extra={"session_id": session_id, "agent_id": "llava", "channel": "telegram"})
+        await update.message.reply_text("Switched to LLaVA (vision).")
+
+    async def _handle_default_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /default or /normal — set mode to default."""
+        if not await self._check_access(update):
+            return
+        session_id = self.get_session_id(update)
+        self._session_mode[session_id] = MODE_DEFAULT
+        logger.info("Session mode selected", extra={"session_id": session_id, "mode_id": MODE_DEFAULT, "channel": "telegram"})
+        await update.message.reply_text("Switched to default mode.")
 
     def _register_handlers(self) -> None:
         """Register message and command handlers."""
@@ -171,10 +213,13 @@ class TelegramChannel(ChannelAdapter):
         self.application.add_handler(CommandHandler("help", self.command_handler.handle_help))
         self.application.add_handler(CommandHandler("start", self.command_handler.handle_help))
         self.application.add_handler(CommandHandler("new", self.command_handler.handle_new))
-        if self.poet_agent is not None:
-            self.application.add_handler(CommandHandler("poet", self._handle_poet_command))
-            self.application.add_handler(CommandHandler("glitch", self._handle_glitch_command))
-        
+        self.application.add_handler(CommandHandler("poet", self._handle_poet_command))
+        self.application.add_handler(CommandHandler("glitch", self._handle_glitch_command))
+        self.application.add_handler(CommandHandler("mistral", self._handle_mistral_command))
+        self.application.add_handler(CommandHandler("llava", self._handle_llava_command))
+        self.application.add_handler(CommandHandler("default", self._handle_default_command))
+        self.application.add_handler(CommandHandler("normal", self._handle_default_command))
+
         # Message handlers
         self.application.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text_message)
@@ -403,17 +448,17 @@ class TelegramChannel(ChannelAdapter):
         if not await self._check_access(update):
             return
         
-        # Get session ID
+        # Get session ID and resolve agent + mode
         session_id = self.get_session_id(update)
         message_text = update.message.text
-        
-        # Process message with agent (Glitch or Poet per session)
+        mode_id = self._get_mode_id(session_id)
+        prompt_out, system_prompt_out = apply_mode_to_prompt(mode_id, message_text, system_prompt=None)
+
         agent = self._get_agent(session_id)
         if agent:
             try:
-                # Use streaming when supported (GlitchAgent; AgentCore best practice)
                 if hasattr(agent, "process_message_stream"):
-                    stream = agent.process_message_stream(message_text)
+                    stream = agent.process_message_stream(prompt_out)
                     await _consume_stream_and_send(
                         self.send_message,
                         session_id,
@@ -422,7 +467,9 @@ class TelegramChannel(ChannelAdapter):
                         lambda msg: update.message.reply_text(msg),
                     )
                     return
-                response = await agent.process_message(message_text)
+                response = await agent.process_message(
+                    prompt_out, session_id=session_id, system_prompt=system_prompt_out
+                )
                 # Send response (InvocationResponse uses "message" key)
                 if isinstance(response, dict):
                     text = response.get("message") or response.get("response")
@@ -530,25 +577,27 @@ class TelegramChannel(ChannelAdapter):
     
     async def _process_media_message(self, update: Update, media: TelegramMediaMessage) -> None:
         """Process a media message with the agent.
-        
+
         Args:
             update: Telegram update
             media: TelegramMediaMessage with image data
         """
         session_id = self.get_session_id(update)
-        
-        # Build prompt based on whether caption is present
         if media.text:
             prompt = f"[Image attached] {media.text}"
         else:
             prompt = "[Image attached] Please describe this image in detail."
-        
-        # Process with agent (Glitch or Poet per session; Poet has no vision)
+        mode_id = self._get_mode_id(session_id)
+        prompt_out, system_prompt_out = apply_mode_to_prompt(mode_id, prompt, system_prompt=None)
+        image_urls = None
+        if media.media_data:
+            image_urls = [f"data:image/jpeg;base64,{media.media_data}"]
+
         agent = self._get_agent(session_id)
         if agent:
             try:
                 if hasattr(agent, "process_message_stream"):
-                    stream = agent.process_message_stream(prompt)
+                    stream = agent.process_message_stream(prompt_out)
                     await _consume_stream_and_send(
                         self.send_message,
                         session_id,
@@ -557,7 +606,13 @@ class TelegramChannel(ChannelAdapter):
                         lambda msg: update.message.reply_text(msg),
                     )
                     return
-                response = await agent.process_message(prompt)
+                kwargs = {"session_id": session_id, "system_prompt": system_prompt_out}
+                if image_urls is not None and hasattr(agent, "process_message"):
+                    import inspect
+                    sig = inspect.signature(agent.process_message)
+                    if "image_urls" in sig.parameters:
+                        kwargs["image_urls"] = image_urls
+                response = await agent.process_message(prompt_out, **kwargs)
                 if isinstance(response, dict):
                     text = response.get("message") or response.get("response")
                     if text is not None:

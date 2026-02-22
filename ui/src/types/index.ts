@@ -1,5 +1,6 @@
 export type Tab =
   | 'chat'
+  | 'agents'
   | 'telegram'
   | 'ollama'
   | 'memory'
@@ -9,6 +10,36 @@ export type Tab =
   | 'unifi'
   | 'pihole'
   | 'settings';
+
+export interface AgentInfo {
+  id: string;
+  name: string;
+  description: string;
+  is_default: boolean;
+  status?: Record<string, unknown>;
+}
+
+export interface AgentsResponse {
+  agents: AgentInfo[];
+}
+
+export interface SessionAgentResponse {
+  agent_id: string;
+  mode_id: string;
+}
+
+export interface SessionModeResponse {
+  mode_id: string;
+}
+
+export interface ModeInfo {
+  id: string;
+  name: string;
+}
+
+export interface ModesResponse {
+  modes: ModeInfo[];
+}
 
 export interface TelemetryHistoryEntry {
   timestamp: number;

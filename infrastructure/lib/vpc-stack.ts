@@ -78,6 +78,20 @@ export class VpcStack extends cdk.Stack {
       subnets: singleAzSubnetSelection,
     });
 
+    this.vpc.addInterfaceEndpoint('BedrockRuntimeEndpoint', {
+      service: ec2.InterfaceVpcEndpointAwsService.BEDROCK_RUNTIME,
+      privateDnsEnabled: true,
+      subnets: singleAzSubnetSelection,
+    });
+
+    this.vpc.addInterfaceEndpoint('BedrockAgentCoreDataPlaneEndpoint', {
+      service: new ec2.InterfaceVpcEndpointService(
+        `com.amazonaws.${this.region}.bedrock-agentcore`
+      ),
+      privateDnsEnabled: true,
+      subnets: singleAzSubnetSelection,
+    });
+
     new cdk.CfnOutput(this, 'VpcId', {
       value: this.vpc.vpcId,
       description: 'VPC ID for AgentCore Glitch',

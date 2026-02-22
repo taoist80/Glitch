@@ -337,12 +337,14 @@ class TelegramCommandHandler:
             "• /new - Start new conversation\n"
             "• /status - Show bot status\n"
             "• /help - Show this message\n"
+            "**Agents:** /glitch, /mistral, /llava\n"
+            "**Modes:** /poet (creative), /default or /normal\n"
+            "• /poet - Poet mode; optional: /poet &lt;prompt&gt;\n"
+            "• /glitch - Use Glitch agent\n"
+            "• /mistral - Use Mistral agent\n"
+            "• /llava - Use LLaVA (vision)\n"
+            "• /default or /normal - Default mode\n"
         )
-        if self.poet_agent:
-            msg += (
-                "• /poet - Switch to Poet (creative writing); optional: /poet &lt;prompt&gt;\n"
-                "• /glitch - Switch back to Glitch\n"
-            )
         
         # Owner commands
         if is_owner:

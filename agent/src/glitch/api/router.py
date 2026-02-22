@@ -25,6 +25,14 @@ from glitch.api.types import (
     SkillToggleResponse,
     TelemetryResponse,
     StreamingInfoResponse,
+    AgentsResponse,
+    AgentInfo,
+    SessionAgentResponse,
+    SessionAgentUpdate,
+    SessionModeResponse,
+    SessionModeUpdate,
+    ModesResponse,
+    ModeInfo,
 )
 
 if TYPE_CHECKING:
@@ -80,7 +88,7 @@ def _save_disabled_skills_to_dynamodb(disabled_skills: set[str]) -> bool:
     table = _get_dynamodb_table()
     if not table:
         return False
-    
+
     try:
         table.put_item(Item={
             "pk": "SKILL_CONFIG",
@@ -90,6 +98,49 @@ def _save_disabled_skills_to_dynamodb(disabled_skills: set[str]) -> bool:
         return True
     except Exception as e:
         logger.warning("Failed to save disabled skills to DynamoDB: %s", e)
+        return False
+
+
+# Session agent/mode: pk=SESSION_AGENT, sk=session_id, attributes agent_id, mode_id
+def _get_session_agent_mode(session_id: str) -> tuple[str, str]:
+    """Load agent_id and mode_id for session from DynamoDB. Returns (agent_id, mode_id)."""
+    from glitch.agent_registry import get_default_agent_id
+    from glitch.modes import MODE_DEFAULT
+    table = _get_dynamodb_table()
+    if not table:
+        return get_default_agent_id(), MODE_DEFAULT
+    try:
+        response = table.get_item(Key={"pk": "SESSION_AGENT", "sk": session_id})
+        if "Item" not in response:
+            return get_default_agent_id(), MODE_DEFAULT
+        item = response["Item"]
+        return (
+            item.get("agent_id") or get_default_agent_id(),
+            item.get("mode_id") or MODE_DEFAULT,
+        )
+    except Exception as e:
+        logger.debug("Failed to load session agent/mode from DynamoDB: %s", e)
+        return get_default_agent_id(), MODE_DEFAULT
+
+
+def _set_session_agent_mode(session_id: str, agent_id: Optional[str] = None, mode_id: Optional[str] = None) -> bool:
+    """Save agent_id and/or mode_id for session to DynamoDB. Merges with existing."""
+    table = _get_dynamodb_table()
+    if not table:
+        return False
+    try:
+        current_agent, current_mode = _get_session_agent_mode(session_id)
+        new_agent = agent_id if agent_id is not None else current_agent
+        new_mode = mode_id if mode_id is not None else current_mode
+        table.put_item(Item={
+            "pk": "SESSION_AGENT",
+            "sk": session_id,
+            "agent_id": new_agent,
+            "mode_id": new_mode,
+        })
+        return True
+    except Exception as e:
+        logger.warning("Failed to save session agent/mode to DynamoDB: %s", e)
         return False
 
 
@@ -218,18 +269,34 @@ async def get_status() -> StatusResponse:
 
 
 def _load_telegram_config_for_api():
-    """Load Telegram config using same backend as main (DynamoDB in AWS, file locally)."""
+    """Load Telegram config using same backend as main (DynamoDB in AWS, file locally).
+    
+    In webhook mode (AgentCore deployment), the agent container may not have DynamoDB
+    permissions or the GLITCH_CONFIG_TABLE env var. We detect AgentCore deployment
+    and return enabled=True since the webhook Lambda handles Telegram integration.
+    """
     import os
     import boto3
     from botocore.exceptions import ClientError
 
-    config_table = os.getenv("GLITCH_CONFIG_TABLE", "glitch-telegram-config").strip()
+    config_table = os.getenv("GLITCH_CONFIG_TABLE", "").strip()
     webhook_url_env = os.getenv("GLITCH_TELEGRAM_WEBHOOK_URL", "").strip()
-    # In AWS the runtime gets the bot token from Secrets Manager at startup; env may not be set.
-    # Try DynamoDB first when we have a table name (default glitch-telegram-config).
-    if config_table or webhook_url_env:
+    
+    # Detect if we're running in AgentCore (container deployment)
+    # AgentCore sets AWS_EXECUTION_ENV or we can check for /app directory
+    is_agentcore = (
+        os.path.exists("/app") or 
+        "agentcore" in os.getenv("AWS_EXECUTION_ENV", "").lower() or
+        os.getenv("BEDROCK_AGENTCORE_RUNTIME", "")
+    )
+    
+    # Default table name for webhook deployments
+    default_table = "glitch-telegram-config"
+    table_name = config_table or default_table
+    
+    # Try to read from DynamoDB if we have a table name
+    if config_table or webhook_url_env or is_agentcore:
         try:
-            table_name = config_table or "glitch-telegram-config"
             dynamodb = boto3.resource("dynamodb")
             table = dynamodb.Table(table_name)
             response = table.get_item(Key={"pk": "CONFIG", "sk": "telegram"})
@@ -245,29 +312,12 @@ def _load_telegram_config_for_api():
                     "webhook_url": item.get("webhook_url"),
                     "mode": item.get("mode", "webhook"),
                 }, True
-            else:
-                # DynamoDB query succeeded but no config item exists yet
-                # Still return enabled=True since we're in webhook mode
-                logger.info("DynamoDB query succeeded but no CONFIG item found, assuming webhook mode")
-                return {
-                    "mode": "webhook",
-                    "dm_policy": "pairing",
-                    "group_policy": "allowlist",
-                    "require_mention": True,
-                }, True
-        except ClientError as e:
-            logger.warning("DynamoDB Telegram config load failed: %s", e)
-            # If we have a config table name, assume webhook mode is enabled even if we can't read it
-            # (the agent container may not have DynamoDB permissions, but the webhook Lambda does)
-            return {
-                "mode": "webhook",
-                "dm_policy": "pairing",
-                "group_policy": "allowlist",
-                "require_mention": True,
-            }, True
-        except Exception as e:
-            logger.warning("DynamoDB Telegram config load failed: %s", e)
-            # Same fallback for other exceptions
+        except (ClientError, Exception) as e:
+            logger.warning("DynamoDB Telegram config load failed (expected if no DynamoDB permissions): %s", e)
+        
+        # Fallback: we're in AgentCore/webhook mode but can't read DynamoDB
+        # Return enabled=True with default config since the webhook Lambda handles Telegram
+        if is_agentcore or config_table or webhook_url_env:
             return {
                 "mode": "webhook",
                 "dm_policy": "pairing",
@@ -275,12 +325,13 @@ def _load_telegram_config_for_api():
                 "require_mention": True,
             }, True
 
+    # Local/polling mode - check for token env vars
     has_token = bool(
         os.environ.get("GLITCH_TELEGRAM_BOT_TOKEN") or
         os.environ.get("GLITCH_TELEGRAM_SECRET_NAME")
     )
     if not has_token:
-        return None, has_token
+        return None, False
     try:
         from glitch.channels.config_manager import ConfigManager
         cm = ConfigManager()
@@ -378,8 +429,12 @@ async def get_ollama_health() -> OllamaHealthResponse:
         from glitch.tools.ollama_tools import _check_single_host, DEFAULT_CONFIG
         config = DEFAULT_CONFIG
         hosts = []
-        for name, host in [("Chat", config.chat_host), ("Vision", config.vision_host)]:
-            result = await _check_single_host(name, host, config)
+        # Chat: Ollama 11434 /api/tags. Vision: OpenAI-compatible 8080 /v1/models.
+        for name, host, port_override, use_openai in [
+            ("Chat", config.chat_host, None, False),
+            ("Vision", config.vision_host, config.vision_port, True),
+        ]:
+            result = await _check_single_host(name, host, config, port_override=port_override, use_openai_format=use_openai)
             hosts.append(OllamaHostHealth(
                 name=result.name,
                 host=result.host,
@@ -586,6 +641,84 @@ async def toggle_skill(skill_id: str, request: SkillToggleRequest) -> SkillToggl
         skill_id=skill_id,
         enabled=request.enabled,
         message=message,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Agents and session agent/mode (registry + DynamoDB)
+# ---------------------------------------------------------------------------
+
+@router.get("/agents", response_model=AgentsResponse)
+async def list_agents_api() -> AgentsResponse:
+    """List registered chat agents (glitch, mistral, llava)."""
+    try:
+        from glitch.agent_registry import list_agents as registry_list_agents
+        agents_data = registry_list_agents()
+        agents = [
+            AgentInfo(
+                id=a.get("id", ""),
+                name=a.get("name", ""),
+                description=a.get("description", ""),
+                is_default=a.get("is_default", False),
+                status=a.get("status"),
+            )
+            for a in agents_data
+        ]
+        logger.info("List agents requested", extra={"count": len(agents)})
+        return AgentsResponse(agents=agents)
+    except Exception as e:
+        logger.exception("list_agents failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/sessions/{session_id}/agent", response_model=SessionAgentResponse)
+async def get_session_agent(session_id: str) -> SessionAgentResponse:
+    """Get current agent_id and mode_id for a session."""
+    agent_id, mode_id = _get_session_agent_mode(session_id)
+    return SessionAgentResponse(agent_id=agent_id, mode_id=mode_id)
+
+
+@router.put("/sessions/{session_id}/agent", response_model=SessionAgentResponse)
+async def put_session_agent(session_id: str, body: SessionAgentUpdate) -> SessionAgentResponse:
+    """Set agent_id for a session. Validates against registry."""
+    from glitch.agent_registry import get_allowed_agent_ids
+    aid = (body.agent_id or "").strip().lower()
+    if aid not in get_allowed_agent_ids():
+        raise HTTPException(status_code=400, detail=f"Invalid agent_id: {aid}")
+    _set_session_agent_mode(session_id, agent_id=aid)
+    _, mode_id = _get_session_agent_mode(session_id)
+    logger.info("Session agent selected", extra={"session_id": session_id, "agent_id": aid, "channel": "api"})
+    return SessionAgentResponse(agent_id=aid, mode_id=mode_id)
+
+
+@router.get("/sessions/{session_id}/mode", response_model=SessionModeResponse)
+async def get_session_mode(session_id: str) -> SessionModeResponse:
+    """Get current mode_id for a session."""
+    _, mode_id = _get_session_agent_mode(session_id)
+    return SessionModeResponse(mode_id=mode_id)
+
+
+@router.put("/sessions/{session_id}/mode", response_model=SessionModeResponse)
+async def put_session_mode(session_id: str, body: SessionModeUpdate) -> SessionModeResponse:
+    """Set mode_id for a session (default | poet)."""
+    from glitch.modes import MODE_DEFAULT, MODE_POET
+    mid = (body.mode_id or "").strip().lower()
+    if mid not in (MODE_DEFAULT, MODE_POET):
+        raise HTTPException(status_code=400, detail=f"Invalid mode_id: {mid}")
+    _set_session_agent_mode(session_id, mode_id=mid)
+    logger.info("Session mode selected", extra={"session_id": session_id, "mode_id": mid, "channel": "api"})
+    return SessionModeResponse(mode_id=mid)
+
+
+@router.get("/modes", response_model=ModesResponse)
+async def list_modes() -> ModesResponse:
+    """List available modes (default, poet)."""
+    from glitch.modes import MODE_DEFAULT, MODE_POET
+    return ModesResponse(
+        modes=[
+            ModeInfo(id=MODE_DEFAULT, name="Default"),
+            ModeInfo(id=MODE_POET, name="Poet"),
+        ]
     )
 
 

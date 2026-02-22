@@ -200,12 +200,14 @@ class CloudWatchAggregates(TypedDict, total=False):
 
 class InvocationRequest(TypedDict, total=False):
     """Request payload for agent invocation.
-    
+
     Sent to POST /invocations endpoint.
     Either prompt (normal chat) or _ui_api_request (proxy API) is present.
     """
     prompt: str  # Required for chat invocations
     session_id: Optional[str]  # Optional: Override session ID
+    agent_id: Optional[str]  # Optional: glitch | mistral | llava (else default from registry)
+    mode_id: Optional[str]  # Optional: default | poet
     context: Optional[Dict[str, Any]]  # Optional: Additional context
     stream: bool  # Optional: Stream events instead of single response
     _ui_api_request: UiApiRequest  # Optional: UI API proxy request

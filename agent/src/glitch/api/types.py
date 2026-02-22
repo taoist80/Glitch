@@ -149,7 +149,7 @@ class TelemetryResponse(BaseModel):
 
 class StreamingInfoResponse(BaseModel):
     """Response from GET /api/streaming-info.
-    
+
     Provides information about streaming capabilities for the UI.
     Phase 2 will add presigned WebSocket URL support.
     """
@@ -159,3 +159,50 @@ class StreamingInfoResponse(BaseModel):
     session_id: Optional[str] = None
     expires_in_seconds: Optional[int] = None
     message: str = "HTTP streaming available. WebSocket streaming coming in Phase 2."
+
+
+# Agents and session agent/mode (registry + DynamoDB)
+class AgentInfo(BaseModel):
+    """Single agent in list_agents response."""
+    id: str
+    name: str
+    description: str = ""
+    is_default: bool = False
+    status: Optional[Dict[str, Any]] = None
+
+
+class AgentsResponse(BaseModel):
+    """Response from GET /api/agents."""
+    agents: List[AgentInfo]
+
+
+class SessionAgentResponse(BaseModel):
+    """Response from GET /api/sessions/{session_id}/agent."""
+    agent_id: str
+    mode_id: str = "default"
+
+
+class SessionAgentUpdate(BaseModel):
+    """Request body for PUT /api/sessions/{session_id}/agent."""
+    agent_id: str
+
+
+class SessionModeResponse(BaseModel):
+    """Response from GET /api/sessions/{session_id}/mode."""
+    mode_id: str
+
+
+class SessionModeUpdate(BaseModel):
+    """Request body for PUT /api/sessions/{session_id}/mode."""
+    mode_id: str
+
+
+class ModeInfo(BaseModel):
+    """Single mode in GET /api/modes."""
+    id: str
+    name: str
+
+
+class ModesResponse(BaseModel):
+    """Response from GET /api/modes."""
+    modes: List[ModeInfo]

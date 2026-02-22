@@ -12,6 +12,7 @@ from strands.agent.conversation_manager import SlidingWindowConversationManager
 
 from glitch.poet_soul import load_poet_soul
 from glitch.routing.model_router import MODEL_REGISTRY
+from glitch.tools.soul_tools import get_story_book, load_story_book, update_story_book
 from glitch.telemetry import extract_metrics_from_result
 from glitch.types import (
     InvocationResponse,
@@ -24,15 +25,23 @@ logger = logging.getLogger(__name__)
 
 POET_TECHNICAL_CONTEXT = """
 You are Poet, a creative writing agent. Respond only with your writing or a brief meta-comment. You do not perform Glitch's technical or orchestration role.
+
+**Story-book tools:** You have get_story_book (read current story-book.md) and update_story_book(contents) (write or replace story-book.md in the same S3 bucket as poet-soul). Use these when the user wants to record summaries or key details for long-running stories so you can keep continuity when iterating later. Ask first if they want to record; then use update_story_book (include existing content plus the new section if appending).
 """
 
 
 def build_poet_system_prompt() -> str:
-    """Build system prompt from poet-soul.md and technical context."""
+    """Build system prompt from poet-soul.md, optional story-book, and technical context."""
     soul = load_poet_soul()
+    technical = POET_TECHNICAL_CONTEXT
+    story_book = load_story_book()
     if soul:
-        return f"{soul}\n\n{POET_TECHNICAL_CONTEXT}"
-    return f"# Poet\n\nCreative writing agent. Respond with your writing only.\n\n{POET_TECHNICAL_CONTEXT}"
+        base = f"{soul}\n\n{technical}"
+    else:
+        base = f"# Poet\n\nCreative writing agent. Respond with your writing only.\n\n{technical}"
+    if story_book and story_book.strip():
+        base = f"{base}\n\n## Story book (for continuity)\n\nUse this when continuing or iterating on long-running stories.\n\n{story_book}"
+    return base
 
 
 class PoetAgent:
@@ -59,7 +68,7 @@ class PoetAgent:
             name="poet",
             system_prompt=system_prompt,
             model=model_config.model_id,
-            tools=[],
+            tools=[get_story_book, update_story_book],
             conversation_manager=SlidingWindowConversationManager(window_size=window_size),
             trace_attributes={
                 "agent.role": "poet",

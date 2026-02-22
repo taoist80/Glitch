@@ -343,9 +343,10 @@ python -m glitch.cli status --verbose
 | `GLITCH_TELEGRAM_WEBHOOK_URL` | No | (from Lambda) | Override webhook URL for Telegram |
 | `GLITCH_MAX_TURNS` | No | `3` | Max agent/tool cycles per invocation (0 = no limit) |
 | `GLITCH_MCP_CONFIG_PATH` | No | `agent/mcp_servers.yaml` | Path to MCP servers YAML |
-| `GLITCH_SOUL_S3_BUCKET` | No | (or SSM) | S3 bucket for SOUL.md and poet-soul.md; required for persisting `update_soul` and loading personality from S3 |
+| `GLITCH_SOUL_S3_BUCKET` | No | (or SSM) | S3 bucket for SOUL.md, poet-soul.md, and story-book.md; required for persisting `update_soul` and loading personality from S3 |
 | `GLITCH_SOUL_S3_KEY` | No | `soul.md` | S3 object key for SOUL.md |
 | `GLITCH_POET_SOUL_S3_KEY` | No | (SSM or `poet-soul.md`) | S3 object key for poet-soul.md (Poet sub-agent) |
+| `GLITCH_STORY_BOOK_S3_KEY` | No | (SSM or `story-book.md`) | S3 object key for story-book.md (Poet long-running story details) |
 | `AWS_REGION` | No | `us-west-2` | AWS region |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | No | None | OTLP collector endpoint; if set, enables OTLP export |
 | `OTEL_OTLP_ENABLED` | No | `false` | Explicitly enable/disable OTLP export (`true`/`false`) |
@@ -357,7 +358,7 @@ When the CDK `TelegramWebhookStack` is deployed, it creates an S3 bucket for age
 
 - **With CDK stack:** After deploying `GlitchTelegramWebhookStack`, the runtime discovers the bucket via SSM. Ensure the runtime uses the same execution role that the stack attached policies to (`defaultExecutionRoleArn` in the CDK app).
 - **Without CDK / override:** Set `GLITCH_SOUL_S3_BUCKET` (and optionally `GLITCH_SOUL_S3_KEY`, `GLITCH_POET_SOUL_S3_KEY`) in the runtime environment. The bucket must allow the runtime role `s3:GetObject` and `s3:PutObject`.
-- **Poet sub-agent:** Uses the same bucket as SOUL; key is `GLITCH_POET_SOUL_S3_KEY` or SSM `poet-soul-s3-key`, default `poet-soul.md`. If the object is missing in S3, Poet falls back to file paths (`agent/poet-soul.md`, `/app/poet-soul.md`, `~/poet-soul.md`).
+- **Poet sub-agent:** Uses the same bucket as SOUL; key is `GLITCH_POET_SOUL_S3_KEY` or SSM `poet-soul-s3-key`, default `poet-soul.md`. If the object is missing in S3, Poet falls back to file paths (`agent/poet-soul.md`, `/app/poet-soul.md`, `~/poet-soul.md`). Poet can read/write **story-book.md** (same bucket; key `GLITCH_STORY_BOOK_S3_KEY` or SSM `story-book-s3-key`, default `story-book.md`) for long-running story summaries and key details via `get_story_book` and `update_story_book`.
 
 **S3 soul bucket verification (when the agent says the bucket is not found)**
 
@@ -609,8 +610,9 @@ The agent does **not** call tools on its own for side tasks (e.g. telemetry, thr
          │    │                                          │
          ▼    ▼                                          ▼
 ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐
-│ Ollama Chat      │    │ Ollama Vision    │    │ Both endpoints   │
-│ /api/generate    │    │ /api/generate    │    │ /api/tags        │
+│ Chat host        │    │ Vision host      │    │ Health checks    │
+│ .202:11434       │    │ .137:8080        │    │ Chat: /api/tags  │
+│ /api/generate    │    │ /v1/chat/...     │    │ Vision: /v1/models│
 └────────┬─────────┘    └────────┬─────────┘    └────────┬─────────┘
          │                       │                       │
          ▼                       ▼                       ▼
@@ -850,11 +852,11 @@ The gateway Lambda (`GlitchGatewayStack`) currently serves the web UI (invocatio
 
 ### Ollama Tools
 
-| Tool | Host | Model | Purpose |
-|------|------|-------|---------|
-| `local_chat` | 10.10.110.202:11434 | llama3.2 | Lightweight chat tasks |
-| `vision_agent` | 10.10.110.137:11434 | LLaVA | Image analysis |
-| `check_ollama_health` | Both | N/A | Connectivity verification |
+| Tool | Host | Port / API | Model | Purpose |
+|------|------|------------|-------|---------|
+| `local_chat` | 10.10.110.202 | 11434 (Ollama /api/generate) | mistral-nemo:12b | Lightweight chat tasks |
+| `vision_agent` | 10.10.110.137 | 8080 (OpenAI /v1/chat/completions) | LLaVA | Image analysis |
+| `check_ollama_health` | Both | 11434 + 8080 | N/A | Connectivity (Chat: /api/tags, Vision: /v1/models) |
 
 ### Pi-hole DNS Tools
 
@@ -1423,6 +1425,373 @@ The UI uses REST endpoints at `/api`:
 | `/api/skills/{id}/toggle` | POST | Enable/disable skill |
 | `/api/streaming-info` | GET | Streaming capabilities info |
 | `/invocations` | POST | Send message to Glitch |
+
+## Testing & Deployment Automation
+
+### Overview
+
+The project includes a comprehensive automated testing and deployment system that eliminates manual configuration steps and ensures infrastructure correctness.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│              Automated Deployment Workflow                   │
+└─────────────────────────────────────────────────────────────┘
+
+Infrastructure Deployment              Agent Deployment
+         │                                   │
+         ▼                                   ▼
+┌──────────────────┐              ┌─────────────────────┐
+│ CDK Deploy       │              │ make deploy         │
+│ (TypeScript)     │              │ or                  │
+│                  │              │ ./scripts/deploy.sh │
+│ • VPC Stack      │              └──────────┬──────────┘
+│ • Tailscale      │                         │
+│ • AgentCore      │                         ▼
+│ • Secrets        │              ┌─────────────────────┐
+└────────┬─────────┘              │ Pre-Deploy Hook     │
+         │                        │ (auto-configure)    │
+         │                        │                     │
+         ▼                        │ • Fetch CFN outputs │
+┌──────────────────┐              │ • Update VPC config │
+│ Unit Tests       │              │ • Set subnet IDs    │
+│ (Jest)           │              │ • Set security groups│
+│                  │              └──────────┬──────────┘
+│ 47 tests         │                         │
+│ • VPC (17)       │                         ▼
+│ • Tailscale (17) │              ┌─────────────────────┐
+│ • AgentCore (13) │              │ agentcore deploy    │
+└────────┬─────────┘              └──────────┬──────────┘
+         │                                   │
+         ▼                                   ▼
+┌──────────────────┐              ┌─────────────────────┐
+│ Integration Tests│              │ Post-Deploy Hook    │
+│ (pytest)         │              │ (verify)            │
+│                  │              │                     │
+│ • VPC exists     │              │ • Check VPC config  │
+│ • Endpoints OK   │              │ • Verify endpoints  │
+│ • Routes OK      │              │ • Test connectivity │
+│ • Security OK    │              └─────────────────────┘
+└──────────────────┘
+```
+
+### Unit Tests (Infrastructure)
+
+**Location:** `infrastructure/test/`
+
+**47 automated tests** covering CDK infrastructure:
+
+```typescript
+// vpc-stack.test.ts (17 tests)
+- VPC configuration (CIDR, DNS)
+- Subnet creation (2 AZs)
+- NAT gateway cost optimization
+- VPC endpoints (8 endpoints)
+- Stack outputs
+
+// tailscale-stack.test.ts (17 tests)
+- EC2 instance configuration
+- Security group rules
+- IAM roles and policies
+- User data validation
+- VPC route creation
+
+// agentcore-stack.test.ts (13 tests)
+- Security groups
+- IAM permissions (Bedrock, ECR, Memory)
+- Secrets access
+- Stack outputs
+```
+
+**Run tests:**
+```bash
+cd infrastructure
+pnpm test
+```
+
+**Example output:**
+```
+PASS test/vpc-stack.test.ts
+PASS test/tailscale-stack.test.ts
+PASS test/agentcore-stack.test.ts
+
+Test Suites: 3 passed, 3 total
+Tests:       47 passed, 47 total
+Time:        4.126 s
+```
+
+### Integration Tests (Deployed Infrastructure)
+
+**Location:** `infrastructure/test/test_integration.py`
+
+**Python-based tests** that verify deployed AWS infrastructure:
+
+```python
+# TestVpcStack
+- VPC exists and is available
+- Private subnets in correct AZs
+- All VPC endpoints present
+- No NAT gateways (cost check)
+
+# TestTailscaleStack
+- EC2 instance running (t4g.nano)
+- Source/dest check disabled
+- Security group rules correct
+- VPC routes to 10.10.110.0/24
+
+# TestAgentCoreStack
+- Security group exists
+- IAM role has correct permissions
+- VPC config output is valid
+
+# Optional (manual enable)
+- Tailscale connectivity
+- Ollama host reachability
+```
+
+**Run tests:**
+```bash
+cd infrastructure
+pytest test/test_integration.py -v
+
+# Specific test class
+pytest test/test_integration.py::TestVpcStack -v
+```
+
+### Auto-Configuration System
+
+**Location:** `agent/scripts/`
+
+#### Pre-Deploy Configuration (`pre-deploy-configure.py`)
+
+Automatically fetches VPC configuration from CloudFormation and updates `.bedrock_agentcore.yaml`:
+
+**What it does:**
+1. Checks if agent is in VPC mode
+2. Fetches `PrivateSubnetIds` from `GlitchVpcStack`
+3. Fetches `AgentCoreSecurityGroupId` from `GlitchAgentCoreStack`
+4. Updates `network_mode_config` in agent configuration
+5. Skips if already configured
+
+**Configuration updated:**
+```yaml
+agents:
+  Glitch:
+    aws:
+      network_configuration:
+        network_mode: VPC
+        network_mode_config:
+          subnet_ids:
+            - subnet-xxx  # Auto-populated from CFN
+            - subnet-yyy
+          security_group_ids:
+            - sg-zzz      # Auto-populated from CFN
+```
+
+#### Post-Deploy Verification (`post-deploy-verify.py`)
+
+Verifies deployment after `agentcore deploy`:
+
+**Checks performed:**
+- VPC configuration is complete
+- Subnets exist and are available
+- Security groups exist
+- VPC endpoints are present (Bedrock, ECR, etc.)
+- Network connectivity is functional
+
+#### Deployment Wrapper (`deploy.sh`)
+
+Unified deployment script that orchestrates the full workflow:
+
+```bash
+./scripts/deploy.sh [options]
+
+Options:
+  --skip-pre-check     Skip pre-deploy configuration
+  --skip-post-check    Skip post-deploy verification
+  --help               Show help
+```
+
+**Workflow:**
+1. Pre-deploy: Auto-configure VPC settings
+2. Deploy: Run `agentcore deploy`
+3. Post-deploy: Verify deployment
+
+### Makefile Targets
+
+**Location:** `agent/Makefile`
+
+Convenience targets for common operations:
+
+```makefile
+make deploy       # Full deployment workflow
+make deploy-only  # Deploy without pre/post checks
+make configure    # Configure VPC only
+make verify       # Verify deployment only
+make test         # Run agent tests
+make clean        # Clean build artifacts
+```
+
+### Deployment Workflows
+
+#### Option 1: Fully Automated (Recommended)
+
+```bash
+# Deploy infrastructure
+cd infrastructure
+cdk deploy --all
+
+# Approve Tailscale route (one-time manual step)
+# Visit admin.tailscale.com
+
+# Deploy agent (fully automated)
+cd ../agent
+make deploy
+```
+
+**Output example:**
+```
+[pre-deploy] Checking VPC configuration...
+[pre-deploy] Fetching from CloudFormation...
+[pre-deploy] Found VPC configuration:
+[pre-deploy]   Subnet IDs: ['subnet-xxx', 'subnet-yyy']
+[pre-deploy]   Security Group ID: sg-zzz
+[pre-deploy] ✓ VPC configuration updated
+
+[deploy] Running: agentcore deploy
+[agentcore] ✓ Deployment successful
+
+[post-deploy] ✓ VPC endpoints verified
+[post-deploy] ✓ All checks passed!
+```
+
+#### Option 2: Manual Configuration
+
+```bash
+# Get CloudFormation outputs
+aws cloudformation describe-stacks --stack-name GlitchVpcStack
+aws cloudformation describe-stacks --stack-name GlitchAgentCoreStack
+
+# Edit configuration manually
+vim agent/.bedrock_agentcore.yaml
+
+# Deploy
+cd agent
+agentcore deploy
+```
+
+### Full Orchestration Script
+
+**Location:** `infrastructure/scripts/deploy-and-verify.sh`
+
+Deploys everything and runs all tests:
+
+```bash
+./scripts/deploy-and-verify.sh [options]
+
+Options:
+  --skip-deploy   Skip CDK deployment (tests only)
+  --skip-tests    Skip tests (deploy only)
+  --dry-run       Show what would be done
+```
+
+**What it does:**
+1. Checks prerequisites (AWS CLI, CDK, Python)
+2. Builds TypeScript infrastructure
+3. Deploys all CDK stacks
+4. Configures AgentCore VPC settings
+5. Runs unit tests (Jest)
+6. Runs integration tests (pytest)
+7. Shows next steps
+
+### Testing Strategy
+
+```
+┌────────────────────────────────────────────────────────┐
+│                   Testing Pyramid                      │
+└────────────────────────────────────────────────────────┘
+
+                    ┌──────────────┐
+                    │ Manual Tests │  ← Tailscale route approval
+                    │              │    Ollama connectivity
+                    └──────────────┘
+                    
+            ┌──────────────────────────┐
+            │  Integration Tests       │  ← Deployed AWS resources
+            │  (pytest)                │    VPC, EC2, Security Groups
+            │                          │    Live connectivity checks
+            └──────────────────────────┘
+            
+    ┌──────────────────────────────────────┐
+    │      Unit Tests (Jest)               │  ← CDK templates
+    │      47 tests                        │    CloudFormation resources
+    │      VPC, Tailscale, AgentCore       │    IAM policies
+    └──────────────────────────────────────┘
+```
+
+### Benefits
+
+✅ **No Manual Configuration** - VPC settings fetched automatically  
+✅ **No Copy-Paste Errors** - Direct API integration with CloudFormation  
+✅ **Automatic Verification** - Issues detected immediately  
+✅ **Repeatable Process** - Same command every time  
+✅ **Well-Tested** - 47 unit tests + integration tests  
+✅ **Clear Errors** - Meaningful error messages with solutions  
+✅ **One Command Deploy** - `make deploy` handles everything  
+
+### Exit Codes
+
+All scripts follow these conventions:
+
+- `0` - Success
+- `1` - Error (deployment should abort)
+- `2` - Warning (deployment can continue but issues detected)
+
+### Troubleshooting
+
+#### "CloudFormation stacks not found"
+
+Deploy infrastructure first:
+```bash
+cd infrastructure
+cdk deploy GlitchVpcStack GlitchAgentCoreStack
+```
+
+#### "VPC configuration incomplete"
+
+Run configuration script manually:
+```bash
+cd agent
+python3 scripts/pre-deploy-configure.py
+```
+
+#### "Some VPC endpoints missing"
+
+Verify VPC stack:
+```bash
+cd infrastructure
+pytest test/test_integration.py::TestVpcStack -v
+```
+
+#### "VPC mode requires both subnets and security groups"
+
+**This is a known issue** - the configuration is correctly set, but `agentcore deploy` validation may have timing issues.
+
+**Solution**: Run the diagnostic to verify config is valid, then deploy again:
+```bash
+cd agent
+python3 scripts/diagnose-config.py  # Should show ✅ VALID
+agentcore deploy                     # Try again
+```
+
+See [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) for details.
+
+### Documentation
+
+- **[DEPLOYMENT.md](DEPLOYMENT.md)** - Complete deployment guide
+- **[agent/scripts/README.md](agent/scripts/README.md)** - Script usage
+- **[docs/TESTING_AND_AUTOMATION.md](docs/TESTING_AND_AUTOMATION.md)** - Detailed summary
 
 ## License
 

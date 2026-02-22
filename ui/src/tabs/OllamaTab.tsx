@@ -55,6 +55,15 @@ export function OllamaTab() {
             </div>
           </div>
 
+          {!ollamaHealth.all_healthy && (
+            <div className="alert alert-warning">
+              <span>
+                Hosts may show as degraded when the runtime cannot reach them (e.g. 10.10.110.x).
+                On-prem hosts require the agent to run on the same network or via Tailscale/VPN.
+              </span>
+            </div>
+          )}
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {ollamaHealth.hosts.map((host) => (
               <div key={host.name} className="card bg-base-200">

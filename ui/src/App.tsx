@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { Layout } from './components/Layout';
 import { ChatTab } from './tabs/ChatTab';
+import { AgentsTab } from './tabs/AgentsTab';
 import { TelegramTab } from './tabs/TelegramTab';
 import { OllamaTab } from './tabs/OllamaTab';
 import { MemoryTab } from './tabs/MemoryTab';
@@ -29,6 +30,8 @@ function App() {
     switch (activeTab) {
       case 'chat':
         return <ChatTab />;
+      case 'agents':
+        return <AgentsTab />;
       case 'telegram':
         return <TelegramTab />;
       case 'ollama':

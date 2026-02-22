@@ -7,6 +7,10 @@ import type {
   MCPServersResponse,
   SkillsResponse,
   SkillToggleResponse,
+  AgentsResponse,
+  SessionAgentResponse,
+  SessionModeResponse,
+  ModesResponse,
   InvocationResponse,
   StreamingInfo,
   StreamEvent,
@@ -112,10 +116,40 @@ export const api = {
     });
   },
 
-  async sendMessage(prompt: string): Promise<InvocationResponse> {
+  async getAgents(): Promise<AgentsResponse> {
+    return fetchJson<AgentsResponse>(`${API_BASE}/agents`);
+  },
+
+  async getSessionAgent(sessionId: string): Promise<SessionAgentResponse> {
+    return fetchJson<SessionAgentResponse>(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/agent`);
+  },
+
+  async putSessionAgent(sessionId: string, agentId: string): Promise<SessionAgentResponse> {
+    return fetchJson<SessionAgentResponse>(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/agent`, {
+      method: 'PUT',
+      body: JSON.stringify({ agent_id: agentId }),
+    });
+  },
+
+  async getSessionMode(sessionId: string): Promise<SessionModeResponse> {
+    return fetchJson<SessionModeResponse>(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/mode`);
+  },
+
+  async putSessionMode(sessionId: string, modeId: string): Promise<SessionModeResponse> {
+    return fetchJson<SessionModeResponse>(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/mode`, {
+      method: 'PUT',
+      body: JSON.stringify({ mode_id: modeId }),
+    });
+  },
+
+  async getModes(): Promise<ModesResponse> {
+    return fetchJson<ModesResponse>(`${API_BASE}/modes`);
+  },
+
+  async sendMessage(prompt: string, opts?: { session_id?: string; agent_id?: string; mode_id?: string }): Promise<InvocationResponse> {
     return fetchJson<InvocationResponse>(`${INVOCATIONS_BASE}/invocations`, {
       method: 'POST',
-      body: JSON.stringify({ prompt }),
+      body: JSON.stringify({ prompt, ...opts }),
     });
   },
 

@@ -136,7 +136,7 @@ GLITCH_TECHNICAL_CONTEXT = """
 **Your Tools:**
 - vision_agent: Local LLaVA model for image analysis (10.10.110.137)
 - local_chat: Local Ollama for lightweight tasks (10.10.110.202, mistral:12b)
-- check_ollama_health: Verify connectivity to on-prem models
+- check_ollama_health: Verify connectivity to on-prem models. When reporting: if hosts are unreachable, say this is expected when the runtime is not on Tailscale/on-prem; do not invent retry or attempt counts; Mistral and LLaVA agents exist but cannot reach hosts when off-network.
 - update_soul: Update persistent SOUL.md (personality/instructions) when the user asks to change how you behave or remember preferences
 - Memory tools: set_session_goal, add_fact, add_constraint, record_decision, add_open_question, resolve_question, update_tool_results_summary, get_memory_state - use these to maintain structured memory during conversations
 - telemetry: Return Strands telemetry; use period='hour'|'day'|'week'|'month' for rolling totals, running_totals=True for this hour/today/week/month, last_n for history; alerts shown when thresholds are exceeded
@@ -356,9 +356,9 @@ class GlitchAgent:
             self.last_skill_selection.selected,
         )
     
-    async def process_message(self, user_message: str) -> InvocationResponse:
+    async def process_message(self, user_message: str, **kwargs: Any) -> InvocationResponse:
         """Process a user message through the Glitch orchestrator.
-        
+
         Dataflow:
             user_message -> TaskPlanner -> TaskSpec
                                               |
@@ -373,10 +373,11 @@ class GlitchAgent:
                                               |
                                               v
                                       InvocationResponse (with skill telemetry)
-        
+
         Args:
             user_message: The user's input message
-        
+            **kwargs: Ignored (session_id, system_prompt used by Mistral/LLaVA)
+
         Returns:
             InvocationResponse containing message, metrics, and session info
         """

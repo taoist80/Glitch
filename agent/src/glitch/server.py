@@ -52,7 +52,7 @@ logger = logging.getLogger(__name__)
 # The actual type is GlitchAgent from glitch.agent
 GlitchAgentType = "GlitchAgent"
 
-# Global agent instance
+# Global agent instance (primary Glitch; used when no registry or agent_id resolved)
 _agent: Optional[GlitchAgentType] = None
 
 # Create the AgentCore app
@@ -83,6 +83,12 @@ async def _handle_ui_api_request(api_request: UiApiRequest) -> dict:
         get_skills,
         toggle_skill,
         get_streaming_info,
+        list_agents_api,
+        get_session_agent,
+        put_session_agent,
+        get_session_mode,
+        put_session_mode,
+        list_modes,
     )
 
     path = api_request.get("path", "")
@@ -141,6 +147,42 @@ async def _handle_ui_api_request(api_request: UiApiRequest) -> dict:
                 toggle_req = SkillToggleRequest(**(body or {}))
                 result = await toggle_skill(skill_id, toggle_req)
                 return result.model_dump()
+            return {"error": f"Invalid path: {path}"}
+
+        elif path == "/agents" and method == "GET":
+            result = await list_agents_api()
+            return result.model_dump()
+
+        elif path == "/modes" and method == "GET":
+            result = await list_modes()
+            return result.model_dump()
+
+        elif path.startswith("/sessions/") and "/agent" in path and path.rstrip("/").endswith("/agent"):
+            parts = path.strip("/").split("/")
+            if len(parts) >= 3 and parts[0] == "sessions" and parts[-1] == "agent":
+                session_id = parts[1]
+                if method == "GET":
+                    result = await get_session_agent(session_id)
+                    return result.model_dump()
+                if method == "PUT":
+                    from glitch.api.types import SessionAgentUpdate
+                    update = SessionAgentUpdate(**(body or {}))
+                    result = await put_session_agent(session_id, update)
+                    return result.model_dump()
+            return {"error": f"Invalid path: {path}"}
+
+        elif path.startswith("/sessions/") and "/mode" in path and path.rstrip("/").endswith("/mode"):
+            parts = path.strip("/").split("/")
+            if len(parts) >= 3 and parts[0] == "sessions" and parts[-1] == "mode":
+                session_id = parts[1]
+                if method == "GET":
+                    result = await get_session_mode(session_id)
+                    return result.model_dump()
+                if method == "PUT":
+                    from glitch.api.types import SessionModeUpdate
+                    update = SessionModeUpdate(**(body or {}))
+                    result = await put_session_mode(session_id, update)
+                    return result.model_dump()
             return {"error": f"Invalid path: {path}"}
 
         else:
@@ -227,6 +269,9 @@ async def invoke(payload: InvocationRequest, context: RequestContext) -> Invocat
     """
     global _agent
     invoke_step = "entry"
+    agent_id = ""
+    mode_id = ""
+    session_id = ""
 
     try:
         invoke_step = "get_session_id"
@@ -243,12 +288,12 @@ async def invoke(payload: InvocationRequest, context: RequestContext) -> Invocat
         
         invoke_step = "log_prompt"
         prompt_preview = (payload.get("prompt") or "")[:80]
-        logger.info("Received invocation: prompt=%s session_id=%s", repr(prompt_preview), payload.get("session_id"))
+        session_id = payload.get("session_id") or ""
+        logger.info("Received invocation: prompt=%s session_id=%s", repr(prompt_preview), session_id)
         sys.stdout.flush()
 
         invoke_step = "check_keepalive"
         # Keepalive from scheduled Lambda to avoid idleRuntimeSessionTimeout (default 15 min).
-        session_id = payload.get("session_id") or ""
         if session_id == "system:keepalive":
             prompt = (payload.get("prompt") or "").strip().lower()
             if prompt in ("", "ping", "keepalive"):
@@ -264,41 +309,87 @@ async def invoke(payload: InvocationRequest, context: RequestContext) -> Invocat
                 session_id="",
                 memory_id="",
             )
-        
+
         invoke_step = "get_prompt"
         prompt = payload.get("prompt", "")
-        
         if not prompt:
+            fallback_agent = _agent
             return create_error_response(
                 error="invoke_step=get_prompt: No prompt provided",
-                session_id=_agent.session_id,
-                memory_id=_agent.memory_id,
+                session_id=getattr(fallback_agent, "session_id", "") if fallback_agent else "",
+                memory_id=getattr(fallback_agent, "memory_id", "") if fallback_agent else "",
             )
-        
+
+        invoke_step = "resolve_agent_and_mode"
+        from glitch.agent_registry import get_agent as registry_get_agent, get_default_agent_id
+        from glitch.modes import apply_mode_to_prompt, MODE_DEFAULT
+        agent_id = (payload.get("agent_id") or "").strip().lower() or get_default_agent_id()
+        mode_id = (payload.get("mode_id") or "").strip().lower() or MODE_DEFAULT
+        agent = registry_get_agent(agent_id)
+        if agent is None:
+            agent = _agent
+        if agent is None:
+            logger.error(
+                "Agent not found",
+                extra={"agent_id": agent_id, "session_id": session_id[:36] if session_id else ""},
+            )
+            return create_error_response(
+                error=f"invoke_step=resolve_agent: agent_id={agent_id!r} not found",
+                session_id=session_id,
+                memory_id="",
+            )
+
+        prompt_out, system_prompt_out = apply_mode_to_prompt(mode_id, prompt, system_prompt=None)
+        logger.info(
+            "Invocation routed to agent",
+            extra={
+                "session_id": session_id[:36] if session_id else "",
+                "agent_id": agent_id,
+                "mode_id": mode_id,
+                "prompt_len": len(prompt_out),
+            },
+        )
+
         invoke_step = "check_streaming"
-        # Optional streaming: when payload has "stream": true, yield events (AgentCore best practice).
         if payload.get("stream"):
-            async def stream_events() -> AsyncIterator[dict]:
-                try:
-                    async for event in _agent.process_message_stream(prompt):
-                        yield event
-                except Exception as e:
-                    logger.error("Error in streaming invocation: %s", e, exc_info=True)
-                    yield {"error": f"invoke_step=streaming: {e}"}
-            return stream_events()
+            if hasattr(agent, "process_message_stream"):
+                async def stream_events() -> AsyncIterator[dict]:
+                    try:
+                        async for event in agent.process_message_stream(prompt_out):
+                            yield event
+                    except Exception as e:
+                        logger.error("Error in streaming invocation: %s", e, exc_info=True)
+                        yield {"error": f"invoke_step=streaming: {e}"}
+                return stream_events()
+            # No streaming for this agent; fall through to non-stream
 
         invoke_step = "call_process_message"
-        response: InvocationResponse = await _agent.process_message(prompt)
-        
+        response = await agent.process_message(
+            prompt_out,
+            session_id=session_id,
+            system_prompt=system_prompt_out,
+        )
+
         invoke_step = "log_done"
-        logger.info("GLITCH_INVOKE_DONE session_id=%s", session_id_val[:36] if session_id_val else "")
+        logger.info(
+            "GLITCH_INVOKE_DONE session_id=%s agent_id=%s",
+            session_id_val[:36] if session_id_val else "",
+            agent_id,
+            extra={"agent_id": agent_id, "mode_id": mode_id},
+        )
         sys.stdout.flush()
         
         invoke_step = "return_response"
         return response
 
     except Exception as e:
-        logger.error("Error in invoke at invoke_step=%s: %s", invoke_step, e, exc_info=True)
+        logger.error(
+            "Error in invoke at invoke_step=%s: %s",
+            invoke_step,
+            e,
+            exc_info=True,
+            extra={"session_id": session_id[:36] if session_id else "", "agent_id": agent_id or None},
+        )
         return create_error_response(
             error=f"invoke_step={invoke_step}: {e}",
             session_id=_agent.session_id if _agent else "",

@@ -151,13 +151,31 @@ def get_or_create_session(client_id: str) -> str:
     return session_id
 
 
-def invoke_agent(prompt: str, session_id: str, stream: bool = False) -> dict:
-    """Invoke AgentCore Runtime via signed HTTP request."""
+def get_session_agent_mode(session_id: str) -> tuple:
+    """Load agent_id and mode_id for session from DynamoDB. Returns (agent_id, mode_id)."""
+    if not TABLE:
+        return (None, None)
+    try:
+        r = TABLE.get_item(Key={"pk": "SESSION_AGENT", "sk": session_id})
+        if "Item" not in r:
+            return (None, None)
+        item = r["Item"]
+        return (item.get("agent_id"), item.get("mode_id"))
+    except Exception as e:
+        logger.debug("get_session_agent_mode: %s", e)
+        return (None, None)
+
+
+def invoke_agent(prompt: str, session_id: str, stream: bool = False, agent_id: str = None, mode_id: str = None) -> dict:
+    """Invoke AgentCore Runtime via signed HTTP request. Forwards agent_id and mode_id when set."""
     if not AGENTCORE_RUNTIME_ARN:
         return {"error": "Agent runtime not configured"}
-    
+
+    if agent_id is None and mode_id is None:
+        agent_id, mode_id = get_session_agent_mode(session_id)
+
     import urllib.request
-    
+
     try:
         arn_parts = parse_runtime_arn(AGENTCORE_RUNTIME_ARN)
         region = arn_parts['region']
@@ -167,6 +185,10 @@ def invoke_agent(prompt: str, session_id: str, stream: bool = False) -> dict:
         payload = {"prompt": prompt, "session_id": session_id}
         if stream:
             payload["stream"] = True
+        if agent_id:
+            payload["agent_id"] = agent_id
+        if mode_id:
+            payload["mode_id"] = mode_id
         body = json.dumps(payload).encode('utf-8')
         headers = {
             'Content-Type': 'application/json',
@@ -287,11 +309,13 @@ def handler(event, context):
         elif path == '/invocations' and http_method == 'POST':
             prompt = body.get('prompt', '')
             stream = body.get('stream', False)
+            agent_id = body.get('agent_id') or None
+            mode_id = body.get('mode_id') or None
             if not prompt:
                 response_body = {'error': 'No prompt provided'}
                 status_code = 400
             else:
-                response_body = invoke_agent(prompt, session_id, stream=stream)
+                response_body = invoke_agent(prompt, session_id, stream=stream, agent_id=agent_id, mode_id=mode_id)
         
         # API proxy routes: /api/* (from nginx) or direct /status, /telegram/config, etc. (from UI with Lambda base URL)
         elif path.startswith('/api/'):
