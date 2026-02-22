@@ -23,7 +23,7 @@ def get_code_interpreter_tool():
     Returns:
         The code_interpreter tool function, or None if unavailable.
     """
-    global _code_interpreter_tool
+    global _code_interpreter_tool, _code_interpreter_warned
     
     if _code_interpreter_tool is not None:
         return _code_interpreter_tool
@@ -38,7 +38,6 @@ def get_code_interpreter_tool():
         return _code_interpreter_tool
         
     except ImportError:
-        global _code_interpreter_warned
         if not _code_interpreter_warned:
             _code_interpreter_warned = True
             logger.warning(
@@ -47,7 +46,6 @@ def get_code_interpreter_tool():
             )
         return None
     except Exception as e:
-        global _code_interpreter_warned
         if not _code_interpreter_warned:
             _code_interpreter_warned = True
             logger.warning("Failed to initialize Code Interpreter: %s", e)
