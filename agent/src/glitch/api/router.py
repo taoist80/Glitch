@@ -117,6 +117,57 @@ def _get_agent() -> "GlitchAgent":
     return _agent
 
 
+def _normalize_recent_events(events: list) -> list:
+    """Flatten AgentCore get_last_k_turns output to List[Dict] for MemorySummaryResponse.
+
+    get_last_k_turns() returns a list of turns; each turn can be a list of message dicts
+    (or a single message dict). We flatten to one dict per message so recent_events is List[Dict[str, Any]].
+    """
+    out: list = []
+    for item in events:
+        if isinstance(item, list):
+            for msg in item:
+                if isinstance(msg, dict):
+                    normalized = dict(msg)
+                    # content may be {"text": "..."}; UI expects content as string
+                    content = normalized.get("content")
+                    if isinstance(content, dict) and "text" in content:
+                        normalized["content"] = content["text"]
+                    out.append(normalized)
+        elif isinstance(item, dict):
+            normalized = dict(item)
+            content = normalized.get("content")
+            if isinstance(content, dict) and "text" in content:
+                normalized["content"] = content["text"]
+            out.append(normalized)
+    return out
+
+
+def _ensure_recent_events_list_of_dicts(events: list) -> list:
+    """Ensure recent_events is List[Dict]; flatten any nested lists (defensive)."""
+    if not events:
+        return []
+    # If already flat list of dicts, only normalize content
+    result: list = []
+    for item in events:
+        if isinstance(item, dict):
+            result.append(_normalize_content_in_message(dict(item)))
+        elif isinstance(item, list):
+            for msg in item:
+                if isinstance(msg, dict):
+                    result.append(_normalize_content_in_message(dict(msg)))
+    return result
+
+
+def _normalize_content_in_message(msg: dict) -> dict:
+    """Normalize message dict: content {"text": "..."} -> content as string."""
+    out = dict(msg)
+    content = out.get("content")
+    if isinstance(content, dict) and "text" in content:
+        out["content"] = content["text"]
+    return out
+
+
 def _sanitize_for_json(obj: object) -> object:
     """Convert to JSON-serializable types (avoid 500 from Pydantic/Starlette)."""
     if obj is None:
@@ -172,15 +223,10 @@ def _load_telegram_config_for_api():
     import boto3
     from botocore.exceptions import ClientError
 
-    has_token = bool(
-        os.environ.get("GLITCH_TELEGRAM_BOT_TOKEN") or
-        os.environ.get("GLITCH_TELEGRAM_SECRET_NAME")
-    )
-    if not has_token:
-        return None, has_token
-
-    config_table = os.getenv("GLITCH_CONFIG_TABLE", "").strip()
+    config_table = os.getenv("GLITCH_CONFIG_TABLE", "glitch-telegram-config").strip()
     webhook_url_env = os.getenv("GLITCH_TELEGRAM_WEBHOOK_URL", "").strip()
+    # In AWS the runtime gets the bot token from Secrets Manager at startup; env may not be set.
+    # Try DynamoDB first when we have a table name (default glitch-telegram-config).
     if config_table or webhook_url_env:
         try:
             table_name = config_table or "glitch-telegram-config"
@@ -203,6 +249,13 @@ def _load_telegram_config_for_api():
             logger.warning("DynamoDB Telegram config load failed: %s", e)
         except Exception as e:
             logger.warning("DynamoDB Telegram config load failed: %s", e)
+
+    has_token = bool(
+        os.environ.get("GLITCH_TELEGRAM_BOT_TOKEN") or
+        os.environ.get("GLITCH_TELEGRAM_SECRET_NAME")
+    )
+    if not has_token:
+        return None, has_token
     try:
         from glitch.channels.config_manager import ConfigManager
         cm = ConfigManager()
@@ -331,14 +384,26 @@ async def get_memory_summary() -> MemorySummaryResponse:
                 recent_events = await agent.memory_manager.retrieve_recent_events(max_results=15)
             except Exception as e:
                 logger.debug("retrieve_recent_events failed: %s", e)
-        return MemorySummaryResponse(
-            session_id=agent.session_id,
-            memory_id=agent.memory_id,
-            window_size=getattr(agent.memory_manager, "window_size", 20),
-            structured_memory=_sanitize_for_json(raw) if isinstance(raw, dict) else {},
-            agentcore_connected=agent.memory_manager.agentcore_client is not None,
-            recent_events=_sanitize_for_json(recent_events) if isinstance(recent_events, list) else [],
-        )
+        normalized_events = _normalize_recent_events(recent_events) if isinstance(recent_events, list) else []
+        normalized_events = _ensure_recent_events_list_of_dicts(normalized_events)
+        logger.debug(f"Memory summary - normalized_events count: {len(normalized_events)}")
+        if normalized_events:
+            logger.debug(f"Memory summary - first normalized event type: {type(normalized_events[0])}, value: {normalized_events[0]}")
+        
+        # Build the response dict manually to inspect it before Pydantic validation
+        response_data = {
+            "session_id": agent.session_id,
+            "memory_id": agent.memory_id,
+            "window_size": getattr(agent.memory_manager, "window_size", 20),
+            "structured_memory": _sanitize_for_json(raw) if isinstance(raw, dict) else {},
+            "agentcore_connected": agent.memory_manager.agentcore_client is not None,
+            "recent_events": normalized_events,
+        }
+        logger.debug(f"Memory summary - recent_events in response_data type: {type(response_data['recent_events'])}")
+        if response_data['recent_events']:
+            logger.debug(f"Memory summary - first item in response_data recent_events: {type(response_data['recent_events'][0])}")
+        
+        return MemorySummaryResponse(**response_data)
     except HTTPException:
         raise
     except Exception as e:

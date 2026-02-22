@@ -380,33 +380,44 @@ class GlitchAgent:
         Returns:
             InvocationResponse containing message, metrics, and session info
         """
+        step = "init"
         try:
+            step = "create_event_user"
             await self.memory_manager.create_event(
                 event_content=user_message,
                 event_type=EventType.USER_MESSAGE.value,
             )
             
-            # Select and inject skills based on message content
+            step = "select_skills"
             prompt_with_skills = self._select_and_inject_skills(
                 user_message, self._current_model_name
             )
             
-            # Update agent's system prompt with skills
+            step = "set_prompt"
             self.agent.system_prompt = prompt_with_skills
             
+            step = "get_memory_context"
             memory_context = self.memory_manager.get_summary_for_context()
             enriched_message = f"{user_message}\n\n[Structured Memory:\n{memory_context}]"
             
+            step = "invoke_agent"
             max_turns = int(os.getenv("GLITCH_MAX_TURNS", "3"))
             run_kwargs = {} if max_turns <= 0 else {"max_turns": max_turns}
             result = self.agent(enriched_message, **run_kwargs)
+            
+            step = "set_last_result"
             set_last_agent_result(result)
             
-            # Log with skill information
+            step = "get_skill_telemetry"
             skill_info = self._get_skill_telemetry()
+            
+            step = "append_telemetry"
             append_telemetry(result, skill_info=skill_info)
 
+            step = "extract_metrics"
             metrics: InvocationMetrics = extract_metrics_from_result(result)
+            
+            step = "log_metrics"
             log_invocation_metrics(
                 metrics=metrics,
                 user_message=user_message[:100],
@@ -415,24 +426,30 @@ class GlitchAgent:
                 extra=skill_info,
             )
             
+            step = "create_event_agent"
             await self.memory_manager.create_event(
                 event_content=str(result),
                 event_type=EventType.AGENT_RESPONSE.value,
             )
             
+            step = "reset_router"
             self.model_router.reset_turn_counter()
             
+            step = "build_message"
+            message_text = str(result) if not isinstance(result, dict) else (result.get("message") or result.get("response") or str(result))
+            
+            step = "return"
             return InvocationResponse(
-                message=str(result),
+                message=message_text,
                 session_id=self.session_id,
                 memory_id=self.memory_id,
                 metrics=metrics,
             )
             
         except Exception as e:
-            logger.error(f"Error processing message: {e}")
+            logger.error("Error at step=%s: %s", step, e, exc_info=True)
             return create_error_response(
-                error=str(e),
+                error=f"step={step}: {e}",
                 session_id=self.session_id,
                 memory_id=self.memory_id,
             )

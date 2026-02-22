@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 import 'source-map-support/register';
 import * as cdk from 'aws-cdk-lib';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as yaml from 'yaml';
 import { VpcStack } from '../lib/vpc-stack';
 import { SecretsStack } from '../lib/secrets-stack';
 import { TailscaleStack } from '../lib/tailscale-stack';
@@ -9,6 +12,29 @@ import { GlitchStorageStack } from '../lib/storage-stack';
 import { GlitchGatewayStack } from '../lib/gateway-stack';
 import { GlitchUiHostingStack } from '../lib/ui-hosting-stack';
 import { GlitchCertificateStack } from '../lib/certificate-stack';
+import { TelegramWebhookStack } from '../lib/telegram-webhook-stack';
+
+/**
+ * Read AgentCore config from .bedrock_agentcore.yaml to get runtime ARN and execution role.
+ * Falls back to context or hardcoded defaults if file is missing.
+ */
+function getAgentCoreConfig(agentName: string = 'Glitch'): { runtimeArn: string | null; executionRoleArn: string | null } {
+  const configPath = path.resolve(__dirname, '../../agent/.bedrock_agentcore.yaml');
+  try {
+    if (fs.existsSync(configPath)) {
+      const content = fs.readFileSync(configPath, 'utf8');
+      const config = yaml.parse(content);
+      const agent = config?.agents?.[agentName];
+      return {
+        runtimeArn: agent?.bedrock_agentcore?.agent_arn ?? null,
+        executionRoleArn: agent?.aws?.execution_role ?? null,
+      };
+    }
+  } catch (e) {
+    console.warn(`Warning: Could not read AgentCore config from ${configPath}:`, e);
+  }
+  return { runtimeArn: null, executionRoleArn: null };
+}
 
 const app = new cdk.App();
 
@@ -20,6 +46,9 @@ const env = {
 // Custom domain configuration
 const customDomain = 'glitch.awoo.agency';
 
+// Read AgentCore config from .bedrock_agentcore.yaml
+const agentCoreConfig = getAgentCoreConfig('Glitch');
+
 const vpcStack = new VpcStack(app, 'GlitchVpcStack', {
   env,
   description: 'VPC infrastructure for AgentCore Glitch',
@@ -28,12 +57,21 @@ const vpcStack = new VpcStack(app, 'GlitchVpcStack', {
 // Default AgentCore SDK runtime role (from .bedrock_agentcore.yaml); grant it Telegram secret read
 const defaultExecutionRoleArn =
   app.node.tryGetContext('glitchDefaultExecutionRoleArn') ??
+  agentCoreConfig.executionRoleArn ??
   `arn:aws:iam::${env.account}:role/AmazonBedrockAgentCoreSDKRuntime-${env.region}-14980158e2`;
 
-// AgentCore runtime ARN (from .bedrock_agentcore.yaml or agentcore runtime list)
+// AgentCore runtime ARN (from .bedrock_agentcore.yaml or context)
 const agentCoreRuntimeArn =
   app.node.tryGetContext('glitchAgentCoreRuntimeArn') ??
-  `arn:aws:bedrock-agentcore:${env.region}:${env.account}:runtime/Glitch-78q5TgEa8M`;
+  agentCoreConfig.runtimeArn;
+
+if (!agentCoreRuntimeArn) {
+  throw new Error(
+    'AgentCore runtime ARN not found. Either:\n' +
+    '  1. Deploy the agent first: cd agent && agentcore deploy\n' +
+    '  2. Or pass via context: -c glitchAgentCoreRuntimeArn=arn:aws:bedrock-agentcore:...'
+  );
+}
 
 const secretsStack = new SecretsStack(app, 'GlitchSecretsStack', {
   env,
@@ -54,6 +92,17 @@ const gatewayStack = new GlitchGatewayStack(app, 'GlitchGatewayStack', {
   description: 'Gateway Lambda (invocations, /api/*, keepalive)',
 });
 gatewayStack.addDependency(storageStack);
+
+const telegramWebhookStack = new TelegramWebhookStack(app, 'GlitchTelegramWebhookStack', {
+  env,
+  configTable: storageStack.configTable,
+  telegramBotTokenSecret: secretsStack.telegramBotTokenSecret,
+  agentCoreRuntimeArn,
+  defaultExecutionRoleArn,
+  description: 'Telegram webhook Lambda (receives updates, invokes AgentCore runtime)',
+});
+telegramWebhookStack.addDependency(storageStack);
+telegramWebhookStack.addDependency(secretsStack);
 
 // Extract hostname from Lambda Function URL (https://xxx.lambda-url.region.on.aws/)
 const gatewayUrlHostname = cdk.Fn.select(

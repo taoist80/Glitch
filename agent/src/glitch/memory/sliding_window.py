@@ -488,21 +488,41 @@ class GlitchMemoryManager:
         """
         summary_parts = []
         
-        if self.structured_memory.session_goal:
-            summary_parts.append(f"Goal: {self.structured_memory.session_goal}")
-        
-        if self.structured_memory.facts:
-            summary_parts.append(f"Facts: {', '.join(self.structured_memory.facts)}")
-        
-        if self.structured_memory.constraints:
-            summary_parts.append(f"Constraints: {', '.join(self.structured_memory.constraints)}")
-        
-        if self.structured_memory.decisions:
-            recent_decisions = self.structured_memory.decisions[-3:]
-            decisions_str = "; ".join([d["decision"] for d in recent_decisions])
-            summary_parts.append(f"Recent Decisions: {decisions_str}")
-        
-        if self.structured_memory.open_questions:
-            summary_parts.append(f"Open Questions: {', '.join(self.structured_memory.open_questions)}")
+        try:
+            if self.structured_memory.session_goal:
+                goal = self.structured_memory.session_goal
+                summary_parts.append(f"Goal: {goal if isinstance(goal, str) else str(goal)}")
+            
+            if self.structured_memory.facts:
+                facts_str = ", ".join([
+                    f if isinstance(f, str) else str(f)
+                    for f in self.structured_memory.facts
+                ])
+                summary_parts.append(f"Facts: {facts_str}")
+            
+            if self.structured_memory.constraints:
+                constraints_str = ", ".join([
+                    c if isinstance(c, str) else str(c)
+                    for c in self.structured_memory.constraints
+                ])
+                summary_parts.append(f"Constraints: {constraints_str}")
+            
+            if self.structured_memory.decisions:
+                recent_decisions = self.structured_memory.decisions[-3:]
+                decisions_str = "; ".join([
+                    d["decision"] if isinstance(d, dict) and "decision" in d else str(d)
+                    for d in recent_decisions
+                ])
+                summary_parts.append(f"Recent Decisions: {decisions_str}")
+            
+            if self.structured_memory.open_questions:
+                questions_str = ", ".join([
+                    q if isinstance(q, str) else str(q)
+                    for q in self.structured_memory.open_questions
+                ])
+                summary_parts.append(f"Open Questions: {questions_str}")
+        except Exception as e:
+            logger.error("get_summary_for_context error: %s (type=%s)", e, type(e).__name__, exc_info=True)
+            return f"Memory summary error: {e}"
         
         return "\n".join(summary_parts) if summary_parts else "No structured memory yet."

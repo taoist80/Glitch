@@ -29,7 +29,7 @@ export class GlitchGatewayStack extends cdk.Stack {
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'index.handler',
       code: lambda.Code.fromInline(this.getLambdaCode()),
-      timeout: cdk.Duration.seconds(120),
+      timeout: cdk.Duration.seconds(300),
       memorySize: 512,
       environment: {
         CONFIG_TABLE_NAME: configTable.tableName,
@@ -126,15 +126,18 @@ def parse_runtime_arn(runtime_arn: str) -> dict:
 
 
 def get_or_create_session(client_id: str) -> str:
-    """Get existing session_id for client or create new one."""
+    """Get existing session_id for client or create new one. AgentCore requires length >= 33."""
     try:
         response = table.get_item(Key={'pk': f'UI_SESSION#{client_id}', 'sk': 'session'})
         if 'Item' in response:
-            return response['Item']['session_id']
+            session_id = response['Item']['session_id']
+            if len(session_id) >= 33:
+                return session_id
+            # Existing short session_id; replace with valid one and update DB
     except Exception as e:
         logger.warning(f"Failed to get session: {e}")
     
-    session_id = f"ui-{client_id}-{uuid.uuid4().hex[:8]}"
+    session_id = f"ui-{client_id}-{uuid.uuid4().hex}"
     try:
         table.put_item(Item={
             'pk': f'UI_SESSION#{client_id}',
@@ -176,12 +179,15 @@ def invoke_agent(prompt: str, session_id: str, stream: bool = False) -> dict:
         req = urllib.request.Request(
             url, data=body, headers=dict(aws_request.headers), method='POST'
         )
-        with urllib.request.urlopen(req, timeout=90) as response:
+        with urllib.request.urlopen(req, timeout=180) as response:
             result = json.loads(response.read().decode())
+            logger.info(f"Agent response keys: {list(result.keys()) if isinstance(result, dict) else 'not-dict'}")
+            if isinstance(result, dict) and result.get('error'):
+                logger.warning(f"Agent returned error: {result.get('error')}")
             return result if isinstance(result, dict) else {"message": str(result)}
     except Exception as e:
         logger.error(f"Failed to invoke agent: {e}", exc_info=True)
-        return {"error": str(e)}
+        return {"error": f"gateway_invoke_agent: {e}"}
 
 
 def invoke_api(path: str, method: str, body: dict, session_id: str) -> dict:
@@ -190,6 +196,7 @@ def invoke_api(path: str, method: str, body: dict, session_id: str) -> dict:
         return {"error": "Agent runtime not configured"}
     
     import urllib.request
+    import urllib.error
     
     try:
         arn_parts = parse_runtime_arn(AGENTCORE_RUNTIME_ARN)
@@ -219,9 +226,17 @@ def invoke_api(path: str, method: str, body: dict, session_id: str) -> dict:
         with urllib.request.urlopen(req, timeout=60) as response:
             result = json.loads(response.read().decode())
             return result if isinstance(result, dict) else {"data": result}
+    except urllib.error.HTTPError as e:
+        err_body = e.fp.read().decode() if e.fp else ''
+        try:
+            e.fp.close()
+        except Exception:
+            pass
+        logger.error(f"AgentCore HTTP {e.code}: {e.reason} body=%s", err_body[:500])
+        return {"error": f"gateway_invoke_api: AgentCore HTTP {e.code}: {e.reason}. {err_body[:500]}"}
     except Exception as e:
         logger.error(f"Failed to invoke API: {e}", exc_info=True)
-        return {"error": str(e)}
+        return {"error": f"gateway_invoke_api: {e}"}
 
 
 def decimal_default(obj):
@@ -278,10 +293,12 @@ def handler(event, context):
             else:
                 response_body = invoke_agent(prompt, session_id, stream=stream)
         
-        # API proxy routes
+        # API proxy routes: /api/* (from nginx) or direct /status, /telegram/config, etc. (from UI with Lambda base URL)
         elif path.startswith('/api/'):
-            api_path = path[4:]  # Remove /api prefix
+            api_path = '/' + path[5:]
             response_body = invoke_api(api_path, http_method, body, session_id)
+        elif path in ('/status', '/telegram/config', '/ollama/health', '/memory/summary', '/telemetry', '/streaming-info', '/mcp/servers') or path.startswith('/skills'):
+            response_body = invoke_api(path, http_method, body, session_id)
         
         else:
             response_body = {'error': f'Unknown path: {path}'}
@@ -289,7 +306,7 @@ def handler(event, context):
     
     except Exception as e:
         logger.error(f"Handler error: {e}", exc_info=True)
-        response_body = {'error': str(e)}
+        response_body = {'error': f'gateway_handler: {e}'}
         status_code = 500
     
     return {

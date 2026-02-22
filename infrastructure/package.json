@@ -21,7 +21,8 @@
   "license": "MIT",
   "dependencies": {
     "aws-cdk-lib": "catalog:",
-    "constructs": "catalog:"
+    "constructs": "catalog:",
+    "yaml": "^2.8.2"
   },
   "devDependencies": {
     "@types/node": "catalog:",

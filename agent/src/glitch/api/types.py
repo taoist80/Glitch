@@ -2,7 +2,10 @@
 
 from typing import Dict, List, Optional, Any
 from typing_extensions import TypedDict
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class StatusResponse(BaseModel):
@@ -62,6 +65,33 @@ class MemorySummaryResponse(BaseModel):
     structured_memory: Dict[str, Any]
     agentcore_connected: bool
     recent_events: List[Dict[str, Any]] = []
+    
+    @model_validator(mode="before")
+    @classmethod
+    def flatten_recent_events(cls, data: Any) -> Any:
+        """Flatten recent_events to List[Dict] before field validation. Return new dict so Pydantic uses it."""
+        if not isinstance(data, dict):
+            return data
+        recent_events = data.get("recent_events", [])
+        if not isinstance(recent_events, list):
+            return {**data, "recent_events": []}
+        flattened: List[Dict[str, Any]] = []
+        for item in recent_events:
+            if isinstance(item, dict):
+                normalized = dict(item)
+                content = normalized.get("content")
+                if isinstance(content, dict) and "text" in content:
+                    normalized["content"] = content["text"]
+                flattened.append(normalized)
+            elif isinstance(item, list):
+                for msg in item:
+                    if isinstance(msg, dict):
+                        normalized = dict(msg)
+                        content = normalized.get("content")
+                        if isinstance(content, dict) and "text" in content:
+                            normalized["content"] = content["text"]
+                        flattened.append(normalized)
+        return {**data, "recent_events": flattened}
 
 
 class MCPServerInfo(BaseModel):

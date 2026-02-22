@@ -26,4 +26,4 @@ COPY poet-soul.md /app/poet-soul.md
 
 EXPOSE 8080
 
-CMD ["opentelemetry-instrument", "python", "-m", "main"]
+CMD ["python", "-m", "main"]

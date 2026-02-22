@@ -24,6 +24,7 @@ Dataflow:
 
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any, AsyncIterator, Optional, Union
 
@@ -225,59 +226,81 @@ async def invoke(payload: InvocationRequest, context: RequestContext) -> Invocat
         InvocationResponse for chat, or dict for _ui_api_request API responses.
     """
     global _agent
-
-    # Handle UI API requests (for Lambda UI backend)
-    if "_ui_api_request" in payload:
-        return await _handle_ui_api_request(payload["_ui_api_request"])
-    
-    prompt_preview = (payload.get("prompt") or "")[:80]
-    logger.info("Received invocation: prompt=%s session_id=%s", repr(prompt_preview), payload.get("session_id"))
-
-    # Keepalive from scheduled Lambda to avoid idleRuntimeSessionTimeout (default 15 min).
-    session_id = payload.get("session_id") or ""
-    if session_id == "system:keepalive":
-        prompt = (payload.get("prompt") or "").strip().lower()
-        if prompt in ("", "ping", "keepalive"):
-            logger.debug("Keepalive received, skipping agent")
-            sid = _agent.session_id if _agent else ""
-            mid = _agent.memory_id if _agent else ""
-            return create_keepalive_response(session_id=sid, memory_id=mid)
-
-    if _agent is None:
-        return create_error_response(
-            error="Agent not initialized",
-            session_id="",
-            memory_id="",
-        )
-    
-    prompt = payload.get("prompt", "")
-    
-    if not prompt:
-        return create_error_response(
-            error="No prompt provided",
-            session_id=_agent.session_id,
-            memory_id=_agent.memory_id,
-        )
-    
-    # Optional streaming: when payload has "stream": true, yield events (AgentCore best practice).
-    if payload.get("stream"):
-        async def stream_events() -> AsyncIterator[dict]:
-            try:
-                async for event in _agent.process_message_stream(prompt):
-                    yield event
-            except Exception as e:
-                logger.error("Error in streaming invocation: %s", e, exc_info=True)
-                yield {"error": str(e)}
-        return stream_events()
+    invoke_step = "entry"
 
     try:
+        invoke_step = "get_session_id"
+        # Distinctive log for CloudWatch: confirms this container is handling invocations (search for GLITCH_INVOKE_ENTRY)
+        session_id_val = payload.get("session_id") or ""
+        logger.info("GLITCH_INVOKE_ENTRY session_id=%s has_ui_api=%s", session_id_val[:36] if session_id_val else "", "_ui_api_request" in payload)
+        sys.stdout.flush()
+        sys.stderr.flush()
+
+        invoke_step = "check_ui_api"
+        # Handle UI API requests (for Lambda UI backend)
+        if "_ui_api_request" in payload:
+            return await _handle_ui_api_request(payload["_ui_api_request"])
+        
+        invoke_step = "log_prompt"
+        prompt_preview = (payload.get("prompt") or "")[:80]
+        logger.info("Received invocation: prompt=%s session_id=%s", repr(prompt_preview), payload.get("session_id"))
+        sys.stdout.flush()
+
+        invoke_step = "check_keepalive"
+        # Keepalive from scheduled Lambda to avoid idleRuntimeSessionTimeout (default 15 min).
+        session_id = payload.get("session_id") or ""
+        if session_id == "system:keepalive":
+            prompt = (payload.get("prompt") or "").strip().lower()
+            if prompt in ("", "ping", "keepalive"):
+                logger.debug("Keepalive received, skipping agent")
+                sid = _agent.session_id if _agent else ""
+                mid = _agent.memory_id if _agent else ""
+                return create_keepalive_response(session_id=sid, memory_id=mid)
+
+        invoke_step = "check_agent"
+        if _agent is None:
+            return create_error_response(
+                error="invoke_step=check_agent: Agent not initialized",
+                session_id="",
+                memory_id="",
+            )
+        
+        invoke_step = "get_prompt"
+        prompt = payload.get("prompt", "")
+        
+        if not prompt:
+            return create_error_response(
+                error="invoke_step=get_prompt: No prompt provided",
+                session_id=_agent.session_id,
+                memory_id=_agent.memory_id,
+            )
+        
+        invoke_step = "check_streaming"
+        # Optional streaming: when payload has "stream": true, yield events (AgentCore best practice).
+        if payload.get("stream"):
+            async def stream_events() -> AsyncIterator[dict]:
+                try:
+                    async for event in _agent.process_message_stream(prompt):
+                        yield event
+                except Exception as e:
+                    logger.error("Error in streaming invocation: %s", e, exc_info=True)
+                    yield {"error": f"invoke_step=streaming: {e}"}
+            return stream_events()
+
+        invoke_step = "call_process_message"
         response: InvocationResponse = await _agent.process_message(prompt)
+        
+        invoke_step = "log_done"
+        logger.info("GLITCH_INVOKE_DONE session_id=%s", session_id_val[:36] if session_id_val else "")
+        sys.stdout.flush()
+        
+        invoke_step = "return_response"
         return response
 
     except Exception as e:
-        logger.error("Error processing invocation: %s", e, exc_info=True)
+        logger.error("Error in invoke at invoke_step=%s: %s", invoke_step, e, exc_info=True)
         return create_error_response(
-            error=str(e),
+            error=f"invoke_step={invoke_step}: {e}",
             session_id=_agent.session_id if _agent else "",
             memory_id=_agent.memory_id if _agent else "",
         )

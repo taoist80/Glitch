@@ -133,6 +133,120 @@ def _get_logs_client():
         return None
 
 
+# Default log group for direct telemetry writes (runtime has CreateLogGroup/PutLogEvents via agentcore-stack)
+_DEFAULT_TELEMETRY_LOG_GROUP = "/glitch/telemetry"
+_put_log_sequence_tokens: Dict[str, str] = {}
+
+
+def _ensure_log_group(client: Any, log_group: str) -> bool:
+    """Ensure the log group exists, creating it if necessary. Returns True on success."""
+    try:
+        client.create_log_group(logGroupName=log_group)
+        logger.info("Created CloudWatch log group: %s", log_group)
+    except Exception as e:
+        err_code = getattr(e, "response", {}).get("Error", {}).get("Code", "")
+        if err_code == "ResourceAlreadyExistsException":
+            pass
+        else:
+            logger.warning("Failed to create log group %s: %s", log_group, e)
+            return False
+    return True
+
+
+def _put_invocation_metrics_to_cloudwatch(structured_log: Dict[str, Any]) -> None:
+    """Write invocation_metrics event directly to CloudWatch Logs so it appears even when runtime stdout is not captured."""
+    client = _get_logs_client()
+    log_group = os.environ.get("GLITCH_TELEMETRY_LOG_GROUP", _DEFAULT_TELEMETRY_LOG_GROUP)
+    if not client:
+        return
+    stream_name = "invocations/" + datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    ts_ms = int(structured_log.get("timestamp", time.time()) * 1000)
+    message = json.dumps(structured_log)
+    try:
+        kwargs = {
+            "logGroupName": log_group,
+            "logStreamName": stream_name,
+            "logEvents": [{"timestamp": ts_ms, "message": message}],
+        }
+        token = _put_log_sequence_tokens.get(stream_name)
+        if token:
+            kwargs["sequenceToken"] = token
+        resp = client.put_log_events(**kwargs)
+        next_token = resp.get("nextSequenceToken")
+        if next_token:
+            _put_log_sequence_tokens[stream_name] = next_token
+    except Exception as e:
+        err_code = getattr(e, "response", {}).get("Error", {}).get("Code", "")
+        if err_code == "ResourceNotFoundException":
+            if not _ensure_log_group(client, log_group):
+                logger.warning("Failed to write telemetry to CloudWatch (log group missing): %s", e)
+                return
+            try:
+                client.create_log_stream(logGroupName=log_group, logStreamName=stream_name)
+                resp = client.put_log_events(
+                    logGroupName=log_group,
+                    logStreamName=stream_name,
+                    logEvents=[{"timestamp": ts_ms, "message": message}],
+                )
+                next_token = resp.get("nextSequenceToken")
+                if next_token:
+                    _put_log_sequence_tokens[stream_name] = next_token
+            except Exception as e2:
+                logger.warning("Failed to write telemetry to CloudWatch: %s", e2)
+        else:
+            logger.warning("Failed to write telemetry to CloudWatch: %s", e)
+
+
+def write_startup_heartbeat_to_cloudwatch() -> bool:
+    """Write one event to /glitch/telemetry at agent startup so you can verify log group and IAM.
+    Call once after agent creation (e.g. from main). Returns True if write succeeded."""
+    client = _get_logs_client()
+    log_group = os.environ.get("GLITCH_TELEMETRY_LOG_GROUP", _DEFAULT_TELEMETRY_LOG_GROUP)
+    if not client:
+        logger.warning("CloudWatch Logs client not available; startup heartbeat skipped")
+        return False
+    stream_name = "invocations/" + datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    ts = time.time()
+    ts_ms = int(ts * 1000)
+    message = json.dumps({
+        "event_type": "agent_startup",
+        "timestamp": ts,
+        "message": "Glitch agent started; CloudWatch write path OK",
+    })
+    try:
+        client.put_log_events(
+            logGroupName=log_group,
+            logStreamName=stream_name,
+            logEvents=[{"timestamp": ts_ms, "message": message}],
+        )
+        logger.info("Startup heartbeat written to %s stream %s", log_group, stream_name)
+        return True
+    except Exception as e:
+        err_code = getattr(e, "response", {}).get("Error", {}).get("Code", "")
+        if err_code == "ResourceNotFoundException":
+            _ensure_log_group(client, log_group)
+            try:
+                client.create_log_stream(logGroupName=log_group, logStreamName=stream_name)
+            except Exception as e2:
+                err2 = getattr(e2, "response", {}).get("Error", {}).get("Code", "")
+                if err2 != "ResourceAlreadyExistsException":
+                    logger.warning("Startup heartbeat: create_log_stream failed: %s", e2)
+                    return False
+            try:
+                client.put_log_events(
+                    logGroupName=log_group,
+                    logStreamName=stream_name,
+                    logEvents=[{"timestamp": ts_ms, "message": message}],
+                )
+                logger.info("Startup heartbeat written to %s stream %s", log_group, stream_name)
+                return True
+            except Exception as e3:
+                logger.warning("Startup heartbeat failed (CloudWatch): %s", e3)
+                return False
+        logger.warning("Startup heartbeat failed (CloudWatch): %s", e)
+        return False
+
+
 def query_cloudwatch_telemetry(
     period: str,
     log_group: Optional[str] = None,
@@ -690,11 +804,16 @@ def extract_metrics_from_result(result: Any) -> InvocationMetrics:
     """
     if result is None:
         return create_empty_metrics()
+    # Agent may return a plain string in some edge cases; avoid indexing
+    if isinstance(result, str):
+        return create_empty_metrics()
 
     try:
         if not hasattr(result, "metrics") or not result.metrics:
             return create_empty_metrics()
         summary = result.metrics.get_summary()
+        if not isinstance(summary, dict):
+            return create_empty_metrics()
         usage = summary.get("accumulated_usage") or {}
         acc_metrics = summary.get("accumulated_metrics") or {}
 
@@ -747,6 +866,9 @@ def log_invocation_metrics(
         session_id: Session identifier for correlation
         extra: Optional extra data to include in logs (e.g., skill selection info)
     """
+    if not isinstance(metrics, dict):
+        logger.warning("log_invocation_metrics: metrics is not a dict (type=%s), skipping", type(metrics).__name__)
+        return
     token_usage = metrics.get("token_usage", create_empty_token_usage())
     
     logger.info(
@@ -777,6 +899,9 @@ def log_invocation_metrics(
     if extra:
         structured_log["skill_info"] = extra
     logger.info(json.dumps(structured_log))
+
+    # Direct write to /glitch/telemetry so metrics appear even when runtime stdout is not captured by AgentCore
+    _put_invocation_metrics_to_cloudwatch(structured_log)
 
     tool_usage = metrics.get("tool_usage", {})
     if tool_usage:

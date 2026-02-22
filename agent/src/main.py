@@ -34,7 +34,7 @@ from typing import Optional
 
 from glitch.agent import create_glitch_agent, GlitchAgent
 from glitch.poet_agent import create_poet_agent
-from glitch.telemetry import setup_telemetry
+from glitch.telemetry import setup_telemetry, write_startup_heartbeat_to_cloudwatch
 from glitch.types import (
     TelemetryConfig,
     ServerConfig,
@@ -245,7 +245,14 @@ async def main() -> None:
     agent = create_glitch_agent()
     
     logger.info(f"Glitch agent initialized for session: {agent.session_id}")
-    
+    sys.stdout.flush()
+    sys.stderr.flush()
+
+    # Write one event to /glitch/telemetry so you can verify CloudWatch log group and IAM
+    write_startup_heartbeat_to_cloudwatch()
+    sys.stdout.flush()
+    sys.stderr.flush()
+
     # Skip blocking connectivity check on startup - run on-demand via /status command instead
     # connectivity = await agent.check_connectivity()
     # logger.info(f"Connectivity check: {connectivity}")
