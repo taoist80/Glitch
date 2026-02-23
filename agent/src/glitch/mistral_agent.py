@@ -1,6 +1,6 @@
 """Mistral chat agent — one per process, session-keyed conversation buffer.
 
-Backend: 10.10.110.202, model mistral-nemo-12b.
+Backend: 10.10.110.202, model mistral-nemo:12b.
 Prefer OpenAI-format /v1/chat/completions (port 8080); fallback Ollama native (port 11434).
 """
 
@@ -22,14 +22,14 @@ from glitch.types import InvocationResponse, create_error_response
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MISTRAL_MODEL = "mistral-nemo-12b"
+DEFAULT_MISTRAL_MODEL = "mistral-nemo:12b"
 ENV_MISTRAL_MODEL = "GLITCH_MISTRAL_OLLAMA_MODEL"
 ENV_USE_OPENAI_FORMAT = "GLITCH_MISTRAL_OPENAI_FORMAT"  # "1" or "true" to use port 8080
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant. Be concise and accurate."
 
 
 class MistralAgent:
-    """Chat agent backed by Mistral (mistral-nemo-12b) at 10.10.110.202.
+    """Chat agent backed by Mistral (mistral-nemo:12b) at 10.10.110.202.
 
     Option A: one agent per process; conversation history keyed by session_id.
     """
@@ -44,13 +44,9 @@ class MistralAgent:
     ):
         self.host = host
         self.model = model or os.getenv(ENV_MISTRAL_MODEL) or DEFAULT_MISTRAL_MODEL
-        if port is not None:
-            self.port = port
-        elif use_openai_format is not False and os.getenv(ENV_USE_OPENAI_FORMAT, "").lower() in ("1", "true"):
-            self.port = DEFAULT_OPENAI_PORT
-        else:
-            # Default: try OpenAI format first (8080); caller can override port to 11434 for Ollama native
-            self.port = DEFAULT_OPENAI_PORT
+        # Mistral host (10.10.110.202) only has Ollama native API on port 11434
+        # (no OpenAI-compatible endpoint on port 8080 like LLaVA has)
+        self.port = port if port is not None else OLLAMA_NATIVE_PORT
         self.timeout = timeout
         self._buffer: Dict[str, List[ChatMessage]] = {}
         logger.info(
@@ -91,15 +87,24 @@ class MistralAgent:
             "max_tokens": 2048,
             "temperature": 0.7,
         }
+        url = self._openai_url()
+        logger.info("Mistral OpenAI-format request starting: %s", url)
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
-                resp = await client.post(self._openai_url(), json=payload)
+                resp = await client.post(url, json=payload)
                 resp.raise_for_status()
+                logger.info("Mistral OpenAI-format request succeeded")
             except httpx.HTTPStatusError as e:
                 logger.warning("OpenAI-format request failed (status %s), trying Ollama native", e.response.status_code)
                 return await self._call_ollama_native(messages, session_id)
+            except httpx.TimeoutException as e:
+                logger.error("Mistral OpenAI-format TIMEOUT after %ss connecting to %s: %s", self.timeout, url, e, exc_info=True)
+                return await self._call_ollama_native(messages, session_id)
+            except httpx.ConnectError as e:
+                logger.error("Mistral OpenAI-format CONNECT ERROR to %s: %s", url, e, exc_info=True)
+                return await self._call_ollama_native(messages, session_id)
             except Exception as e:
-                logger.warning("OpenAI-format request failed: %s, trying Ollama native", e)
+                logger.error("Mistral OpenAI-format request failed: %s (type: %s)", e, type(e).__name__, exc_info=True)
                 return await self._call_ollama_native(messages, session_id)
         data: ChatCompletionResponse = resp.json()
         choices = data.get("choices") or []
@@ -132,31 +137,36 @@ class MistralAgent:
         messages: List[ChatMessage],
         session_id: str,
     ) -> InvocationResponse:
-        # Build a single prompt from messages for /api/generate
-        parts: List[str] = []
-        for m in messages:
-            role = m.get("role", "user")
-            content = m.get("content")
-            if isinstance(content, str):
-                parts.append(f"({role})\n{content}")
-            else:
-                parts.append(f"({role})\n[non-text content omitted]")
-        prompt = "\n\n".join(parts)
+        # Use Ollama's native /api/chat endpoint which accepts messages array
         payload = {
             "model": self.model,
-            "prompt": prompt,
+            "messages": messages,
             "stream": False,
         }
-        ollama_url = f"http://{self.host}:{OLLAMA_NATIVE_PORT}/api/generate"
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        ollama_url = f"http://{self.host}:{OLLAMA_NATIVE_PORT}/api/chat"
+        logger.info("Mistral Ollama native request starting: %s (model: %s)", ollama_url, self.model)
+        # Set explicit timeouts: 30s to establish connection, 120s total for response
+        timeout = httpx.Timeout(timeout=self.timeout, connect=30.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
             try:
                 resp = await client.post(ollama_url, json=payload)
                 resp.raise_for_status()
+                logger.info("Mistral Ollama native request succeeded")
+            except httpx.TimeoutException as e:
+                logger.error("Mistral Ollama native TIMEOUT after %ss connecting to %s: %s", self.timeout, ollama_url, str(e), exc_info=True)
+                return create_error_response(f"Mistral request timed out after {self.timeout}s: {e}", session_id=session_id)
+            except httpx.ConnectError as e:
+                logger.error("Mistral Ollama native CONNECT ERROR to %s: %s", ollama_url, str(e), exc_info=True)
+                return create_error_response(f"Cannot connect to Mistral at {ollama_url}: {e}", session_id=session_id)
+            except httpx.HTTPStatusError as e:
+                logger.error("Mistral Ollama native HTTP ERROR %s: %s", e.response.status_code, str(e), exc_info=True)
+                return create_error_response(f"Mistral HTTP error {e.response.status_code}: {e.response.text[:200]}", session_id=session_id)
             except Exception as e:
-                logger.error("Mistral Ollama native request failed: %s", e, extra={"agent_id": "mistral", "session_id": session_id})
-                return create_error_response(f"Mistral request failed: {e}", session_id=session_id)
+                logger.error("Mistral Ollama native request failed: %s (type: %s)", str(e), type(e).__name__, exc_info=True)
+                return create_error_response(f"Mistral request failed: {type(e).__name__}: {e}", session_id=session_id)
         data = resp.json()
-        content = data.get("response", "")
+        message = data.get("message", {})
+        content = message.get("content", "")
         return InvocationResponse(
             message=content or "No response from Mistral",
             session_id=session_id,
@@ -185,7 +195,8 @@ class MistralAgent:
     ) -> InvocationResponse:
         sid = session_id or "default"
         messages = self._get_messages(sid, prompt, system_prompt=system_prompt or DEFAULT_SYSTEM_PROMPT)
-        result = await self._call_openai_format(messages, sid)
+        # Use Ollama's native /api/chat endpoint (port 11434)
+        result = await self._call_ollama_native(messages, sid)
         if "error" not in result and result.get("message"):
             self._append_turn(sid, prompt, result["message"])
         return result

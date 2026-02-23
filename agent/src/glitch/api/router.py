@@ -159,10 +159,9 @@ def setup_api(agent: "GlitchAgent") -> None:
     global _agent, _disabled_skills
     _agent = agent
     
-    # Load disabled skills from DynamoDB if available
-    _disabled_skills = _load_disabled_skills_from_dynamodb()
-    if _disabled_skills:
-        logger.info("Loaded %d disabled skills from DynamoDB", len(_disabled_skills))
+    # Defer loading disabled skills until first API call to avoid blocking startup
+    # Skills will be loaded lazily in get_skills() endpoint
+    _disabled_skills = set()
     
     logger.info("API router initialized with agent")
 

@@ -134,6 +134,7 @@ const tailscaleStack = new TailscaleStack(app, 'GlitchTailscaleStack', {
   env,
   vpc: vpcStack.vpc,
   tailscaleAuthKeySecret: secretsStack.tailscaleAuthKeySecret,
+  agentCoreSecurityGroup: vpcStack.agentCoreSecurityGroup,
   agentCoreRuntimeArn,
   instanceBootstrapVersion: '8',
   gatewayFunctionUrl: gatewayStack.functionUrl,
@@ -152,7 +153,7 @@ tailscaleStack.addDependency(uiHostingStack);
 const agentCoreStack = new AgentCoreStack(app, 'GlitchAgentCoreStack', {
   env,
   vpc: vpcStack.vpc,
-  tailscaleSecurityGroup: tailscaleStack.securityGroup,
+  agentCoreSecurityGroup: vpcStack.agentCoreSecurityGroup,
   description: 'AgentCore Runtime resources',
 });
 agentCoreStack.addDependency(vpcStack);

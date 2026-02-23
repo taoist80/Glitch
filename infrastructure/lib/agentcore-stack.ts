@@ -5,54 +5,31 @@ import { Construct } from 'constructs';
 
 export interface AgentCoreStackProps extends cdk.StackProps {
   readonly vpc: ec2.IVpc;
-  readonly tailscaleSecurityGroup: ec2.ISecurityGroup;
+  readonly agentCoreSecurityGroup: ec2.ISecurityGroup;
 }
 
 export class AgentCoreStack extends cdk.Stack {
   public readonly agentRuntimeRole: iam.Role;
-  public readonly agentCoreSecurityGroup: ec2.SecurityGroup;
 
   constructor(scope: Construct, id: string, props: AgentCoreStackProps) {
     super(scope, id, props);
 
-    const { vpc, tailscaleSecurityGroup } = props;
+    const { vpc, agentCoreSecurityGroup } = props;
 
-    this.agentCoreSecurityGroup = new ec2.SecurityGroup(this, 'AgentCoreSecurityGroup', {
-      vpc,
-      description: 'Security group for AgentCore Runtime ENIs',
-      allowAllOutbound: false,
-    });
-
-    this.agentCoreSecurityGroup.addEgressRule(
-      ec2.Peer.anyIpv4(),
-      ec2.Port.tcp(443),
-      'HTTPS for Bedrock API calls'
-    );
-
-    this.agentCoreSecurityGroup.addEgressRule(
-      tailscaleSecurityGroup,
-      ec2.Port.allTraffic(),
-      'Allow all traffic to Tailscale connector'
-    );
-
-    // On-prem Ollama hosts via Tailscale routing (10.10.110.0/24 routes through Tailscale ENI)
-    // AgentCore needs explicit egress to the destination CIDR, not just to the Tailscale SG
-    this.agentCoreSecurityGroup.addEgressRule(
-      ec2.Peer.ipv4('10.10.110.0/24'),
+    // Allow egress to EC2 Tailscale HTTP proxy for Ollama connectivity
+    agentCoreSecurityGroup.addEgressRule(
+      ec2.Peer.ipv4(vpc.vpcCidrBlock),
       ec2.Port.tcp(11434),
-      'Ollama native API to on-prem chat host (10.10.110.202)'
+      'Ollama native API via EC2 nginx proxy'
     );
-    this.agentCoreSecurityGroup.addEgressRule(
-      ec2.Peer.ipv4('10.10.110.0/24'),
+    agentCoreSecurityGroup.addEgressRule(
+      ec2.Peer.ipv4(vpc.vpcCidrBlock),
       ec2.Port.tcp(8080),
-      'OpenAI-compatible API to on-prem vision host (10.10.110.137)'
+      'OpenAI-compatible API via EC2 nginx proxy'
     );
 
-    this.agentCoreSecurityGroup.addIngressRule(
-      tailscaleSecurityGroup,
-      ec2.Port.tcp(443),
-      'Allow HTTPS from Tailscale proxy'
-    );
+    // Note: Ingress from Tailscale proxy is configured in TailscaleStack
+    // to avoid circular dependency (TailscaleStack.securityGroup.addIngressRule(agentCoreSecurityGroup))
 
     this.agentRuntimeRole = new iam.Role(this, 'AgentRuntimeRole', {
       assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
@@ -166,15 +143,15 @@ export class AgentCoreStack extends cdk.Stack {
     });
 
     new cdk.CfnOutput(this, 'AgentCoreSecurityGroupId', {
-      value: this.agentCoreSecurityGroup.securityGroupId,
+      value: agentCoreSecurityGroup.securityGroupId,
       description: 'Security group ID for AgentCore ENIs',
-      exportName: 'GlitchAgentCoreSecurityGroupId',
+      exportName: 'GlitchAgentCoreSecurityGroupIdFromStack',
     });
 
     new cdk.CfnOutput(this, 'VpcConfigForAgentCore', {
       value: JSON.stringify({
         subnets: vpc.isolatedSubnets.map(s => s.subnetId),
-        securityGroups: [this.agentCoreSecurityGroup.securityGroupId],
+        securityGroups: [agentCoreSecurityGroup.securityGroupId],
       }),
       description: 'VPC configuration for AgentCore Runtime (JSON)',
       exportName: 'GlitchVpcConfig',

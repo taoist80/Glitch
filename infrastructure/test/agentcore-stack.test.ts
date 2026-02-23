@@ -29,9 +29,16 @@ describe('AgentCoreStack', () => {
   });
 
   function createStack() {
+    const agentCoreSg = new ec2.SecurityGroup(vpcStack, 'AgentCoreSg', {
+      vpc,
+      description: 'AgentCore SG',
+      allowAllOutbound: false,
+    });
+    agentCoreSg.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443), 'HTTPS');
+    
     return new AgentCoreStack(app, 'TestAgentCoreStack', {
       vpc,
-      tailscaleSecurityGroup: tailscaleSg,
+      agentCoreSecurityGroup: agentCoreSg,
       env: { account: '123456789012', region: 'us-west-2' },
     });
   }
@@ -46,20 +53,23 @@ describe('AgentCoreStack', () => {
       });
     });
 
-    test('creates exactly one security group', () => {
+    test('creates exactly zero additional security groups', () => {
       const stack = createStack();
       const template = Template.fromStack(stack);
 
-      template.resourceCountIs('AWS::EC2::SecurityGroup', 1);
+      // AgentCore SG is passed in, so no new SGs created
+      template.resourceCountIs('AWS::EC2::SecurityGroup', 0);
     });
 
-    test('allows all traffic egress to Tailscale SG', () => {
+    test('allows Ollama native API egress to on-prem', () => {
       const stack = createStack();
       const template = Template.fromStack(stack);
 
       template.hasResourceProperties('AWS::EC2::SecurityGroupEgress', {
-        IpProtocol: '-1',
-        DestinationSecurityGroupId: Match.anyValue(),
+        IpProtocol: 'tcp',
+        FromPort: 11434,
+        ToPort: 11434,
+        CidrIp: '10.10.110.0/24',
       });
     });
 

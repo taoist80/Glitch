@@ -23,7 +23,7 @@ agents:
         network_mode: VPC
         network_mode_config:
           security_groups:
-          - sg-07b20b979f7e6def2
+          - sg-0ee269558dcb6be1b
           subnets:
           - subnet-026f55384668578dc
           - subnet-0e949f7ace1b9ae9e
@@ -35,9 +35,9 @@ agents:
         idle_runtime_session_timeout: 900
         max_lifetime: 28800
     bedrock_agentcore:
-      agent_id: Glitch-TeGZF0HlNC
-      agent_arn: arn:aws:bedrock-agentcore:us-west-2:999776382415:runtime/Glitch-TeGZF0HlNC
-      agent_session_id: null
+      agent_id: Glitch-wfvSKu6gs5
+      agent_arn: arn:aws:bedrock-agentcore:us-west-2:999776382415:runtime/Glitch-wfvSKu6gs5
+      agent_session_id: b27548c8-dcf6-44f1-9086-6067ac73291e
     codebuild:
       project_name: bedrock-agentcore-glitch-builder
       execution_role: arn:aws:iam::999776382415:role/AmazonBedrockAgentCoreSDKCodeBuild-us-west-2-14980158e2

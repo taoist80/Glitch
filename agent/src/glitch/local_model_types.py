@@ -1,17 +1,19 @@
 """OpenAI Chat Completions–compatible types for local models (Mistral, LLaVA).
 
 Follows https://platform.openai.com/docs/api-reference/chat (POST /v1/chat/completions).
-Host mapping: 10.10.110.202 (mistral-nemo-12b), 10.10.110.137 (llava-v1.6-mistral-7b).
+Host mapping: 10.10.110.202 (mistral-nemo:12b), 10.10.110.137 (llava-v1.6-mistral-7b).
 Port: 8080 for OpenAI-compatible server; 11434 for native Ollama.
 """
 
 from typing import Any, Dict, List, Optional, TypedDict, Union
 
-# Host mapping (on-prem)
-MISTRAL_HOST = "10.10.110.202"
-LLAVA_HOST = "10.10.110.137"
-DEFAULT_OPENAI_PORT = 8080
-OLLAMA_NATIVE_PORT = 11434
+# Host mapping (on-prem via EC2 Tailscale HTTP proxy)
+# AgentCore cannot use Tailscale routes directly (not a Tailscale node)
+# AgentCore → EC2 nginx proxy → Tailscale mesh → on-prem
+MISTRAL_HOST = "10.0.0.139"  # EC2 Tailscale instance private IP
+LLAVA_HOST = "10.0.0.139"    # Same EC2 instance, different nginx proxy port
+DEFAULT_OPENAI_PORT = 8080   # Nginx proxy port for LLaVA
+OLLAMA_NATIVE_PORT = 11434   # Nginx proxy port for Mistral
 
 
 class ImageUrlPart(TypedDict, total=False):

@@ -223,14 +223,27 @@ def _setup_ui_routes() -> None:
     from starlette.responses import RedirectResponse, JSONResponse
     from glitch.ui_build import get_ui_paths, auto_build_ui
 
+    logger.info("_setup_ui_routes: getting UI paths")
+    sys.stdout.flush()
+    
     ui_mode = os.getenv("GLITCH_UI_MODE", "local")
     ui_dir, ui_dist = get_ui_paths()
+    
+    logger.info("_setup_ui_routes: ui_mode=%s ui_dir=%s ui_dist_exists=%s", ui_mode, ui_dir, ui_dist.is_dir())
+    sys.stdout.flush()
 
-    # Auto-build UI if dist doesn't exist and we're not in dev mode
-    if ui_mode != "dev" and not ui_dist.is_dir():
+    # Skip auto-build in AgentCore container - UI is hosted separately via CloudFront
+    is_agentcore = os.path.exists("/app") or "agentcore" in os.getenv("AWS_EXECUTION_ENV", "").lower()
+    
+    # Auto-build UI if dist doesn't exist and we're not in dev mode and not in AgentCore
+    if ui_mode != "dev" and not ui_dist.is_dir() and not is_agentcore:
+        logger.info("_setup_ui_routes: auto-building UI")
+        sys.stdout.flush()
         auto_build_ui(ui_dir, verbose=False)
 
     if ui_mode != "dev" and ui_dist.is_dir():
+        logger.info("_setup_ui_routes: mounting UI at /ui")
+        sys.stdout.flush()
         app.mount("/ui", StaticFiles(directory=str(ui_dist), html=True), name="ui")
         logger.info("UI dashboard mounted at /ui")
         
@@ -240,8 +253,12 @@ def _setup_ui_routes() -> None:
         app.add_route("/", redirect_to_ui, methods=["GET"])
         logger.info("Root redirect to /ui enabled")
     elif ui_mode != "dev":
-        logger.warning("UI dist not found at %s; /ui will not be available", ui_dist)
+        logger.info("_setup_ui_routes: UI dist not found, skipping mount")
+        sys.stdout.flush()
 
+    logger.info("_setup_ui_routes: adding debug routes")
+    sys.stdout.flush()
+    
     # Debug endpoint to list all routes
     async def debug_routes(request):
         routes_info = []
@@ -251,6 +268,10 @@ def _setup_ui_routes() -> None:
                 route_info["methods"] = list(route.methods)
             routes_info.append(route_info)
         return JSONResponse({"routes": routes_info, "ui_mode": ui_mode})
+    app.add_route("/debug/routes", debug_routes, methods=["GET"])
+    
+    logger.info("_setup_ui_routes: complete")
+    sys.stdout.flush()
     app.add_route("/debug/routes", debug_routes, methods=["GET"])
 
 
@@ -481,19 +502,33 @@ async def run_server_async(
     """
     import uvicorn
 
+    logger.info("run_server_async: disabling uvicorn access log")
+    sys.stdout.flush()
     _disable_uvicorn_access_log()
     
     if config is None:
         config = ServerConfig()
     
+    logger.info("run_server_async: calling set_agent")
+    sys.stdout.flush()
     set_agent(agent)
+    
+    logger.info("run_server_async: calling _setup_api_routes")
+    sys.stdout.flush()
     _setup_api_routes()
+    
+    logger.info("run_server_async: calling _setup_ui_routes")
+    sys.stdout.flush()
     _setup_ui_routes()
+    
+    logger.info("run_server_async: setup complete, starting uvicorn")
+    sys.stdout.flush()
     
     logger.info("Starting AgentCore HTTP server on %s:%s", config.host, config.port)
     logger.info("Session ID: %s", agent.session_id)
     logger.info("Memory ID: %s", agent.memory_id)
     logger.info("UI API available at http://%s:%s/api", config.host, config.port)
+    sys.stdout.flush()
 
     uvicorn_config = uvicorn.Config(
         app,

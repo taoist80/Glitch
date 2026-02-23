@@ -10,6 +10,7 @@ export class VpcStack extends cdk.Stack {
   public readonly vpc: ec2.Vpc;
   public readonly privateSubnets: ec2.ISubnet[];
   public readonly publicSubnets: ec2.ISubnet[];
+  public readonly agentCoreSecurityGroup: ec2.SecurityGroup;
 
   constructor(scope: Construct, id: string, props?: VpcStackProps) {
     super(scope, id, props);
@@ -108,6 +109,27 @@ export class VpcStack extends cdk.Stack {
       value: this.vpc.availabilityZones.join(','),
       description: 'Availability Zones',
       exportName: 'GlitchAvailabilityZones',
+    });
+
+    // Create AgentCore security group here to avoid circular dependency
+    // (TailscaleStack needs to reference it, and AgentCoreStack needs to reference TailscaleStack)
+    this.agentCoreSecurityGroup = new ec2.SecurityGroup(this, 'AgentCoreSecurityGroup', {
+      vpc: this.vpc,
+      description: 'Security group for AgentCore runtime ENIs',
+      allowAllOutbound: false,
+    });
+
+    // Allow HTTPS to AWS services (VPC endpoints)
+    this.agentCoreSecurityGroup.addEgressRule(
+      ec2.Peer.anyIpv4(),
+      ec2.Port.tcp(443),
+      'HTTPS to AWS services'
+    );
+
+    new cdk.CfnOutput(this, 'AgentCoreSecurityGroupId', {
+      value: this.agentCoreSecurityGroup.securityGroupId,
+      description: 'AgentCore runtime security group ID',
+      exportName: 'GlitchAgentCoreSecurityGroupIdFromVpc',
     });
   }
 }

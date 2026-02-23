@@ -115,16 +115,19 @@ def main():
         cfn_client = boto3.client('cloudformation', region_name=REGION)
         
         vpc_outputs = get_stack_outputs(cfn_client, VPC_STACK_NAME)
-        agentcore_outputs = get_stack_outputs(cfn_client, AGENTCORE_STACK_NAME)
         
-        if not vpc_outputs or not agentcore_outputs:
-            log("CloudFormation stacks not found. Please deploy infrastructure first:", 'ERROR')
-            log("  cd infrastructure && cdk deploy GlitchVpcStack GlitchAgentCoreStack", 'ERROR')
+        if not vpc_outputs:
+            log("VpcStack not found. Please deploy infrastructure first:", 'ERROR')
+            log("  cd infrastructure && cdk deploy GlitchVpcStack", 'ERROR')
             sys.exit(1)
         
         subnet_ids = vpc_outputs.get('PrivateSubnetIds', '').split(',')
-        security_group_id = agentcore_outputs.get('AgentCoreSecurityGroupId')
-        execution_role_arn = agentcore_outputs.get('AgentRuntimeRoleArn')
+        # Security group now comes from VpcStack (moved to avoid circular dependencies)
+        security_group_id = vpc_outputs.get('AgentCoreSecurityGroupIdFromVpc')
+        
+        # Execution role comes from AgentCoreStack (optional - might not be deployed yet)
+        agentcore_outputs = get_stack_outputs(cfn_client, AGENTCORE_STACK_NAME)
+        execution_role_arn = agentcore_outputs.get('AgentRuntimeRoleArn') if agentcore_outputs else None
         
         if not subnet_ids or not subnet_ids[0]:
             log("PrivateSubnetIds not found in VPC stack outputs", 'ERROR')
