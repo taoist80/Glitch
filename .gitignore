@@ -11,8 +11,11 @@ cdk.context.json
 # Docs (local/generated)
 docs/
 
-# Node.js
+# Node.js (do not commit node_modules or pnpm workspace state)
 node_modules/
+**/node_modules/
+**/.pnpm-workspace-state-v1.json
+**/.modules.yaml
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
@@ -53,6 +56,7 @@ downloads/
 eggs/
 .eggs/
 lib/
+!infrastructure/lib/
 lib64/
 parts/
 sdist/

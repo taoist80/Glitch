@@ -10,6 +10,8 @@
     "test:watch": "jest --watch",
     "cdk": "cdk",
     "deploy": "cdk deploy --all",
+    "deploy:iam-first": "cdk deploy GlitchAgentCoreIamStack --require-approval never && cdk deploy --all --require-approval never",
+    "deploy:iam-adopt": "ROLE_ARN=arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):role/GlitchAgentCoreRuntimeRole && cdk deploy GlitchAgentCoreIamStack -c glitchAgentCoreRoleArn=$ROLE_ARN --require-approval never && cdk deploy --all -c glitchAgentCoreRoleArn=$ROLE_ARN --require-approval never",
     "diff": "cdk diff",
     "synth": "cdk synth"
   },

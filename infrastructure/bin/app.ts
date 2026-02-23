@@ -4,15 +4,19 @@ import * as cdk from 'aws-cdk-lib';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'yaml';
-import { VpcStack } from '../lib/vpc-stack';
-import { SecretsStack } from '../lib/secrets-stack';
-import { TailscaleStack } from '../lib/tailscale-stack';
-import { AgentCoreStack } from '../lib/agentcore-stack';
-import { GlitchStorageStack } from '../lib/storage-stack';
-import { GlitchGatewayStack } from '../lib/gateway-stack';
-import { GlitchUiHostingStack } from '../lib/ui-hosting-stack';
-import { GlitchCertificateStack } from '../lib/certificate-stack';
-import { TelegramWebhookStack } from '../lib/telegram-webhook-stack';
+import {
+  VpcStack,
+  AgentCoreIamStack,
+  SecretsStack,
+  TailscaleStack,
+  AgentCoreStack,
+  GlitchStorageStack,
+  GlitchGatewayStack,
+  GlitchUiHostingStack,
+  GlitchCertificateStack,
+  TelegramWebhookStack,
+  StorageStackMigrationStack,
+} from '../lib/stack';
 
 /**
  * Read AgentCore config from .bedrock_agentcore.yaml to get runtime ARN and execution role.
@@ -54,11 +58,14 @@ const vpcStack = new VpcStack(app, 'GlitchVpcStack', {
   description: 'VPC infrastructure for AgentCore Glitch',
 });
 
-// Default AgentCore SDK runtime role (from .bedrock_agentcore.yaml); grant it Telegram secret read
-const defaultExecutionRoleArn =
-  app.node.tryGetContext('glitchDefaultExecutionRoleArn') ??
-  agentCoreConfig.executionRoleArn ??
-  `arn:aws:iam::${env.account}:role/AmazonBedrockAgentCoreSDKRuntime-${env.region}-14980158e2`;
+// Create AgentCore runtime role first so SecretsStack/StorageStack can attach policies (avoids IAM 404).
+// Required: deploy GlitchAgentCoreIamStack before other stacks that reference the role. Use:
+//   pnpm run deploy:iam-first   OR   cdk deploy GlitchAgentCoreIamStack && cdk deploy --all
+const agentCoreIamStack = new AgentCoreIamStack(app, 'GlitchAgentCoreIamStack', {
+  env,
+  description: 'IAM role for AgentCore Runtime (created before SecretsStack)',
+});
+agentCoreIamStack.addDependency(vpcStack);
 
 // AgentCore runtime ARN (from .bedrock_agentcore.yaml or context)
 const agentCoreRuntimeArn =
@@ -75,13 +82,11 @@ if (!agentCoreRuntimeArn) {
 
 const secretsStack = new SecretsStack(app, 'GlitchSecretsStack', {
   env,
-  defaultExecutionRoleArn,
   description: 'Secrets Manager configuration for AgentCore Glitch',
 });
 
 const storageStack = new GlitchStorageStack(app, 'GlitchStorageStack', {
   env,
-  defaultExecutionRoleArn,
   description: 'DynamoDB, S3, SSM, and telemetry log group for Glitch',
 });
 
@@ -98,11 +103,12 @@ const telegramWebhookStack = new TelegramWebhookStack(app, 'GlitchTelegramWebhoo
   configTable: storageStack.configTable,
   telegramBotTokenSecret: secretsStack.telegramBotTokenSecret,
   agentCoreRuntimeArn,
-  defaultExecutionRoleArn,
+  defaultExecutionRoleArn: agentCoreIamStack.agentRuntimeRole.roleArn,
   description: 'Telegram webhook Lambda (receives updates, invokes AgentCore runtime)',
 });
 telegramWebhookStack.addDependency(storageStack);
 telegramWebhookStack.addDependency(secretsStack);
+telegramWebhookStack.addDependency(agentCoreIamStack);
 
 // Extract hostname from Lambda Function URL (https://xxx.lambda-url.region.on.aws/)
 const gatewayUrlHostname = cdk.Fn.select(
@@ -154,10 +160,22 @@ const agentCoreStack = new AgentCoreStack(app, 'GlitchAgentCoreStack', {
   env,
   vpc: vpcStack.vpc,
   agentCoreSecurityGroup: vpcStack.agentCoreSecurityGroup,
+  agentRuntimeRole: agentCoreIamStack.agentRuntimeRole,
   description: 'AgentCore Runtime resources',
 });
 agentCoreStack.addDependency(vpcStack);
+agentCoreStack.addDependency(agentCoreIamStack);
 agentCoreStack.addDependency(tailscaleStack);
+
+// Telegram webhook custom resource attaches a policy to the runtime role; that role is owned by AgentCoreStack,
+// so deploy AgentCoreStack first so the role exists when the custom resource runs.
+telegramWebhookStack.addDependency(agentCoreStack);
+
+// One-time migration: deploy this stack so GlitchStorageStack's old custom resource Deletes can succeed, then remove.
+const storageMigrationStack = new StorageStackMigrationStack(app, 'GlitchStorageStackMigration', {
+  env,
+  description: 'One-time: creates legacy role so GlitchStorageStack custom resource deletes succeed. Delete this stack after StorageStack update.',
+});
 
 cdk.Tags.of(app).add('Project', 'AgentCore-Glitch');
 cdk.Tags.of(app).add('ManagedBy', 'CDK');

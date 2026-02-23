@@ -119,9 +119,10 @@ def main():
     current_network_config = agent_config.get('aws', {}).get('network_configuration', {})
     current_mode_config = current_network_config.get('network_mode_config')
     
+    # Toolkit and AWS API expect subnets and security_groups (not subnet_ids/security_group_ids)
     new_mode_config = {
-        'subnet_ids': subnet_ids,
-        'security_group_ids': [security_group_id],
+        'subnets': subnet_ids,
+        'security_groups': [security_group_id],
     }
 
     print(f"\nCurrent network_mode_config: {current_mode_config}")

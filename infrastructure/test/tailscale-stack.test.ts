@@ -2,7 +2,7 @@ import * as cdk from 'aws-cdk-lib';
 import { Template, Match, Capture } from 'aws-cdk-lib/assertions';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
-import { TailscaleStack } from '../lib/tailscale-stack';
+import { TailscaleStack } from '../lib/stack';
 
 describe('TailscaleStack', () => {
   let app: cdk.App;

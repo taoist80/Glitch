@@ -1,7 +1,7 @@
 import * as cdk from 'aws-cdk-lib';
 import { Template, Match } from 'aws-cdk-lib/assertions';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
-import { AgentCoreStack } from '../lib/agentcore-stack';
+import { AgentCoreStack } from '../lib/stack';
 
 describe('AgentCoreStack', () => {
   let app: cdk.App;
@@ -44,45 +44,11 @@ describe('AgentCoreStack', () => {
   }
 
   describe('Security Group', () => {
-    test('creates security group with restricted outbound', () => {
+    test('creates exactly zero security groups (SG is passed in from VpcStack)', () => {
       const stack = createStack();
       const template = Template.fromStack(stack);
 
-      template.hasResourceProperties('AWS::EC2::SecurityGroup', {
-        GroupDescription: 'Security group for AgentCore Runtime ENIs',
-      });
-    });
-
-    test('creates exactly zero additional security groups', () => {
-      const stack = createStack();
-      const template = Template.fromStack(stack);
-
-      // AgentCore SG is passed in, so no new SGs created
       template.resourceCountIs('AWS::EC2::SecurityGroup', 0);
-    });
-
-    test('allows Ollama native API egress to on-prem', () => {
-      const stack = createStack();
-      const template = Template.fromStack(stack);
-
-      template.hasResourceProperties('AWS::EC2::SecurityGroupEgress', {
-        IpProtocol: 'tcp',
-        FromPort: 11434,
-        ToPort: 11434,
-        CidrIp: '10.10.110.0/24',
-      });
-    });
-
-    test('allows HTTPS ingress from Tailscale SG', () => {
-      const stack = createStack();
-      const template = Template.fromStack(stack);
-
-      template.hasResourceProperties('AWS::EC2::SecurityGroupIngress', {
-        IpProtocol: 'tcp',
-        FromPort: 443,
-        ToPort: 443,
-        SourceSecurityGroupId: Match.anyValue(),
-      });
     });
   });
 
@@ -109,7 +75,7 @@ describe('AgentCoreStack', () => {
       const stack = createStack();
       const template = Template.fromStack(stack);
 
-      template.hasResourceProperties('AWS::IAM::Policy', {
+      template.hasResourceProperties('AWS::IAM::ManagedPolicy', {
         PolicyDocument: {
           Statement: Match.arrayWith([
             Match.objectLike({
@@ -129,7 +95,7 @@ describe('AgentCoreStack', () => {
       const stack = createStack();
       const template = Template.fromStack(stack);
 
-      template.hasResourceProperties('AWS::IAM::Policy', {
+      template.hasResourceProperties('AWS::IAM::ManagedPolicy', {
         PolicyDocument: {
           Statement: Match.arrayWith([
             Match.objectLike({
@@ -149,7 +115,7 @@ describe('AgentCoreStack', () => {
       const stack = createStack();
       const template = Template.fromStack(stack);
 
-      template.hasResourceProperties('AWS::IAM::Policy', {
+      template.hasResourceProperties('AWS::IAM::ManagedPolicy', {
         PolicyDocument: {
           Statement: Match.arrayWith([
             Match.objectLike({
@@ -167,7 +133,7 @@ describe('AgentCoreStack', () => {
       const stack = createStack();
       const template = Template.fromStack(stack);
 
-      template.hasResourceProperties('AWS::IAM::Policy', {
+      template.hasResourceProperties('AWS::IAM::ManagedPolicy', {
         PolicyDocument: {
           Statement: Match.arrayWith([
             Match.objectLike({
@@ -193,7 +159,7 @@ describe('AgentCoreStack', () => {
       const stack = createStack();
       const template = Template.fromStack(stack);
 
-      template.hasResourceProperties('AWS::IAM::Policy', {
+      template.hasResourceProperties('AWS::IAM::ManagedPolicy', {
         PolicyDocument: {
           Statement: Match.arrayWith([
             Match.objectLike({
@@ -214,12 +180,13 @@ describe('AgentCoreStack', () => {
       const stack = createStack();
       const template = Template.fromStack(stack);
 
-      template.hasResourceProperties('AWS::IAM::Policy', {
+      template.hasResourceProperties('AWS::IAM::ManagedPolicy', {
         PolicyDocument: {
           Statement: Match.arrayWith([
             Match.objectLike({
-              Action: Match.arrayWith(['secretsmanager:GetSecretValue']),
+              Sid: 'SecretsManagerAccess',
               Effect: 'Allow',
+              Action: 'secretsmanager:GetSecretValue',
             }),
           ]),
         },
@@ -242,7 +209,7 @@ describe('AgentCoreStack', () => {
       const template = Template.fromStack(stack);
 
       template.hasOutput('AgentCoreSecurityGroupId', {
-        Export: { Name: 'GlitchAgentCoreSecurityGroupId' },
+        Export: { Name: 'GlitchAgentCoreSecurityGroupIdFromStack' },
       });
     });
 

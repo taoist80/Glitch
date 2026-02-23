@@ -123,7 +123,8 @@ def main():
         
         subnet_ids = vpc_outputs.get('PrivateSubnetIds', '').split(',')
         # Security group now comes from VpcStack (moved to avoid circular dependencies)
-        security_group_id = vpc_outputs.get('AgentCoreSecurityGroupIdFromVpc')
+        # Output key is AgentCoreSecurityGroupId (export name is GlitchAgentCoreSecurityGroupIdFromVpc)
+        security_group_id = vpc_outputs.get('AgentCoreSecurityGroupId')
         
         # Execution role comes from AgentCoreStack (optional - might not be deployed yet)
         agentcore_outputs = get_stack_outputs(cfn_client, AGENTCORE_STACK_NAME)
