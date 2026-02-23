@@ -1128,10 +1128,10 @@ Chat messages from the UI follow this path:
 | nginx proxy_read_timeout | 300s | `infrastructure/lib/tailscale-stack.ts` |
 | Gateway Lambda function | 300s | `infrastructure/lib/gateway-stack.ts` (line 32) |
 | Gateway `invoke_agent()` urllib | 180s | `gateway-stack.ts` inline code (line 182) |
-| Gateway `invoke_api()` urllib | 60s | `gateway-stack.ts` inline code (line 223) |
+| Gateway `invoke_api()` urllib | 180s | `stack.ts` GlitchGatewayStack inline Lambda (invoke_api) |
 | AgentCore Runtime | Platform-managed | N/A |
 
-**UI API requests** (`/api/status`, `/api/memory/summary`, etc.) use `invoke_api()` with 60s timeout and go through the same chain but call `_ui_api_request` handler in the container.
+**UI API requests** (`/api/status`, `/api/memory/summary`, etc.) use `invoke_api()` with 180s timeout and go through the same chain but call `_ui_api_request` handler in the container.
 
 **Known Issue: Gateway Timeout on Chat Invocations**
 

@@ -5,13 +5,17 @@ Host mapping: 10.10.110.202 (mistral-nemo:12b), 10.10.110.137 (llava-v1.6-mistra
 Port: 8080 for OpenAI-compatible server; 11434 for native Ollama.
 """
 
+import os
 from typing import Any, Dict, List, Optional, TypedDict, Union
 
 # Host mapping (on-prem via EC2 Tailscale HTTP proxy)
 # AgentCore cannot use Tailscale routes directly (not a Tailscale node)
 # AgentCore → EC2 nginx proxy → Tailscale mesh → on-prem
-MISTRAL_HOST = "10.0.0.139"  # EC2 Tailscale instance private IP
-LLAVA_HOST = "10.0.0.139"    # Same EC2 instance, different nginx proxy port
+# Set GLITCH_OLLAMA_PROXY_HOST to the Tailscale EC2 private IP (stack output PrivateIp).
+# After any redeploy that replaces the EC2 instance, the IP changes — update and redeploy agent.
+_DEFAULT_PROXY_IP = "10.0.0.139"
+MISTRAL_HOST = os.environ.get("GLITCH_OLLAMA_PROXY_HOST", _DEFAULT_PROXY_IP)
+LLAVA_HOST = os.environ.get("GLITCH_OLLAMA_PROXY_HOST", _DEFAULT_PROXY_IP)
 DEFAULT_OPENAI_PORT = 8080   # Nginx proxy port for LLaVA
 OLLAMA_NATIVE_PORT = 11434   # Nginx proxy port for Mistral
 

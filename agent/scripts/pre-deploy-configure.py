@@ -29,6 +29,7 @@ except ImportError:
 REGION = os.environ.get('AWS_REGION', 'us-west-2')
 VPC_STACK_NAME = 'GlitchVpcStack'
 AGENTCORE_STACK_NAME = 'GlitchAgentCoreStack'
+TAILSCALE_STACK_NAME = 'GlitchTailscaleStack'
 
 AGENT_DIR = Path(__file__).parent.parent
 CONFIG_FILE = AGENT_DIR / '.bedrock_agentcore.yaml'
@@ -163,6 +164,19 @@ def main():
         
         if execution_role_arn:
             agent_config['aws']['execution_role'] = execution_role_arn
+        
+        # Ollama/Mistral proxy: set GLITCH_OLLAMA_PROXY_HOST from Tailscale EC2 private IP
+        tailscale_outputs = get_stack_outputs(cfn_client, TAILSCALE_STACK_NAME)
+        private_ip = tailscale_outputs.get('PrivateIp')
+        if private_ip:
+            if 'aws' not in agent_config:
+                agent_config['aws'] = {}
+            if 'environment_variables' not in agent_config['aws']:
+                agent_config['aws']['environment_variables'] = {}
+            agent_config['aws']['environment_variables']['GLITCH_OLLAMA_PROXY_HOST'] = private_ip
+            log(f"Ollama proxy host set to {private_ip} (from {TAILSCALE_STACK_NAME})", 'SUCCESS')
+        else:
+            log(f"{TAILSCALE_STACK_NAME} not found or no PrivateIp output; GLITCH_OLLAMA_PROXY_HOST unchanged", 'WARN')
         
         save_config(config)
         log("VPC configuration updated successfully", 'SUCCESS')

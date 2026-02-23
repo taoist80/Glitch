@@ -128,7 +128,7 @@ export const useAppStore = create<AppState>()(
           const status = await api.getStatus();
           set({ status, connected: true, statusLoading: false });
         } catch (error) {
-          set({ 
+          set({
             statusError: error instanceof Error ? error.message : 'Failed to fetch status',
             connected: false,
             statusLoading: false,

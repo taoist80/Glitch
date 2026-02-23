@@ -103,12 +103,11 @@ const telegramWebhookStack = new TelegramWebhookStack(app, 'GlitchTelegramWebhoo
   configTable: storageStack.configTable,
   telegramBotTokenSecret: secretsStack.telegramBotTokenSecret,
   agentCoreRuntimeArn,
-  defaultExecutionRoleArn: agentCoreIamStack.agentRuntimeRole.roleArn,
   description: 'Telegram webhook Lambda (receives updates, invokes AgentCore runtime)',
 });
 telegramWebhookStack.addDependency(storageStack);
 telegramWebhookStack.addDependency(secretsStack);
-telegramWebhookStack.addDependency(agentCoreIamStack);
+// NOTE: Removed agentCoreIamStack dependency - TelegramWebhookStack now uses Fn.importValue instead of cross-stack ref
 
 // Extract hostname from Lambda Function URL (https://xxx.lambda-url.region.on.aws/)
 const gatewayUrlHostname = cdk.Fn.select(
@@ -156,15 +155,16 @@ tailscaleStack.addDependency(secretsStack);
 tailscaleStack.addDependency(gatewayStack);
 tailscaleStack.addDependency(uiHostingStack);
 
+const agentCoreRuntimeRoleArn = app.node.tryGetContext('glitchAgentCoreRoleArn') as string | undefined;
 const agentCoreStack = new AgentCoreStack(app, 'GlitchAgentCoreStack', {
   env,
   vpc: vpcStack.vpc,
   agentCoreSecurityGroup: vpcStack.agentCoreSecurityGroup,
-  agentRuntimeRole: agentCoreIamStack.agentRuntimeRole,
+  agentRuntimeRoleArn: agentCoreRuntimeRoleArn,
   description: 'AgentCore Runtime resources',
 });
 agentCoreStack.addDependency(vpcStack);
-agentCoreStack.addDependency(agentCoreIamStack);
+// NOTE: Removed agentCoreIamStack dependency - AgentCoreStack now uses Fn.importValue instead of cross-stack ref
 agentCoreStack.addDependency(tailscaleStack);
 
 // Telegram webhook custom resource attaches a policy to the runtime role; that role is owned by AgentCoreStack,

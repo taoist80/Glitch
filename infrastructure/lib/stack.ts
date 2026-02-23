@@ -156,6 +156,9 @@ export class VpcStack extends cdk.Stack {
 
 // --- AgentCoreIamStack ---
 
+/** Export name for runtime role ARN; consuming stacks use Fn.importValue(this) to avoid synthetic cross-stack export. */
+const AGENT_RUNTIME_ROLE_ARN_EXPORT = 'GlitchAgentCoreRuntimeRoleArn';
+
 /**
  * Creates or adopts the GlitchAgentCoreRuntimeRole IAM role so it exists before
  * SecretsStack (which attaches a policy to it). AgentCoreStack then adds
@@ -256,7 +259,7 @@ export class AgentCoreIamStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'AgentRuntimeRoleArn', {
       value: this.agentRuntimeRole.roleArn,
       description: 'IAM role ARN for AgentCore Runtime',
-      exportName: 'GlitchAgentCoreRuntimeRoleArn',
+      exportName: AGENT_RUNTIME_ROLE_ARN_EXPORT,
     });
     this.codeBuildRole = codeBuildRole;
     new cdk.CfnOutput(this, 'CodeBuildRoleArn', {
@@ -629,7 +632,7 @@ def invoke_api(path: str, method: str, body: dict, session_id: str) -> dict:
         req = urllib.request.Request(
             url, data=req_body, headers=dict(aws_request.headers), method='POST'
         )
-        with urllib.request.urlopen(req, timeout=60) as response:
+        with urllib.request.urlopen(req, timeout=180) as response:
             result = json.loads(response.read().decode())
             return result if isinstance(result, dict) else {"data": result}
     except urllib.error.HTTPError as e:
@@ -737,8 +740,8 @@ export interface TelegramWebhookStackProps extends cdk.StackProps {
   readonly configTable: dynamodb.ITable;
   readonly telegramBotTokenSecret: secretsmanager.ISecret;
   readonly agentCoreRuntimeArn: string;
-  /** Runtime role ARN so we can grant lambda:GetFunctionUrlConfig for webhook registration at startup. */
-  readonly defaultExecutionRoleArn: string;
+  /** Runtime role ARN for webhook policy; when omitted, uses Fn.importValue(GlitchAgentCoreRuntimeRoleArn). */
+  readonly defaultExecutionRoleArn?: string;
 }
 
 /**
@@ -751,7 +754,10 @@ export class TelegramWebhookStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: TelegramWebhookStackProps) {
     super(scope, id, props);
 
-    const { configTable, telegramBotTokenSecret, agentCoreRuntimeArn, defaultExecutionRoleArn } = props;
+    const roleArn =
+      props.defaultExecutionRoleArn ??
+      cdk.Fn.importValue(AGENT_RUNTIME_ROLE_ARN_EXPORT);
+    const { configTable, telegramBotTokenSecret, agentCoreRuntimeArn } = props;
 
     this.webhookFunction = new lambda.Function(this, 'TelegramWebhookFunction', {
       functionName: 'glitch-telegram-webhook',
@@ -821,7 +827,7 @@ export class TelegramWebhookStack extends cdk.Stack {
       exportName: 'GlitchTelegramWebhookUrl',
     });
 
-    const roleName = cdk.Arn.extractResourceName(defaultExecutionRoleArn, 'role');
+    const roleName = cdk.Arn.extractResourceName(roleArn, 'role');
     const lambdaWebhookPolicyName = 'GlitchLambdaWebhookRead';
     const lambdaWebhookPolicyDocument = JSON.stringify({
       Version: '2012-10-17',
@@ -861,7 +867,7 @@ export class TelegramWebhookStack extends cdk.Stack {
       policy: cdk.custom_resources.AwsCustomResourcePolicy.fromStatements([
         new iam.PolicyStatement({
           actions: ['iam:PutRolePolicy', 'iam:DeleteRolePolicy'],
-          resources: [defaultExecutionRoleArn],
+          resources: [roleArn],
         }),
       ]),
     });
@@ -1922,7 +1928,8 @@ export class TailscaleStack extends cdk.Stack {
 export interface AgentCoreStackProps extends cdk.StackProps {
   readonly vpc: ec2.IVpc;
   readonly agentCoreSecurityGroup: ec2.ISecurityGroup;
-  readonly agentRuntimeRole?: iam.IRole;
+  /** When set (e.g. adopt mode), use this ARN instead of importing from IAM stack. */
+  readonly agentRuntimeRoleArn?: string;
 }
 
 export class AgentCoreStack extends cdk.Stack {
@@ -1931,7 +1938,7 @@ export class AgentCoreStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: AgentCoreStackProps) {
     super(scope, id, props);
 
-    const { vpc, agentCoreSecurityGroup, agentRuntimeRole: existingRole } = props;
+    const { vpc, agentCoreSecurityGroup, agentRuntimeRoleArn } = props;
 
     agentCoreSecurityGroup.addEgressRule(
       ec2.Peer.ipv4(vpc.vpcCidrBlock),
@@ -1944,13 +1951,13 @@ export class AgentCoreStack extends cdk.Stack {
       'OpenAI-compatible API via EC2 nginx proxy'
     );
 
-    this.agentRuntimeRole =
-      existingRole ??
-      new iam.Role(this, 'AgentRuntimeRole', {
-        assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
-        description: 'IAM role for AgentCore Runtime',
-        roleName: 'GlitchAgentCoreRuntimeRole',
-      });
+    const roleArn =
+      agentRuntimeRoleArn ?? cdk.Fn.importValue(AGENT_RUNTIME_ROLE_ARN_EXPORT);
+    this.agentRuntimeRole = iam.Role.fromRoleArn(
+      this,
+      'AgentRuntimeRole',
+      roleArn
+    );
 
     new iam.ManagedPolicy(this, 'AgentRuntimeRoleDefaultPolicy', {
       roles: [this.agentRuntimeRole],
