@@ -1,15 +1,15 @@
 import * as cdk from 'aws-cdk-lib';
 import { Template, Match } from 'aws-cdk-lib/assertions';
-import { VpcStack } from '../lib/stack';
+import { GlitchFoundationStack } from '../lib/stack';
 
-describe('VpcStack', () => {
+describe('GlitchFoundationStack', () => {
   let app: cdk.App;
-  let stack: VpcStack;
+  let stack: GlitchFoundationStack;
   let template: Template;
 
   beforeEach(() => {
     app = new cdk.App();
-    stack = new VpcStack(app, 'TestVpcStack', {
+    stack = new GlitchFoundationStack(app, 'TestFoundationStack', {
       env: { account: '123456789012', region: 'us-west-2' },
     });
     template = Template.fromStack(stack);
@@ -94,30 +94,111 @@ describe('VpcStack', () => {
     });
   });
 
+  describe('Security Groups', () => {
+    test('creates AgentCore security group', () => {
+      template.hasResourceProperties('AWS::EC2::SecurityGroup', {
+        GroupDescription: 'Security group for AgentCore runtime ENIs',
+      });
+    });
+  });
+
+  describe('IAM Roles', () => {
+    test('creates runtime role with bedrock-agentcore trust', () => {
+      template.hasResourceProperties('AWS::IAM::Role', {
+        AssumeRolePolicyDocument: {
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Principal: { Service: 'bedrock-agentcore.amazonaws.com' },
+            }),
+          ]),
+        },
+      });
+    });
+
+    test('creates CodeBuild role with codebuild trust', () => {
+      template.hasResourceProperties('AWS::IAM::Role', {
+        AssumeRolePolicyDocument: {
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Principal: { Service: 'codebuild.amazonaws.com' },
+            }),
+          ]),
+        },
+      });
+    });
+
+    test('CodeBuild role has ECR permissions', () => {
+      template.hasResourceProperties('AWS::IAM::Policy', {
+        PolicyDocument: {
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Action: 'ecr:GetAuthorizationToken',
+            }),
+          ]),
+        },
+      });
+    });
+  });
+
+  describe('SSM Parameters', () => {
+    test('creates SSM parameter for VPC ID', () => {
+      template.hasResourceProperties('AWS::SSM::Parameter', {
+        Name: '/glitch/vpc/id',
+        Type: 'String',
+      });
+    });
+
+    test('creates SSM parameter for private subnet IDs', () => {
+      template.hasResourceProperties('AWS::SSM::Parameter', {
+        Name: '/glitch/vpc/private-subnet-ids',
+        Type: 'String',
+      });
+    });
+
+    test('creates SSM parameter for AgentCore security group', () => {
+      template.hasResourceProperties('AWS::SSM::Parameter', {
+        Name: '/glitch/security-groups/agentcore',
+        Type: 'String',
+      });
+    });
+
+    test('creates SSM parameter for runtime role ARN', () => {
+      template.hasResourceProperties('AWS::SSM::Parameter', {
+        Name: '/glitch/iam/runtime-role-arn',
+        Type: 'String',
+      });
+    });
+
+    test('creates SSM parameter for CodeBuild role ARN', () => {
+      template.hasResourceProperties('AWS::SSM::Parameter', {
+        Name: '/glitch/iam/codebuild-role-arn',
+        Type: 'String',
+      });
+    });
+  });
+
   describe('Stack Outputs', () => {
-    test('exports VPC ID', () => {
-      template.hasOutput('VpcId', {
-        Export: { Name: 'GlitchVpcId' },
-      });
+    test('outputs VPC ID', () => {
+      template.hasOutput('VpcId', {});
     });
 
-    test('exports private subnet IDs', () => {
-      template.hasOutput('PrivateSubnetIds', {
-        Export: { Name: 'GlitchPrivateSubnetIds' },
-      });
+    test('outputs private subnet IDs', () => {
+      template.hasOutput('PrivateSubnetIds', {});
     });
 
-    test('exports availability zones', () => {
-      template.hasOutput('AvailabilityZones', {
-        Export: { Name: 'GlitchAvailabilityZones' },
-      });
+    test('outputs runtime role ARN', () => {
+      template.hasOutput('RuntimeRoleArn', {});
+    });
+
+    test('outputs CodeBuild role ARN', () => {
+      template.hasOutput('CodeBuildRoleArn', {});
     });
   });
 
   describe('Custom CIDR', () => {
     test('accepts custom VPC CIDR', () => {
       const customApp = new cdk.App();
-      const customStack = new VpcStack(customApp, 'CustomVpcStack', {
+      const customStack = new GlitchFoundationStack(customApp, 'CustomFoundationStack', {
         vpcCidr: '172.16.0.0/16',
         env: { account: '123456789012', region: 'us-west-2' },
       });

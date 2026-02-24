@@ -17,39 +17,47 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 import * as path from 'path';
 
-// --- VpcStack ---
+// --- SSM Parameter Names (single source of truth) ---
+export const SSM_PARAMS = {
+  VPC_ID: '/glitch/vpc/id',
+  PRIVATE_SUBNET_IDS: '/glitch/vpc/private-subnet-ids',
+  PUBLIC_SUBNET_IDS: '/glitch/vpc/public-subnet-ids',
+  AGENTCORE_SG_ID: '/glitch/security-groups/agentcore',
+  RUNTIME_ROLE_ARN: '/glitch/iam/runtime-role-arn',
+  CODEBUILD_ROLE_ARN: '/glitch/iam/codebuild-role-arn',
+} as const;
 
-export interface VpcStackProps extends cdk.StackProps {
+// --- GlitchFoundationStack ---
+// Consolidated stack: VPC + Security Groups + IAM Roles + SSM Parameters
+// No hardcoded role names - CloudFormation generates unique names
+
+export interface GlitchFoundationStackProps extends cdk.StackProps {
   readonly vpcCidr?: string;
 }
 
-export class VpcStack extends cdk.Stack {
+export class GlitchFoundationStack extends cdk.Stack {
   public readonly vpc: ec2.Vpc;
   public readonly privateSubnets: ec2.ISubnet[];
   public readonly publicSubnets: ec2.ISubnet[];
   public readonly agentCoreSecurityGroup: ec2.SecurityGroup;
+  public readonly runtimeRole: iam.Role;
+  public readonly codeBuildRole: iam.Role;
 
-  constructor(scope: Construct, id: string, props?: VpcStackProps) {
+  constructor(scope: Construct, id: string, props?: GlitchFoundationStackProps) {
     super(scope, id, props);
 
-    this.vpc = new ec2.Vpc(this, 'GlitchVpc', {
+    // ========== VPC ==========
+    this.vpc = new ec2.Vpc(this, 'Vpc', {
       maxAzs: 2,
       natGateways: 0,
       ipAddresses: ec2.IpAddresses.cidr(props?.vpcCidr || '10.0.0.0/16'),
       subnetConfiguration: [
-        {
-          name: 'Public',
-          subnetType: ec2.SubnetType.PUBLIC,
-          cidrMask: 24,
-        },
-        {
-          name: 'Private',
-          subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
-          cidrMask: 24,
-        },
+        { name: 'Public', subnetType: ec2.SubnetType.PUBLIC, cidrMask: 24 },
+        { name: 'Private', subnetType: ec2.SubnetType.PRIVATE_ISOLATED, cidrMask: 24 },
       ],
       enableDnsHostnames: true,
       enableDnsSupport: true,
@@ -64,6 +72,7 @@ export class VpcStack extends cdk.Stack {
       availabilityZones: [this.vpc.availabilityZones[0]],
     };
 
+    // VPC Endpoints
     this.vpc.addGatewayEndpoint('S3Endpoint', {
       service: ec2.GatewayVpcEndpointAwsService.S3,
       subnets: [{ subnetType: ec2.SubnetType.PRIVATE_ISOLATED }],
@@ -113,160 +122,176 @@ export class VpcStack extends cdk.Stack {
       subnets: singleAzSubnetSelection,
     });
 
-    new cdk.CfnOutput(this, 'VpcId', {
-      value: this.vpc.vpcId,
-      description: 'VPC ID for AgentCore Glitch',
-      exportName: 'GlitchVpcId',
-    });
-
-    new cdk.CfnOutput(this, 'PrivateSubnetIds', {
-      value: this.privateSubnets.map(s => s.subnetId).join(','),
-      description: 'Private subnet IDs',
-      exportName: 'GlitchPrivateSubnetIds',
-    });
-
-    new cdk.CfnOutput(this, 'AvailabilityZones', {
-      value: this.vpc.availabilityZones.join(','),
-      description: 'Availability Zones',
-      exportName: 'GlitchAvailabilityZones',
-    });
-
-    // Create AgentCore security group here to avoid circular dependency
-    // (TailscaleStack needs to reference it, and AgentCoreStack needs to reference TailscaleStack)
-    this.agentCoreSecurityGroup = new ec2.SecurityGroup(this, 'AgentCoreSecurityGroup', {
+    // ========== Security Groups ==========
+    this.agentCoreSecurityGroup = new ec2.SecurityGroup(this, 'AgentCoreSG', {
       vpc: this.vpc,
       description: 'Security group for AgentCore runtime ENIs',
       allowAllOutbound: false,
     });
 
-    // Allow HTTPS to AWS services (VPC endpoints)
     this.agentCoreSecurityGroup.addEgressRule(
       ec2.Peer.anyIpv4(),
       ec2.Port.tcp(443),
       'HTTPS to AWS services'
     );
 
+    // ========== IAM Roles (NO hardcoded names) ==========
+    
+    // Runtime role for AgentCore
+    this.runtimeRole = new iam.Role(this, 'RuntimeRole', {
+      assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
+      description: 'IAM role for AgentCore Runtime',
+      // NO roleName - let CloudFormation generate it
+    });
+
+    // CodeBuild role for container builds
+    this.codeBuildRole = new iam.Role(this, 'CodeBuildRole', {
+      assumedBy: new iam.ServicePrincipal('codebuild.amazonaws.com'),
+      description: 'IAM role for AgentCore CodeBuild container builds',
+      // NO roleName - let CloudFormation generate it
+    });
+
+    // CodeBuild policies
+    this.codeBuildRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents'],
+      resources: [`arn:aws:logs:${this.region}:${this.account}:log-group:/aws/codebuild/*`],
+    }));
+
+    this.codeBuildRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:GetObject', 's3:GetObjectVersion', 's3:PutObject'],
+      resources: [
+        `arn:aws:s3:::bedrock-agentcore-codebuild-sources-${this.account}-${this.region}`,
+        `arn:aws:s3:::bedrock-agentcore-codebuild-sources-${this.account}-${this.region}/*`,
+      ],
+    }));
+
+    this.codeBuildRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:GetBucketAcl', 's3:GetBucketLocation'],
+      resources: [`arn:aws:s3:::bedrock-agentcore-codebuild-sources-${this.account}-${this.region}`],
+    }));
+
+    this.codeBuildRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['ecr:GetAuthorizationToken'],
+      resources: ['*'],
+    }));
+
+    this.codeBuildRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'ecr:BatchCheckLayerAvailability',
+        'ecr:GetDownloadUrlForLayer',
+        'ecr:BatchGetImage',
+        'ecr:PutImage',
+        'ecr:InitiateLayerUpload',
+        'ecr:UploadLayerPart',
+        'ecr:CompleteLayerUpload',
+      ],
+      resources: [`arn:aws:ecr:${this.region}:${this.account}:repository/bedrock-agentcore-glitch`],
+    }));
+
+    // ========== SSM Parameters (for cross-stack references) ==========
+    new ssm.StringParameter(this, 'SsmVpcId', {
+      parameterName: SSM_PARAMS.VPC_ID,
+      stringValue: this.vpc.vpcId,
+      description: 'Glitch VPC ID',
+    });
+
+    new ssm.StringParameter(this, 'SsmPrivateSubnets', {
+      parameterName: SSM_PARAMS.PRIVATE_SUBNET_IDS,
+      stringValue: this.privateSubnets.map(s => s.subnetId).join(','),
+      description: 'Glitch private subnet IDs (comma-separated)',
+    });
+
+    new ssm.StringParameter(this, 'SsmPublicSubnets', {
+      parameterName: SSM_PARAMS.PUBLIC_SUBNET_IDS,
+      stringValue: this.publicSubnets.map(s => s.subnetId).join(','),
+      description: 'Glitch public subnet IDs (comma-separated)',
+    });
+
+    new ssm.StringParameter(this, 'SsmAgentCoreSgId', {
+      parameterName: SSM_PARAMS.AGENTCORE_SG_ID,
+      stringValue: this.agentCoreSecurityGroup.securityGroupId,
+      description: 'AgentCore security group ID',
+    });
+
+    new ssm.StringParameter(this, 'SsmRuntimeRoleArn', {
+      parameterName: SSM_PARAMS.RUNTIME_ROLE_ARN,
+      stringValue: this.runtimeRole.roleArn,
+      description: 'AgentCore runtime role ARN',
+    });
+
+    new ssm.StringParameter(this, 'SsmCodeBuildRoleArn', {
+      parameterName: SSM_PARAMS.CODEBUILD_ROLE_ARN,
+      stringValue: this.codeBuildRole.roleArn,
+      description: 'CodeBuild role ARN for agentcore deploy',
+    });
+
+    // ========== Outputs ==========
+    new cdk.CfnOutput(this, 'VpcId', { value: this.vpc.vpcId, description: 'VPC ID' });
+    new cdk.CfnOutput(this, 'PrivateSubnetIds', {
+      value: this.privateSubnets.map(s => s.subnetId).join(','),
+      description: 'Private subnet IDs',
+    });
     new cdk.CfnOutput(this, 'AgentCoreSecurityGroupId', {
       value: this.agentCoreSecurityGroup.securityGroupId,
-      description: 'AgentCore runtime security group ID',
-      exportName: 'GlitchAgentCoreSecurityGroupIdFromVpc',
+      description: 'AgentCore security group ID',
+    });
+    new cdk.CfnOutput(this, 'RuntimeRoleArn', {
+      value: this.runtimeRole.roleArn,
+      description: 'Runtime role ARN (use with agentcore configure --execution-role)',
+    });
+    new cdk.CfnOutput(this, 'CodeBuildRoleArn', {
+      value: this.codeBuildRole.roleArn,
+      description: 'CodeBuild role ARN (set in agent/.bedrock_agentcore.yaml codebuild.execution_role)',
     });
   }
 }
 
-// --- AgentCoreIamStack ---
+// --- DEPRECATED: AgentCoreIamStack and GlitchCodeBuildRoleStack ---
+// These stacks are replaced by GlitchFoundationStack which consolidates
+// VPC + IAM roles + SSM parameters into a single stack.
+// Keeping empty exports for backward compatibility during migration.
 
-/** Export name for runtime role ARN; consuming stacks use Fn.importValue(this) to avoid synthetic cross-stack export. */
-const AGENT_RUNTIME_ROLE_ARN_EXPORT = 'GlitchAgentCoreRuntimeRoleArn';
-
-/**
- * Creates or adopts the GlitchAgentCoreRuntimeRole IAM role so it exists before
- * SecretsStack (which attaches a policy to it). AgentCoreStack then adds
- * the remaining policies to this role.
- *
- * When the role already exists (e.g. from a previous AgentCoreStack), pass
- * -c glitchAgentCoreRoleArn=arn:aws:iam::ACCOUNT:role/GlitchAgentCoreRuntimeRole
- * so this stack adopts it instead of creating a duplicate.
- */
+/** @deprecated Use GlitchFoundationStack instead */
 export class AgentCoreIamStack extends cdk.Stack {
   public readonly agentRuntimeRole: iam.IRole;
-  public readonly codeBuildRole: iam.IRole;
-
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
+    // Read role ARN from SSM (set by GlitchFoundationStack)
+    const roleArn = ssm.StringParameter.valueForStringParameter(this, SSM_PARAMS.RUNTIME_ROLE_ARN);
+    this.agentRuntimeRole = iam.Role.fromRoleArn(this, 'RuntimeRole', roleArn);
+  }
+}
 
-    const existingRoleArn = this.node.tryGetContext('glitchAgentCoreRoleArn') as string | undefined;
-    if (existingRoleArn) {
-      this.agentRuntimeRole = iam.Role.fromRoleArn(
-        this,
-        'AgentRuntimeRole',
-        existingRoleArn
-      );
-    } else {
-      this.agentRuntimeRole = new iam.Role(this, 'AgentRuntimeRole', {
-        assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
-        description: 'IAM role for AgentCore Runtime',
-        roleName: 'GlitchAgentCoreRuntimeRole',
-      });
-    }
+/** @deprecated Use GlitchFoundationStack instead */
+export class GlitchCodeBuildRoleStack extends cdk.Stack {
+  public readonly codeBuildRole: iam.IRole;
+  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
+    super(scope, id, props);
+    // Read role ARN from SSM (set by GlitchFoundationStack)
+    const roleArn = ssm.StringParameter.valueForStringParameter(this, SSM_PARAMS.CODEBUILD_ROLE_ARN);
+    this.codeBuildRole = iam.Role.fromRoleArn(this, 'CodeBuildRole', roleArn);
+  }
+}
 
-    // CodeBuild service role for AgentCore container builds. Must trust codebuild.amazonaws.com
-    // so CodeBuild can assume it when CreateProject is called. Set codebuild.execution_role in
-    // agent/.bedrock_agentcore.yaml to this role's ARN to fix "CodeBuild is not authorized to
-    // perform: sts:AssumeRole on service role".
-    const codeBuildRole = new iam.Role(this, 'CodeBuildRole', {
-      assumedBy: new iam.ServicePrincipal('codebuild.amazonaws.com'),
-      description: 'IAM role for AgentCore CodeBuild project (container build and push)',
-      roleName: 'GlitchAgentCoreCodeBuildRole',
-    });
-    codeBuildRole.addToPolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: [
-          'logs:CreateLogGroup',
-          'logs:CreateLogStream',
-          'logs:PutLogEvents',
-        ],
-        resources: [
-          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/codebuild/*`,
-        ],
-      })
-    );
-    codeBuildRole.addToPolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ['s3:GetObject', 's3:GetObjectVersion', 's3:PutObject'],
-        resources: [
-          `arn:aws:s3:::bedrock-agentcore-codebuild-sources-${this.account}-${this.region}`,
-          `arn:aws:s3:::bedrock-agentcore-codebuild-sources-${this.account}-${this.region}/*`,
-        ],
-      })
-    );
-    codeBuildRole.addToPolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ['s3:GetBucketAcl', 's3:GetBucketLocation'],
-        resources: [
-          `arn:aws:s3:::bedrock-agentcore-codebuild-sources-${this.account}-${this.region}`,
-        ],
-      })
-    );
-    codeBuildRole.addToPolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ['ecr:GetAuthorizationToken'],
-        resources: ['*'],
-      })
-    );
-    codeBuildRole.addToPolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: [
-          'ecr:BatchCheckLayerAvailability',
-          'ecr:GetDownloadUrlForLayer',
-          'ecr:BatchGetImage',
-          'ecr:PutImage',
-          'ecr:InitiateLayerUpload',
-          'ecr:UploadLayerPart',
-          'ecr:CompleteLayerUpload',
-        ],
-        resources: [
-          `arn:aws:ecr:${this.region}:${this.account}:repository/bedrock-agentcore-glitch`,
-        ],
-      })
-    );
-
-    new cdk.CfnOutput(this, 'AgentRuntimeRoleArn', {
-      value: this.agentRuntimeRole.roleArn,
-      description: 'IAM role ARN for AgentCore Runtime',
-      exportName: AGENT_RUNTIME_ROLE_ARN_EXPORT,
-    });
-    this.codeBuildRole = codeBuildRole;
-    new cdk.CfnOutput(this, 'CodeBuildRoleArn', {
-      value: codeBuildRole.roleArn,
-      description: 'IAM role ARN for AgentCore CodeBuild project; set as codebuild.execution_role in agent/.bedrock_agentcore.yaml',
-      exportName: 'GlitchAgentCoreCodeBuildRoleArn',
-    });
+/** @deprecated Use GlitchFoundationStack instead */
+export class VpcStack extends cdk.Stack {
+  public readonly vpc: ec2.IVpc;
+  public readonly privateSubnets: ec2.ISubnet[];
+  public readonly publicSubnets: ec2.ISubnet[];
+  public readonly agentCoreSecurityGroup: ec2.ISecurityGroup;
+  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
+    super(scope, id, props);
+    const vpcId = ssm.StringParameter.valueForStringParameter(this, SSM_PARAMS.VPC_ID);
+    this.vpc = ec2.Vpc.fromLookup(this, 'Vpc', { vpcId });
+    this.privateSubnets = this.vpc.isolatedSubnets;
+    this.publicSubnets = this.vpc.publicSubnets;
+    const sgId = ssm.StringParameter.valueForStringParameter(this, SSM_PARAMS.AGENTCORE_SG_ID);
+    this.agentCoreSecurityGroup = ec2.SecurityGroup.fromSecurityGroupId(this, 'AgentCoreSG', sgId);
   }
 }
 
@@ -740,8 +765,6 @@ export interface TelegramWebhookStackProps extends cdk.StackProps {
   readonly configTable: dynamodb.ITable;
   readonly telegramBotTokenSecret: secretsmanager.ISecret;
   readonly agentCoreRuntimeArn: string;
-  /** Runtime role ARN for webhook policy; when omitted, uses Fn.importValue(GlitchAgentCoreRuntimeRoleArn). */
-  readonly defaultExecutionRoleArn?: string;
 }
 
 /**
@@ -754,9 +777,6 @@ export class TelegramWebhookStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: TelegramWebhookStackProps) {
     super(scope, id, props);
 
-    const roleArn =
-      props.defaultExecutionRoleArn ??
-      cdk.Fn.importValue(AGENT_RUNTIME_ROLE_ARN_EXPORT);
     const { configTable, telegramBotTokenSecret, agentCoreRuntimeArn } = props;
 
     this.webhookFunction = new lambda.Function(this, 'TelegramWebhookFunction', {
@@ -824,52 +844,6 @@ export class TelegramWebhookStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'TelegramWebhookUrl', {
       value: this.webhookUrl,
       description: 'Telegram webhook Lambda Function URL',
-      exportName: 'GlitchTelegramWebhookUrl',
-    });
-
-    const roleName = cdk.Arn.extractResourceName(roleArn, 'role');
-    const lambdaWebhookPolicyName = 'GlitchLambdaWebhookRead';
-    const lambdaWebhookPolicyDocument = JSON.stringify({
-      Version: '2012-10-17',
-      Statement: [
-        {
-          Sid: 'LambdaWebhookRead',
-          Effect: 'Allow',
-          Action: ['lambda:GetFunctionUrlConfig', 'lambda:GetFunction'],
-          Resource: this.webhookFunction.functionArn,
-        },
-      ],
-    });
-    new cdk.custom_resources.AwsCustomResource(this, 'AgentCoreLambdaWebhookReadPolicy', {
-      onCreate: {
-        service: 'IAM',
-        action: 'putRolePolicy',
-        parameters: {
-          RoleName: roleName,
-          PolicyName: lambdaWebhookPolicyName,
-          PolicyDocument: lambdaWebhookPolicyDocument,
-        },
-        physicalResourceId: cdk.custom_resources.PhysicalResourceId.of(`${roleName}-${lambdaWebhookPolicyName}`),
-      },
-      onUpdate: {
-        service: 'IAM',
-        action: 'putRolePolicy',
-        parameters: {
-          RoleName: roleName,
-          PolicyName: lambdaWebhookPolicyName,
-          PolicyDocument: lambdaWebhookPolicyDocument,
-        },
-        physicalResourceId: cdk.custom_resources.PhysicalResourceId.of(`${roleName}-${lambdaWebhookPolicyName}`),
-      },
-      // No onDelete: when this stack is removed, the role may already be deleted (e.g. by GlitchAgentCoreStack),
-      // so deleteRolePolicy would fail. Omitting onDelete lets the custom resource delete succeed; the policy
-      // is removed when the role is deleted.
-      policy: cdk.custom_resources.AwsCustomResourcePolicy.fromStatements([
-        new iam.PolicyStatement({
-          actions: ['iam:PutRolePolicy', 'iam:DeleteRolePolicy'],
-          resources: [roleArn],
-        }),
-      ]),
     });
   }
 
@@ -1928,8 +1902,8 @@ export class TailscaleStack extends cdk.Stack {
 export interface AgentCoreStackProps extends cdk.StackProps {
   readonly vpc: ec2.IVpc;
   readonly agentCoreSecurityGroup: ec2.ISecurityGroup;
-  /** When set (e.g. adopt mode), use this ARN instead of importing from IAM stack. */
-  readonly agentRuntimeRoleArn?: string;
+  /** Runtime role to attach policies to (from GlitchFoundationStack) */
+  readonly runtimeRole: iam.IRole;
 }
 
 export class AgentCoreStack extends cdk.Stack {
@@ -1938,8 +1912,10 @@ export class AgentCoreStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: AgentCoreStackProps) {
     super(scope, id, props);
 
-    const { vpc, agentCoreSecurityGroup, agentRuntimeRoleArn } = props;
+    const { vpc, agentCoreSecurityGroup, runtimeRole } = props;
+    this.agentRuntimeRole = runtimeRole;
 
+    // Add egress rules for Ollama proxy
     agentCoreSecurityGroup.addEgressRule(
       ec2.Peer.ipv4(vpc.vpcCidrBlock),
       ec2.Port.tcp(11434),
@@ -1951,16 +1927,9 @@ export class AgentCoreStack extends cdk.Stack {
       'OpenAI-compatible API via EC2 nginx proxy'
     );
 
-    const roleArn =
-      agentRuntimeRoleArn ?? cdk.Fn.importValue(AGENT_RUNTIME_ROLE_ARN_EXPORT);
-    this.agentRuntimeRole = iam.Role.fromRoleArn(
-      this,
-      'AgentRuntimeRole',
-      roleArn
-    );
-
+    // Attach policies to the runtime role
     new iam.ManagedPolicy(this, 'AgentRuntimeRoleDefaultPolicy', {
-      roles: [this.agentRuntimeRole],
+      roles: [runtimeRole],
       document: new iam.PolicyDocument({
         statements: [
           new iam.PolicyStatement({
@@ -1981,13 +1950,8 @@ export class AgentCoreStack extends cdk.Stack {
           new iam.PolicyStatement({
             sid: 'ECRImageAccess',
             effect: iam.Effect.ALLOW,
-            actions: [
-              'ecr:BatchGetImage',
-              'ecr:GetDownloadUrlForLayer',
-            ],
-            resources: [
-              `arn:aws:ecr:${this.region}:${this.account}:repository/bedrock-agentcore-*`,
-            ],
+            actions: ['ecr:BatchGetImage', 'ecr:GetDownloadUrlForLayer'],
+            resources: [`arn:aws:ecr:${this.region}:${this.account}:repository/bedrock-agentcore-*`],
           }),
           new iam.PolicyStatement({
             sid: 'ECRTokenAccess',
@@ -2040,16 +2004,8 @@ export class AgentCoreStack extends cdk.Stack {
           new iam.PolicyStatement({
             sid: 'TelegramConfigTableAccess',
             effect: iam.Effect.ALLOW,
-            actions: [
-              'dynamodb:GetItem',
-              'dynamodb:PutItem',
-              'dynamodb:UpdateItem',
-              'dynamodb:DeleteItem',
-              'dynamodb:Query',
-            ],
-            resources: [
-              `arn:aws:dynamodb:${this.region}:${this.account}:table/glitch-telegram-config`,
-            ],
+            actions: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem', 'dynamodb:Query'],
+            resources: [`arn:aws:dynamodb:${this.region}:${this.account}:table/glitch-telegram-config`],
           }),
           new iam.PolicyStatement({
             sid: 'SoulS3Access',
@@ -2075,24 +2031,20 @@ export class AgentCoreStack extends cdk.Stack {
             effect: iam.Effect.ALLOW,
             actions: ['cloudwatch:PutMetricData'],
             resources: ['*'],
-            conditions: {
-              StringEquals: { 'cloudwatch:namespace': 'Glitch/Agent' },
-            },
+            conditions: { StringEquals: { 'cloudwatch:namespace': 'Glitch/Agent' } },
           }),
         ],
       }),
     });
 
     new cdk.CfnOutput(this, 'AgentRuntimeRoleArn', {
-      value: this.agentRuntimeRole.roleArn,
-      description: 'IAM role ARN for AgentCore Runtime (use with agentcore configure --execution-role)',
-      exportName: 'GlitchAgentRuntimeRoleArn',
+      value: runtimeRole.roleArn,
+      description: 'IAM role ARN for AgentCore Runtime',
     });
 
     new cdk.CfnOutput(this, 'AgentCoreSecurityGroupId', {
       value: agentCoreSecurityGroup.securityGroupId,
       description: 'Security group ID for AgentCore ENIs',
-      exportName: 'GlitchAgentCoreSecurityGroupIdFromStack',
     });
 
     new cdk.CfnOutput(this, 'VpcConfigForAgentCore', {
@@ -2101,7 +2053,6 @@ export class AgentCoreStack extends cdk.Stack {
         securityGroups: [agentCoreSecurityGroup.securityGroupId],
       }),
       description: 'VPC configuration for AgentCore Runtime (JSON)',
-      exportName: 'GlitchVpcConfig',
     });
   }
 }

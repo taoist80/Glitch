@@ -3,13 +3,20 @@
 Pre-deploy hook: Auto-configure VPC settings before AgentCore deployment.
 
 This script runs automatically before `agentcore deploy` to:
-1. Fetch VPC subnet IDs and security group ID from CloudFormation
-2. Update .bedrock_agentcore.yaml with correct field names
+1. Fetch VPC subnet IDs, security group ID, and IAM role ARNs from SSM Parameters
+2. Update .bedrock_agentcore.yaml with correct configuration
 3. Validate configuration before proceeding
+
+SSM Parameters (set by GlitchFoundationStack):
+  /glitch/vpc/id                    - VPC ID
+  /glitch/vpc/private-subnet-ids    - Comma-separated private subnet IDs
+  /glitch/security-groups/agentcore - AgentCore security group ID
+  /glitch/iam/runtime-role-arn      - Runtime role ARN
+  /glitch/iam/codebuild-role-arn    - CodeBuild role ARN
 
 Exit codes:
   0 - Success (configuration updated or already correct)
-  1 - Error (missing CloudFormation stacks or invalid configuration)
+  1 - Error (missing SSM parameters or invalid configuration)
   2 - Configuration update skipped (not in VPC mode)
 """
 
@@ -27,8 +34,16 @@ except ImportError:
     sys.exit(0)
 
 REGION = os.environ.get('AWS_REGION', 'us-west-2')
-VPC_STACK_NAME = 'GlitchVpcStack'
-AGENTCORE_STACK_NAME = 'GlitchAgentCoreStack'
+
+# SSM Parameter names (must match SSM_PARAMS in infrastructure/lib/stack.ts)
+SSM_VPC_ID = '/glitch/vpc/id'
+SSM_PRIVATE_SUBNET_IDS = '/glitch/vpc/private-subnet-ids'
+SSM_AGENTCORE_SG_ID = '/glitch/security-groups/agentcore'
+SSM_RUNTIME_ROLE_ARN = '/glitch/iam/runtime-role-arn'
+SSM_CODEBUILD_ROLE_ARN = '/glitch/iam/codebuild-role-arn'
+
+# Fallback: CloudFormation stack names (for backward compatibility)
+FOUNDATION_STACK_NAME = 'GlitchFoundationStack'
 TAILSCALE_STACK_NAME = 'GlitchTailscaleStack'
 
 AGENT_DIR = Path(__file__).parent.parent
@@ -46,8 +61,19 @@ def log(message: str, level: str = 'INFO'):
     print(f"{prefix} {message}")
 
 
+def get_ssm_parameter(ssm_client, name: str) -> str | None:
+    """Get a parameter value from SSM Parameter Store."""
+    try:
+        response = ssm_client.get_parameter(Name=name)
+        return response['Parameter']['Value']
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'ParameterNotFound':
+            return None
+        raise
+
+
 def get_stack_outputs(cfn_client, stack_name: str) -> dict:
-    """Get outputs from a CloudFormation stack."""
+    """Get outputs from a CloudFormation stack (fallback)."""
     try:
         response = cfn_client.describe_stacks(StackName=stack_name)
         outputs = {
@@ -57,7 +83,6 @@ def get_stack_outputs(cfn_client, stack_name: str) -> dict:
         return outputs
     except ClientError as e:
         if e.response['Error']['Code'] == 'ValidationError':
-            log(f"Stack {stack_name} not found", 'WARN')
             return {}
         raise
 
@@ -100,60 +125,36 @@ def main():
         log(f"Network mode is '{network_mode}', not VPC. Skipping auto-configuration.")
         sys.exit(0)
     
-    # Check if already configured with CORRECT field names (subnets, security_groups)
-    # Always update security group in case it changed (e.g. stack recreated)
-    mode_config = network_config.get('network_mode_config', {})
-    has_subnets = bool(mode_config.get('subnets'))
-    has_security_groups = bool(mode_config.get('security_groups'))
+    log("VPC mode enabled. Fetching configuration from SSM Parameters...")
     
-    if has_subnets and has_security_groups:
-        log("VPC configuration already present. Checking if security group needs update...")
-    else:
-        log("VPC mode enabled but configuration missing or using wrong field names. Fetching from CloudFormation...")
-    
-    # Fetch from CloudFormation
     try:
+        ssm_client = boto3.client('ssm', region_name=REGION)
         cfn_client = boto3.client('cloudformation', region_name=REGION)
         
-        vpc_outputs = get_stack_outputs(cfn_client, VPC_STACK_NAME)
+        # Fetch from SSM Parameters (primary source)
+        subnet_ids_str = get_ssm_parameter(ssm_client, SSM_PRIVATE_SUBNET_IDS)
+        security_group_id = get_ssm_parameter(ssm_client, SSM_AGENTCORE_SG_ID)
+        execution_role_arn = get_ssm_parameter(ssm_client, SSM_RUNTIME_ROLE_ARN)
+        codebuild_role_arn = get_ssm_parameter(ssm_client, SSM_CODEBUILD_ROLE_ARN)
         
-        if not vpc_outputs:
-            log("VpcStack not found. Please deploy infrastructure first:", 'ERROR')
-            log("  cd infrastructure && cdk deploy GlitchVpcStack", 'ERROR')
+        if not subnet_ids_str or not security_group_id:
+            log("SSM Parameters not found. Please deploy GlitchFoundationStack first:", 'ERROR')
+            log("  cd infrastructure && cdk deploy GlitchFoundationStack", 'ERROR')
             sys.exit(1)
         
-        subnet_ids = vpc_outputs.get('PrivateSubnetIds', '').split(',')
-        # Security group now comes from VpcStack (moved to avoid circular dependencies)
-        # Output key is AgentCoreSecurityGroupId (export name is GlitchAgentCoreSecurityGroupIdFromVpc)
-        security_group_id = vpc_outputs.get('AgentCoreSecurityGroupId')
+        subnet_ids = subnet_ids_str.split(',')
         
-        # Execution role comes from AgentCoreStack (optional - might not be deployed yet)
-        agentcore_outputs = get_stack_outputs(cfn_client, AGENTCORE_STACK_NAME)
-        execution_role_arn = agentcore_outputs.get('AgentRuntimeRoleArn') if agentcore_outputs else None
-        
-        if not subnet_ids or not subnet_ids[0]:
-            log("PrivateSubnetIds not found in VPC stack outputs", 'ERROR')
-            sys.exit(1)
-        
-        if not security_group_id:
-            log("AgentCoreSecurityGroupId not found in AgentCore stack outputs", 'ERROR')
-            sys.exit(1)
-        
-        log(f"Found VPC configuration:")
+        log(f"Found VPC configuration from SSM:")
         log(f"  Subnet IDs: {subnet_ids}")
         log(f"  Security Group ID: {security_group_id}")
         if execution_role_arn:
             log(f"  Execution Role ARN: {execution_role_arn}")
+        if codebuild_role_arn:
+            log(f"  CodeBuild Role ARN: {codebuild_role_arn}")
         
-        # Update config with CORRECT field names (subnets, security_groups)
-        # The toolkit expects these exact names, not subnet_ids/security_group_ids
+        # Update config with correct field names
         if 'network_mode_config' not in network_config:
             network_config['network_mode_config'] = {}
-        
-        # Check if security group changed
-        current_sg = mode_config.get('security_groups', [])
-        if current_sg and current_sg[0] != security_group_id:
-            log(f"Security group changed: {current_sg[0]} → {security_group_id}")
         
         network_config['network_mode_config']['subnets'] = subnet_ids
         network_config['network_mode_config']['security_groups'] = [security_group_id]
@@ -164,7 +165,14 @@ def main():
         
         if execution_role_arn:
             agent_config['aws']['execution_role'] = execution_role_arn
-        
+            log("Execution role set from SSM", 'SUCCESS')
+
+        if codebuild_role_arn:
+            if 'codebuild' not in agent_config:
+                agent_config['codebuild'] = {}
+            agent_config['codebuild']['execution_role'] = codebuild_role_arn
+            log("CodeBuild execution_role set from SSM", 'SUCCESS')
+
         # Ollama/Mistral proxy: set GLITCH_OLLAMA_PROXY_HOST from Tailscale EC2 private IP
         tailscale_outputs = get_stack_outputs(cfn_client, TAILSCALE_STACK_NAME)
         private_ip = tailscale_outputs.get('PrivateIp')
@@ -174,9 +182,9 @@ def main():
             if 'environment_variables' not in agent_config['aws']:
                 agent_config['aws']['environment_variables'] = {}
             agent_config['aws']['environment_variables']['GLITCH_OLLAMA_PROXY_HOST'] = private_ip
-            log(f"Ollama proxy host set to {private_ip} (from {TAILSCALE_STACK_NAME})", 'SUCCESS')
+            log(f"Ollama proxy host set to {private_ip}", 'SUCCESS')
         else:
-            log(f"{TAILSCALE_STACK_NAME} not found or no PrivateIp output; GLITCH_OLLAMA_PROXY_HOST unchanged", 'WARN')
+            log(f"Tailscale stack not found; GLITCH_OLLAMA_PROXY_HOST unchanged", 'WARN')
         
         save_config(config)
         log("VPC configuration updated successfully", 'SUCCESS')

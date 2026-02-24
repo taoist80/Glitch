@@ -797,35 +797,101 @@ mcp_servers:
 
 ## Infrastructure Components
 
+### CDK Stack Architecture
+
+The infrastructure uses a **consolidated foundation stack** design that eliminates cross-stack dependency issues:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    PHASE 1: FOUNDATION                          │
+│  GlitchFoundationStack                                          │
+│  ├── VPC + Subnets + VPC Endpoints                              │
+│  ├── Security Groups (AgentCore)                                │
+│  ├── IAM Roles (Runtime, CodeBuild) - auto-generated names      │
+│  └── SSM Parameters (role ARNs, VPC IDs, SG IDs)                │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    PHASE 2: AGENT                               │
+│  pre-deploy-configure.py (reads SSM parameters)                 │
+│  agentcore deploy (creates runtime, writes ARN to yaml)         │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    PHASE 3: APPLICATION                         │
+│  GlitchSecretsStack, GlitchStorageStack, GlitchGatewayStack,    │
+│  GlitchTelegramWebhookStack, GlitchTailscaleStack,              │
+│  GlitchUiHostingStack, GlitchCertificateStack, GlitchAgentCoreStack │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Key Design Principles
+
+1. **No hardcoded IAM role names** - CloudFormation generates unique names, preventing conflicts
+2. **SSM Parameters for cross-stack references** - No `Fn.importValue` dependencies that block updates
+3. **Single foundation stack** - VPC + IAM in one stack, simpler to manage and recover
+4. **Idempotent deployment** - Can be run multiple times without manual intervention
+
+### SSM Parameters
+
+The foundation stack creates these SSM parameters for cross-stack communication:
+
+| Parameter | Description |
+|-----------|-------------|
+| `/glitch/vpc/id` | VPC ID |
+| `/glitch/vpc/private-subnet-ids` | Comma-separated private subnet IDs |
+| `/glitch/vpc/public-subnet-ids` | Comma-separated public subnet IDs |
+| `/glitch/security-groups/agentcore` | AgentCore security group ID |
+| `/glitch/iam/runtime-role-arn` | Runtime role ARN |
+| `/glitch/iam/codebuild-role-arn` | CodeBuild role ARN |
+
 ### CDK Stacks
 
 | Stack | Purpose | Key Resources |
 |-------|---------|---------------|
-| `GlitchVpcStack` | Network foundation | VPC, Subnets, VPC Endpoints (S3, ECR, CloudWatch, Secrets Manager, Bedrock) |
-| `GlitchSecretsStack` | Credential management | Secrets Manager (Tailscale auth, API keys, Telegram token, Porkbun API, Pi-hole API) |
+| `GlitchFoundationStack` | Foundation infrastructure | VPC, Subnets, VPC Endpoints, Security Groups, IAM Roles (Runtime + CodeBuild), SSM Parameters |
+| `GlitchSecretsStack` | Credential management | Secrets Manager references (Tailscale auth, API keys, Telegram token, Porkbun API, Pi-hole API) |
 | `GlitchTailscaleStack` | Hybrid connectivity | EC2 t4g.nano, Security Groups; optional nginx UI proxy + Let's Encrypt (Porkbun DNS) |
-| `GlitchUiHostingStack` | UI static hosting | S3 bucket for built UI, optional CloudFront |
-| `GlitchAgentCoreStack` | Agent runtime support | IAM roles, Security Groups |
-| `GlitchStorageStack` | Persistent storage | DynamoDB config table, S3 soul bucket, SSM parameters, CloudWatch telemetry log group |
+| `GlitchUiHostingStack` | UI static hosting | S3 bucket for built UI, CloudFront distribution |
+| `GlitchAgentCoreStack` | Agent runtime policies | Managed policies attached to runtime role |
+| `GlitchStorageStack` | Persistent storage | DynamoDB config table, S3 soul bucket, CloudWatch telemetry log group |
 | `GlitchGatewayStack` | Gateway | Lambda Function URL (invocations, /api/*, keepalive) |
-| `GlitchTelegramWebhookStack` | Telegram integration | Lambda Function URL for Telegram webhook, DynamoDB config |
+| `GlitchTelegramWebhookStack` | Telegram integration | Lambda Function URL for Telegram webhook |
+| `GlitchCertificateStack` | TLS certificates | ACM certificate in us-east-1 for CloudFront |
 
 **Note:** The Tailscale EC2 instance uses only the minimal root volume from the AMI. No dedicated EBS volumes are provisioned.
 
-### Dynamic ARN Resolution
+### Dynamic Configuration Resolution
 
-`infrastructure/bin/app.ts` reads the AgentCore runtime ARN and execution role from `agent/.bedrock_agentcore.yaml` at synth/deploy time. This eliminates hardcoded ARNs and ensures the Gateway and Telegram stacks always use the current agent ARN after `agentcore deploy` or `agentcore destroy`/recreate cycles.
+Configuration is resolved through two mechanisms:
+
+**1. SSM Parameters (Infrastructure → Agent)**
+
+The `GlitchFoundationStack` writes VPC, security group, and IAM role information to SSM Parameter Store. The `pre-deploy-configure.py` script reads these parameters and updates `agent/.bedrock_agentcore.yaml` before `agentcore deploy`:
+
+```python
+# SSM Parameters read by pre-deploy-configure.py
+SSM_PRIVATE_SUBNET_IDS = '/glitch/vpc/private-subnet-ids'
+SSM_AGENTCORE_SG_ID = '/glitch/security-groups/agentcore'
+SSM_RUNTIME_ROLE_ARN = '/glitch/iam/runtime-role-arn'
+SSM_CODEBUILD_ROLE_ARN = '/glitch/iam/codebuild-role-arn'
+```
+
+**2. YAML Config (Agent → Infrastructure)**
+
+`infrastructure/bin/app.ts` reads the AgentCore runtime ARN from `agent/.bedrock_agentcore.yaml` at synth/deploy time. This ensures the Gateway and Telegram stacks always use the current agent ARN after `agentcore deploy`:
 
 ```typescript
-function getAgentCoreConfig(agentName: string = 'Glitch') {
+function getAgentCoreRuntimeArn(agentName: string = 'Glitch'): string | null {
   const configPath = path.resolve(__dirname, '../../agent/.bedrock_agentcore.yaml');
   const config = yaml.parse(fs.readFileSync(configPath, 'utf8'));
-  return {
-    runtimeArn: config?.agents?.[agentName]?.bedrock_agentcore?.agent_arn ?? null,
-    executionRoleArn: config?.agents?.[agentName]?.aws?.execution_role ?? null,
-  };
+  return config?.agents?.[agentName]?.bedrock_agentcore?.agent_arn ?? null;
 }
 ```
+
+This two-way configuration flow eliminates hardcoded values and ensures consistency between infrastructure and agent deployments.
 
 ### Potentially Unused Resources
 
@@ -1235,15 +1301,21 @@ aws logs filter-log-events \
 ```
 AgentCore-Glitch/
 ├── infrastructure/              # CDK TypeScript
-│   ├── bin/app.ts              # CDK app entry
+│   ├── bin/app.ts              # CDK app entry (reads runtime ARN from yaml)
 │   ├── lib/
-│   │   ├── vpc-stack.ts        # VPC, subnets, endpoints
-│   │   ├── secrets-stack.ts    # Secrets Manager
-│   │   ├── tailscale-stack.ts  # EC2 Tailscale connector, optional nginx + Let's Encrypt
-│   │   ├── ui-hosting-stack.ts # S3 (and optional CloudFront) for UI
-│   │   ├── agentcore-stack.ts  # IAM, security groups
-│   │   ├── storage-stack.ts    # DynamoDB, S3, SSM, CloudWatch logs
-│   │   └── gateway-stack.ts    # Gateway Lambda (invocations, /api/*, keepalive)
+│   │   └── stack.ts            # All stacks in single file:
+│   │                           #   - GlitchFoundationStack (VPC, IAM, SSM)
+│   │                           #   - GlitchSecretsStack
+│   │                           #   - GlitchTailscaleStack (EC2, nginx, TLS)
+│   │                           #   - GlitchUiHostingStack (S3, CloudFront)
+│   │                           #   - GlitchAgentCoreStack (runtime policies)
+│   │                           #   - GlitchStorageStack (DynamoDB, S3, logs)
+│   │                           #   - GlitchGatewayStack (Lambda gateway)
+│   │                           #   - GlitchTelegramWebhookStack
+│   │                           #   - GlitchCertificateStack (ACM)
+│   ├── docs/
+│   │   └── DEPLOYMENT.md       # Deployment guide
+│   ├── test/                   # Jest unit tests
 │   └── package.json
 ├── agent/                       # Python Strands agent
 │   ├── src/
@@ -1280,11 +1352,13 @@ AgentCore-Glitch/
 │   │           ├── registry.py           # ToolRegistry (grouped tools)
 │   │           ├── ollama_tools.py
 │   │           ├── network_tools.py
-│   │           ├── pihole_tools.py       # Pi-hole DNS record management (list/add/delete/update)
+│   │           ├── pihole_tools.py       # Pi-hole DNS record management
 │   │           ├── soul_tools.py
 │   │           ├── memory_tools.py
 │   │           ├── telemetry_tools.py
 │   │           └── code_interpreter_tools.py
+│   ├── scripts/
+│   │   └── pre-deploy-configure.py  # Reads SSM, updates yaml before deploy
 │   ├── mcp_servers.yaml        # MCP server definitions (optional)
 │   ├── Dockerfile
 │   ├── requirements.txt
@@ -1312,41 +1386,80 @@ AgentCore-Glitch/
 - Ollama hosts accessible on local network
 - Telegram bot token (optional, from @BotFather)
 
-### Quick Start
+### Quick Start (New Account)
+
+**Phase 1: Deploy Foundation Stack**
 
 ```bash
-# 1. Deploy infrastructure
 cd infrastructure
 pnpm install && pnpm build
 pnpm run cdk bootstrap aws://999776382415/us-west-2
-pnpm run deploy
+pnpm cdk deploy GlitchFoundationStack --require-approval never
+```
 
-# 2. Create Telegram bot and store token in Secrets Manager
-# - Message @BotFather on Telegram
-# - Create new bot with /newbot
-# - Store the bot token in Secrets Manager:
+This creates VPC, IAM roles, security groups, and SSM parameters.
+
+**Phase 2: Deploy Agent**
+
+```bash
+cd ../agent
+python3 scripts/pre-deploy-configure.py  # Reads SSM, updates yaml
+agentcore deploy
+```
+
+**Phase 3: Deploy Application Stacks**
+
+```bash
+cd ../infrastructure
+pnpm cdk deploy --all --require-approval never
+```
+
+**Phase 4: Configure Telegram (Optional)**
+
+```bash
+# Create Telegram bot and store token in Secrets Manager
 aws secretsmanager create-secret \
   --name glitch/telegram-bot-token \
   --secret-string "your-bot-token" \
   --region us-west-2
 
-# 3. Deploy agent
-cd ../agent
-python -m venv venv && source venv/bin/activate
-pip install bedrock-agentcore-starter-toolkit
+# Check startup logs for pairing code, send to bot on Telegram
+```
 
-agentcore launch
+### Existing Account (Updates)
 
-# 4. Claim Telegram bot
-# - Check startup logs for pairing code
-# - Send code to your bot on Telegram
-# - Bot confirms ownership
+After initial deployment:
 
-# 5. Test
-agentcore invoke '{"prompt": "Hello, Glitch!"}'
+```bash
+cd infrastructure
+pnpm build
+pnpm cdk deploy --all --require-approval never
+```
 
-# Or test via Telegram
-# - Send message to your bot
+If you need to update the agent:
+
+```bash
+cd agent
+python3 scripts/pre-deploy-configure.py
+agentcore deploy
+```
+
+### Verify Deployment
+
+```bash
+# Check SSM parameters
+aws ssm get-parameters-by-path --path /glitch --recursive --output table
+
+# Check agent status
+agentcore status
+
+# View logs
+aws logs tail /aws/bedrock-agentcore/runtimes/{agent-id}-DEFAULT --follow
+
+# Test Tailscale connectivity (from EC2)
+aws ssm start-session --target <instance-id>
+tailscale status
+curl http://10.10.110.202:11434/api/tags
 ```
 
 ### Telegram Configuration
@@ -1430,7 +1543,7 @@ The UI uses REST endpoints at `/api`:
 
 ### Overview
 
-The project includes a comprehensive automated testing and deployment system that eliminates manual configuration steps and ensures infrastructure correctness.
+The project uses a three-phase deployment model with SSM Parameter Store for cross-stack communication, eliminating manual configuration and circular dependencies.
 
 ### Architecture
 
@@ -1439,69 +1552,49 @@ The project includes a comprehensive automated testing and deployment system tha
 │              Automated Deployment Workflow                   │
 └─────────────────────────────────────────────────────────────┘
 
-Infrastructure Deployment              Agent Deployment
+Phase 1: Foundation                Phase 2: Agent
          │                                   │
          ▼                                   ▼
 ┌──────────────────┐              ┌─────────────────────┐
-│ CDK Deploy       │              │ make deploy         │
-│ (TypeScript)     │              │ or                  │
-│                  │              │ ./scripts/deploy.sh │
-│ • VPC Stack      │              └──────────┬──────────┘
-│ • Tailscale      │                         │
-│ • AgentCore      │                         ▼
-│ • Secrets        │              ┌─────────────────────┐
-└────────┬─────────┘              │ Pre-Deploy Hook     │
-         │                        │ (auto-configure)    │
-         │                        │                     │
-         ▼                        │ • Fetch CFN outputs │
-┌──────────────────┐              │ • Update VPC config │
-│ Unit Tests       │              │ • Set subnet IDs    │
-│ (Jest)           │              │ • Set security groups│
+│ CDK Deploy       │              │ pre-deploy-configure│
+│ Foundation Stack │              │ (reads SSM params)  │
 │                  │              └──────────┬──────────┘
-│ 47 tests         │                         │
-│ • VPC (17)       │                         ▼
-│ • Tailscale (17) │              ┌─────────────────────┐
-│ • AgentCore (13) │              │ agentcore deploy    │
+│ • VPC + Subnets  │                         │
+│ • VPC Endpoints  │                         ▼
+│ • Security Groups│              ┌─────────────────────┐
+│ • IAM Roles      │              │ agentcore deploy    │
+│ • SSM Parameters │              │ (writes ARN to yaml)│
 └────────┬─────────┘              └──────────┬──────────┘
          │                                   │
-         ▼                                   ▼
-┌──────────────────┐              ┌─────────────────────┐
-│ Integration Tests│              │ Post-Deploy Hook    │
-│ (pytest)         │              │ (verify)            │
-│                  │              │                     │
-│ • VPC exists     │              │ • Check VPC config  │
-│ • Endpoints OK   │              │ • Verify endpoints  │
-│ • Routes OK      │              │ • Test connectivity │
-│ • Security OK    │              └─────────────────────┘
-└──────────────────┘
+         │    ┌──────────────────────────────┘
+         │    │
+         ▼    ▼
+┌──────────────────────────────────────────────────────────────┐
+│                    Phase 3: Application                       │
+│  CDK Deploy (reads runtime ARN from yaml)                     │
+│  • SecretsStack, StorageStack, GatewayStack                   │
+│  • TelegramWebhookStack, TailscaleStack, UiHostingStack       │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ### Unit Tests (Infrastructure)
 
 **Location:** `infrastructure/test/`
 
-**47 automated tests** covering CDK infrastructure:
+Tests covering CDK infrastructure:
 
 ```typescript
-// vpc-stack.test.ts (17 tests)
+// vpc-stack.test.ts → foundation-stack.test.ts
 - VPC configuration (CIDR, DNS)
 - Subnet creation (2 AZs)
-- NAT gateway cost optimization
 - VPC endpoints (8 endpoints)
-- Stack outputs
+- Security group creation
+- IAM role creation (no hardcoded names)
+- SSM parameter creation
 
-// tailscale-stack.test.ts (17 tests)
-- EC2 instance configuration
-- Security group rules
-- IAM roles and policies
-- User data validation
-- VPC route creation
-
-// agentcore-stack.test.ts (13 tests)
-- Security groups
-- IAM permissions (Bedrock, ECR, Memory)
-- Secrets access
-- Stack outputs
+// agentcore-stack.test.ts
+- Policy attachments
+- No duplicate resource creation
 ```
 
 **Run tests:**
@@ -1510,288 +1603,112 @@ cd infrastructure
 pnpm test
 ```
 
-**Example output:**
-```
-PASS test/vpc-stack.test.ts
-PASS test/tailscale-stack.test.ts
-PASS test/agentcore-stack.test.ts
-
-Test Suites: 3 passed, 3 total
-Tests:       47 passed, 47 total
-Time:        4.126 s
-```
-
-### Integration Tests (Deployed Infrastructure)
-
-**Location:** `infrastructure/test/test_integration.py`
-
-**Python-based tests** that verify deployed AWS infrastructure:
-
-```python
-# TestVpcStack
-- VPC exists and is available
-- Private subnets in correct AZs
-- All VPC endpoints present
-- No NAT gateways (cost check)
-
-# TestTailscaleStack
-- EC2 instance running (t4g.nano)
-- Source/dest check disabled
-- Security group rules correct
-- VPC routes to 10.10.110.0/24
-
-# TestAgentCoreStack
-- Security group exists
-- IAM role has correct permissions
-- VPC config output is valid
-
-# Optional (manual enable)
-- Tailscale connectivity
-- Ollama host reachability
-```
-
-**Run tests:**
-```bash
-cd infrastructure
-pytest test/test_integration.py -v
-
-# Specific test class
-pytest test/test_integration.py::TestVpcStack -v
-```
-
 ### Auto-Configuration System
 
 **Location:** `agent/scripts/`
 
 #### Pre-Deploy Configuration (`pre-deploy-configure.py`)
 
-Automatically fetches VPC configuration from CloudFormation and updates `.bedrock_agentcore.yaml`:
+Automatically fetches VPC configuration from SSM Parameter Store and updates `.bedrock_agentcore.yaml`:
 
 **What it does:**
-1. Checks if agent is in VPC mode
-2. Fetches `PrivateSubnetIds` from `GlitchVpcStack`
-3. Fetches `AgentCoreSecurityGroupId` from `GlitchAgentCoreStack`
-4. Updates `network_mode_config` in agent configuration
-5. Skips if already configured
+1. Reads SSM parameters created by `GlitchFoundationStack`
+2. Updates `network_mode_config` with subnet IDs and security group IDs
+3. Updates `execution_role` with the runtime role ARN
+4. Skips if already configured
+
+**SSM Parameters read:**
+```python
+SSM_VPC_ID = '/glitch/vpc/id'
+SSM_PRIVATE_SUBNET_IDS = '/glitch/vpc/private-subnet-ids'
+SSM_AGENTCORE_SG_ID = '/glitch/security-groups/agentcore'
+SSM_RUNTIME_ROLE_ARN = '/glitch/iam/runtime-role-arn'
+SSM_CODEBUILD_ROLE_ARN = '/glitch/iam/codebuild-role-arn'
+```
 
 **Configuration updated:**
 ```yaml
 agents:
   Glitch:
     aws:
+      execution_role: arn:aws:iam::...:role/GlitchFoundation...  # From SSM
       network_configuration:
         network_mode: VPC
         network_mode_config:
           subnet_ids:
-            - subnet-xxx  # Auto-populated from CFN
+            - subnet-xxx  # From SSM
             - subnet-yyy
           security_group_ids:
-            - sg-zzz      # Auto-populated from CFN
-```
-
-#### Post-Deploy Verification (`post-deploy-verify.py`)
-
-Verifies deployment after `agentcore deploy`:
-
-**Checks performed:**
-- VPC configuration is complete
-- Subnets exist and are available
-- Security groups exist
-- VPC endpoints are present (Bedrock, ECR, etc.)
-- Network connectivity is functional
-
-#### Deployment Wrapper (`deploy.sh`)
-
-Unified deployment script that orchestrates the full workflow:
-
-```bash
-./scripts/deploy.sh [options]
-
-Options:
-  --skip-pre-check     Skip pre-deploy configuration
-  --skip-post-check    Skip post-deploy verification
-  --help               Show help
-```
-
-**Workflow:**
-1. Pre-deploy: Auto-configure VPC settings
-2. Deploy: Run `agentcore deploy`
-3. Post-deploy: Verify deployment
-
-### Makefile Targets
-
-**Location:** `agent/Makefile`
-
-Convenience targets for common operations:
-
-```makefile
-make deploy       # Full deployment workflow
-make deploy-only  # Deploy without pre/post checks
-make configure    # Configure VPC only
-make verify       # Verify deployment only
-make test         # Run agent tests
-make clean        # Clean build artifacts
+            - sg-zzz      # From SSM
 ```
 
 ### Deployment Workflows
 
-#### Option 1: Fully Automated (Recommended)
+#### Option 1: Full Deployment (New Account)
 
 ```bash
-# Deploy infrastructure
+# Phase 1: Foundation
 cd infrastructure
-cdk deploy --all
+pnpm install && pnpm build
+pnpm cdk deploy GlitchFoundationStack --require-approval never
 
-# Approve Tailscale route (one-time manual step)
-# Visit admin.tailscale.com
-
-# Deploy agent (fully automated)
+# Phase 2: Agent
 cd ../agent
-make deploy
-```
-
-**Output example:**
-```
-[pre-deploy] Checking VPC configuration...
-[pre-deploy] Fetching from CloudFormation...
-[pre-deploy] Found VPC configuration:
-[pre-deploy]   Subnet IDs: ['subnet-xxx', 'subnet-yyy']
-[pre-deploy]   Security Group ID: sg-zzz
-[pre-deploy] ✓ VPC configuration updated
-
-[deploy] Running: agentcore deploy
-[agentcore] ✓ Deployment successful
-
-[post-deploy] ✓ VPC endpoints verified
-[post-deploy] ✓ All checks passed!
-```
-
-#### Option 2: Manual Configuration
-
-```bash
-# Get CloudFormation outputs
-aws cloudformation describe-stacks --stack-name GlitchVpcStack
-aws cloudformation describe-stacks --stack-name GlitchAgentCoreStack
-
-# Edit configuration manually
-vim agent/.bedrock_agentcore.yaml
-
-# Deploy
-cd agent
+python3 scripts/pre-deploy-configure.py
 agentcore deploy
+
+# Phase 3: Application
+cd ../infrastructure
+pnpm cdk deploy --all --require-approval never
 ```
 
-### Full Orchestration Script
-
-**Location:** `infrastructure/scripts/deploy-and-verify.sh`
-
-Deploys everything and runs all tests:
+#### Option 2: Update Existing Deployment
 
 ```bash
-./scripts/deploy-and-verify.sh [options]
-
-Options:
-  --skip-deploy   Skip CDK deployment (tests only)
-  --skip-tests    Skip tests (deploy only)
-  --dry-run       Show what would be done
-```
-
-**What it does:**
-1. Checks prerequisites (AWS CLI, CDK, Python)
-2. Builds TypeScript infrastructure
-3. Deploys all CDK stacks
-4. Configures AgentCore VPC settings
-5. Runs unit tests (Jest)
-6. Runs integration tests (pytest)
-7. Shows next steps
-
-### Testing Strategy
-
-```
-┌────────────────────────────────────────────────────────┐
-│                   Testing Pyramid                      │
-└────────────────────────────────────────────────────────┘
-
-                    ┌──────────────┐
-                    │ Manual Tests │  ← Tailscale route approval
-                    │              │    Ollama connectivity
-                    └──────────────┘
-                    
-            ┌──────────────────────────┐
-            │  Integration Tests       │  ← Deployed AWS resources
-            │  (pytest)                │    VPC, EC2, Security Groups
-            │                          │    Live connectivity checks
-            └──────────────────────────┘
-            
-    ┌──────────────────────────────────────┐
-    │      Unit Tests (Jest)               │  ← CDK templates
-    │      47 tests                        │    CloudFormation resources
-    │      VPC, Tailscale, AgentCore       │    IAM policies
-    └──────────────────────────────────────┘
+cd infrastructure
+pnpm build
+pnpm cdk deploy --all --require-approval never
 ```
 
 ### Benefits
 
-✅ **No Manual Configuration** - VPC settings fetched automatically  
-✅ **No Copy-Paste Errors** - Direct API integration with CloudFormation  
-✅ **Automatic Verification** - Issues detected immediately  
-✅ **Repeatable Process** - Same command every time  
-✅ **Well-Tested** - 47 unit tests + integration tests  
-✅ **Clear Errors** - Meaningful error messages with solutions  
-✅ **One Command Deploy** - `make deploy` handles everything  
-
-### Exit Codes
-
-All scripts follow these conventions:
-
-- `0` - Success
-- `1` - Error (deployment should abort)
-- `2` - Warning (deployment can continue but issues detected)
+✅ **No Manual Configuration** - VPC settings fetched from SSM automatically  
+✅ **No Circular Dependencies** - SSM parameters decouple stacks  
+✅ **No Hardcoded Role Names** - CloudFormation generates unique names  
+✅ **Recoverable** - Foundation stack can be deleted and recreated cleanly  
+✅ **Repeatable Process** - Same commands every time  
+✅ **Clear Errors** - Meaningful error messages with solutions
 
 ### Troubleshooting
 
-#### "CloudFormation stacks not found"
+#### "SSM parameter not found"
 
-Deploy infrastructure first:
+Deploy foundation stack first:
 ```bash
 cd infrastructure
-cdk deploy GlitchVpcStack GlitchAgentCoreStack
+pnpm cdk deploy GlitchFoundationStack
 ```
 
-#### "VPC configuration incomplete"
+#### "Stack in ROLLBACK_COMPLETE state"
 
-Run configuration script manually:
+Delete the failed stack and redeploy:
 ```bash
-cd agent
-python3 scripts/pre-deploy-configure.py
+aws cloudformation delete-stack --stack-name GlitchFoundationStack
+# Wait for deletion to complete
+pnpm cdk deploy GlitchFoundationStack
 ```
 
-#### "Some VPC endpoints missing"
+#### "Role already exists"
 
-Verify VPC stack:
+This shouldn't happen with the new architecture (no hardcoded role names). If it does, the old role may need manual deletion:
 ```bash
-cd infrastructure
-pytest test/test_integration.py::TestVpcStack -v
+aws iam delete-role --role-name <old-role-name>
 ```
-
-#### "VPC mode requires both subnets and security groups"
-
-**This is a known issue** - the configuration is correctly set, but `agentcore deploy` validation may have timing issues.
-
-**Solution**: Run the diagnostic to verify config is valid, then deploy again:
-```bash
-cd agent
-python3 scripts/diagnose-config.py  # Should show ✅ VALID
-agentcore deploy                     # Try again
-```
-
-See [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) for details.
 
 ### Documentation
 
-- **[DEPLOYMENT.md](DEPLOYMENT.md)** - Complete deployment guide
+- **[infrastructure/docs/DEPLOYMENT.md](infrastructure/docs/DEPLOYMENT.md)** - Complete deployment guide
 - **[agent/scripts/README.md](agent/scripts/README.md)** - Script usage
-- **[docs/TESTING_AND_AUTOMATION.md](docs/TESTING_AND_AUTOMATION.md)** - Detailed summary
 
 ## License
 
