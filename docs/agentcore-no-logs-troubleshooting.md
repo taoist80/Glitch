@@ -107,6 +107,24 @@ After a Tailscale stack or EC2 redeploy, the instance's **VPC private IP** can c
 
 **One-line summary:** If the runtime log shows a URL with an **old** EC2 private IP, the runtime is not reaching the current proxy; fix `GLITCH_OLLAMA_PROXY_HOST` and use **`make deploy`** so the correct IP is set from the stack.
 
+## No logs after stack consolidation (Feb 22–23): runtime role missing `/aws/bedrock-agentcore/*`
+
+**Symptom:** Logs last appeared around Feb 22, 2026; after refactors (consolidated foundation stack, SSM-based config) no application logs show up in `/aws/bedrock-agentcore/runtimes/...`.
+
+**Root cause:** Before consolidation, the runtime role was created in **AgentCoreStack** with a **CloudWatchLogs** policy that included **both**:
+
+- `arn:aws:logs:...:log-group:/aws/bedrock-agentcore/*` (AgentCore runtime application logs)
+- `arn:aws:logs:...:log-group:/glitch/*` (telemetry)
+
+After consolidation (commit `e7404fb` / `8d282b5`):
+
+- The runtime role is created in **GlitchFoundationStack** with only **`/glitch/*`** (GlitchTelemetryLogs).
+- **GlitchAgentCoreStack** attaches a ManagedPolicy that adds **`/aws/bedrock-agentcore/*`** (and the rest) to the same role.
+
+Application logs (stdout/stderr) are written by the **platform** to `/aws/bedrock-agentcore/runtimes/<agent_id>-<endpoint>/...` using the **runtime execution role**. If that role only had `/glitch/*` (e.g. Foundation deployed but AgentCoreStack not deployed, or policy not attached), PutLogEvents to the bedrock-agentcore log group would fail and no runtime logs would appear.
+
+**Fix applied:** GlitchFoundationStack’s runtime role now includes **both** `/glitch/*` and `/aws/bedrock-agentcore/*` in a single CloudWatch Logs policy, so application logs work even if GlitchAgentCoreStack is not yet deployed. After updating the stack, redeploy Foundation and ensure the runtime’s execution role in `.bedrock_agentcore.yaml` is the Foundation role ARN (from SSM `/glitch/iam/runtime-role-arn` or `make deploy`).
+
 ## Code change: 2/20 vs 2/21 (CloudWatch write path)
 
 **Yesterday (2/20) ~7pm** logging worked because the code at that time (commit `af75e9b` and before) had:
@@ -153,6 +171,67 @@ So "no logging since 11pm" usually means either **no new invocations** or **runt
 
 Do these in order.
 
+### 0. Runtime logs are created by default (no "Log delivery" required)
+
+For **agent runtime** resources, AWS documents that the platform **creates a CloudWatch log group by default** for service-provided logs. You do **not** need to configure a "Log delivery" destination for runtime the way you do for Memory or Gateway—if you don't see a Log delivery section on your agent page, that's expected for many UIs; runtime logs should still flow to the default log group when IAM and network allow it.
+
+Use the **Logs** link in the **Endpoints** table (next to your DEFAULT endpoint) to open the runtime log group in CloudWatch. If the group exists but stays empty after invocations, the problem is likely IAM (runtime role cannot write) or network (runtime cannot reach CloudWatch Logs). If the group doesn't exist at all, the first write may be failing (check IAM below).
+
+### 0b. Log group exists but is empty (worked before Feb 22, broken after)
+
+This matches the post–consolidation case: the **runtime execution role** lost (or never got) permission to write to `/aws/bedrock-agentcore/*` because the role is created in **GlitchFoundationStack** and only **GlitchAgentCoreStack** had been adding that permission. If you deploy only Foundation (or deploy Foundation first and never deploy AgentCoreStack), the role had only `/glitch/*` until we added `/aws/bedrock-agentcore/*` to Foundation.
+
+**Do this:**
+
+1. **Redeploy Foundation** so the runtime role gets the updated policy (CloudWatch Logs for `/aws/bedrock-agentcore/*`):
+   ```bash
+   cdk deploy GlitchFoundationStack --require-approval never
+   ```
+   No need to redeploy the agent; the same role ARN is used, with updated permissions.
+
+2. **Confirm the runtime is using that role**  
+   Your `agent/.bedrock_agentcore.yaml` should have `aws.execution_role` equal to the Foundation runtime role ARN (e.g. `GlitchFoundationStack-RuntimeRoleFD8790A4-...`). If you use `make deploy`, the pre-deploy script sets this from SSM. If the runtime was created with a different role, run `make deploy` once so the config (and runtime) use the Foundation role.
+
+3. **Verify the role has the permission in AWS** (optional):
+   ```bash
+   ROLE_ARN="arn:aws:iam::999776382415:role/GlitchFoundationStack-RuntimeRoleFD8790A4-sLKBVjdrjs40"  # from agent .bedrock_agentcore.yaml
+   # List inline policy name, then inspect (policy name is often DefaultPolicy or similar)
+   aws iam list-role-policies --role-name "GlitchFoundationStack-RuntimeRoleFD8790A4-sLKBVjdrjs40" --region us-west-2
+   # aws iam get-role-policy --role-name "GlitchFoundationStack-RuntimeRoleFD8790A4-sLKBVjdrjs40" --policy-name "<name-from-above>" --region us-west-2
+   ```
+   The inline policy should include `logs:PutLogEvents`, `CreateLogGroup`, `CreateLogStream`, `DescribeLogStreams` with resources `arn:aws:logs:us-west-2:999776382415:log-group:/aws/bedrock-agentcore/*` (and `...:*`). Or run a policy simulation:
+   ```bash
+   aws iam simulate-principal-policy \
+     --policy-source-arn "arn:aws:iam::999776382415:role/GlitchFoundationStack-RuntimeRoleFD8790A4-sLKBVjdrjs40" \
+     --action-names "logs:PutLogEvents" "logs:CreateLogStream" \
+     --resource-arns "arn:aws:logs:us-west-2:999776382415:log-group:/aws/bedrock-agentcore/runtimes/Glitch-tC207UDZC5-DEFAULT:*"
+   ```
+   Expect `allowed` for both actions.
+
+4. **Trigger an invocation** (e.g. send a message or run keepalive), then check the runtime log group again for new streams/events.
+
+If after redeploying Foundation you still see no logs, the next suspect is **network**: the runtime runs in a VPC and must reach the CloudWatch Logs API (via the CloudWatch Logs interface endpoint or NAT). Check that the runtime’s security group allows egress to the endpoint and that the VPC has the CloudWatch Logs endpoint (or a NAT route).
+
+### 0c. IAM simulation shows "allowed" but the runtime log group is still empty
+
+If you ran `simulate-principal-policy` for the runtime role on `logs:PutLogEvents` / `logs:CreateLogStream` and both show **allowed** (see e.g. `agent/iam-simulation-results.json`), then permissions are not the blocker.
+
+**Remaining possibilities:**
+
+1. **Who writes the logs?**  
+   Application logs (stdout/stderr) may be delivered by the **AgentCore platform** (control plane) using the runtime’s execution role, not by the container itself. In that case the write happens from AWS infrastructure to CloudWatch, so **VPC/endpoints are not involved**. If IAM is allowed and the platform is supposed to write, the issue may be platform-side (feature flag, log delivery configuration in the console if it exists for your agent type, or a service issue). Re-check the agent’s **Log delivery** / **Observability** section in the console in case your UI has an option to enable or confirm APPLICATION_LOGS for this runtime.
+
+2. **Network (if the write path goes from the runtime VPC)**  
+   If the writer is the container or a component that runs in your VPC, it must reach `logs.<region>.amazonaws.com`. The stack was updated so that **all interface endpoints** (including CloudWatch Logs) use a dedicated **VpcEndpointsSG** that allows **inbound TCP 443 only from the AgentCore runtime SG**. Previously, endpoints may have used the VPC default SG, which often does not allow traffic from the runtime’s security group. **Redeploy GlitchFoundationStack** to apply this change, then trigger an invocation and check the runtime log group again.
+
+3. **Container not producing stdout**  
+   If the process exits before flushing logs or crashes very early, the platform may have nothing to deliver. Less likely if invocations return success and you see responses.
+
+4. **Different log group or region**  
+   Confirm you’re looking at the log group for **this** runtime (e.g. `/aws/bedrock-agentcore/runtimes/Glitch-tC207UDZC5-DEFAULT`) in **us-west-2** and that the **Logs** link in the console points to the same group.
+
+If you’ve confirmed IAM (simulation allowed), network (endpoint SG allows runtime SG), and the correct log group, and logs still don’t appear, consider opening an AWS support case or checking AgentCore release notes / known issues for your region.
+
 ### 1. Confirm where to look (two places)
 
 Logs can appear in **two different** CloudWatch locations:
@@ -192,18 +271,9 @@ CMD ["opentelemetry-instrument", "python", "-m", "main"]
 
 If the image still uses `CMD ["python", "-m", "main"]`, rebuild and redeploy the agent so the new CMD is used. Without this, the platform does not receive OTEL data and automatic collection will not work as documented.
 
-**B. Log delivery must be configured for the runtime (console)**
+**B. Runtime log group (default)**
 
-Application logs (stdout/stderr) are delivered only if a **log delivery destination** is set for the runtime:
-
-1. Open [Agent Runtime](https://console.aws.amazon.com/bedrock-agentcore/agents) in the AgentCore console.
-2. Select your runtime (e.g. Glitch).
-3. Scroll to **Log delivery** → **Add** → choose **Amazon CloudWatch Logs**.
-4. **Log type:** APPLICATION_LOGS.
-5. Use the default destination log group (or set `/aws/bedrock-agentcore/runtimes/<agent_id>-DEFAULT`).
-6. Add and confirm status is **Delivery active**.
-
-Until this is done, the platform may not write runtime logs to CloudWatch even if observability is enabled in `.bedrock_agentcore.yaml`.
+For agent runtime, the platform creates a CloudWatch log group by default; you do not need to configure "Log delivery" in the console for basic runtime logs. Use the **Logs** link in the Endpoints table on your agent page to open the log group. If that group exists but has no streams or no new events, the blocker is likely IAM (runtime role needs `logs:PutLogEvents` etc. for `/aws/bedrock-agentcore/*`) or VPC/network (runtime must reach the CloudWatch Logs endpoint).
 
 **C. One-time: CloudWatch Transaction Search**
 

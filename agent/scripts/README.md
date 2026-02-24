@@ -89,6 +89,17 @@ Runs post-deployment checks to verify the agent is properly configured.
 python3 scripts/post-deploy-verify.py
 ```
 
+### `check-runtime-logs.py` - Runtime Logs Diagnostic
+
+Checks whether the runtime log group exists in CloudWatch and lists recent log streams. For agent runtime, the platform creates the log group by default; if logs are missing, the script suggests checking IAM (runtime role permissions for `/aws/bedrock-agentcore/*`) and network (VPC endpoint).
+
+**Usage:**
+```bash
+python3 scripts/check-runtime-logs.py
+```
+
+See [docs/agentcore-no-logs-troubleshooting.md](../../docs/agentcore-no-logs-troubleshooting.md) for full troubleshooting.
+
 ## Makefile Targets
 
 ```bash

@@ -72,57 +72,7 @@ export class GlitchFoundationStack extends cdk.Stack {
       availabilityZones: [this.vpc.availabilityZones[0]],
     };
 
-    // VPC Endpoints
-    this.vpc.addGatewayEndpoint('S3Endpoint', {
-      service: ec2.GatewayVpcEndpointAwsService.S3,
-      subnets: [{ subnetType: ec2.SubnetType.PRIVATE_ISOLATED }],
-    });
-
-    this.vpc.addInterfaceEndpoint('EcrDockerEndpoint', {
-      service: ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
-      privateDnsEnabled: true,
-      subnets: singleAzSubnetSelection,
-    });
-
-    this.vpc.addInterfaceEndpoint('EcrApiEndpoint', {
-      service: ec2.InterfaceVpcEndpointAwsService.ECR,
-      privateDnsEnabled: true,
-      subnets: singleAzSubnetSelection,
-    });
-
-    this.vpc.addInterfaceEndpoint('CloudWatchLogsEndpoint', {
-      service: ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS,
-      privateDnsEnabled: true,
-      subnets: singleAzSubnetSelection,
-    });
-
-    this.vpc.addInterfaceEndpoint('SecretsManagerEndpoint', {
-      service: ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
-      privateDnsEnabled: true,
-      subnets: singleAzSubnetSelection,
-    });
-
-    this.vpc.addInterfaceEndpoint('BedrockAgentCoreEndpoint', {
-      service: ec2.InterfaceVpcEndpointAwsService.BEDROCK_AGENT_RUNTIME,
-      privateDnsEnabled: true,
-      subnets: singleAzSubnetSelection,
-    });
-
-    this.vpc.addInterfaceEndpoint('BedrockRuntimeEndpoint', {
-      service: ec2.InterfaceVpcEndpointAwsService.BEDROCK_RUNTIME,
-      privateDnsEnabled: true,
-      subnets: singleAzSubnetSelection,
-    });
-
-    this.vpc.addInterfaceEndpoint('BedrockAgentCoreDataPlaneEndpoint', {
-      service: new ec2.InterfaceVpcEndpointService(
-        `com.amazonaws.${this.region}.bedrock-agentcore`
-      ),
-      privateDnsEnabled: true,
-      subnets: singleAzSubnetSelection,
-    });
-
-    // ========== Security Groups ==========
+    // ========== Security Groups (before endpoints so endpoint SG can allow AgentCore) ==========
     this.agentCoreSecurityGroup = new ec2.SecurityGroup(this, 'AgentCoreSG', {
       vpc: this.vpc,
       description: 'Security group for AgentCore runtime ENIs',
@@ -135,6 +85,87 @@ export class GlitchFoundationStack extends cdk.Stack {
       'HTTPS to AWS services'
     );
 
+    // SG for interface endpoints: only the runtime (AgentCore SG) can use them (least privilege).
+    // Without this, endpoints may use the VPC default SG which often does not allow the runtime SG.
+    const vpcEndpointsSecurityGroup = new ec2.SecurityGroup(this, 'VpcEndpointsSG', {
+      vpc: this.vpc,
+      description: 'Security group for VPC interface endpoints; allow AgentCore runtime only',
+      allowAllOutbound: false,
+    });
+    vpcEndpointsSecurityGroup.addIngressRule(
+      this.agentCoreSecurityGroup,
+      ec2.Port.tcp(443),
+      'HTTPS from AgentCore runtime'
+    );
+
+    const endpointProps = {
+      privateDnsEnabled: true,
+      subnets: singleAzSubnetSelection,
+      securityGroups: [vpcEndpointsSecurityGroup],
+    };
+
+    // VPC Endpoints
+    this.vpc.addGatewayEndpoint('S3Endpoint', {
+      service: ec2.GatewayVpcEndpointAwsService.S3,
+      subnets: [{ subnetType: ec2.SubnetType.PRIVATE_ISOLATED }],
+    });
+
+    this.vpc.addInterfaceEndpoint('EcrDockerEndpoint', {
+      service: ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER,
+      ...endpointProps,
+    });
+
+    this.vpc.addInterfaceEndpoint('EcrApiEndpoint', {
+      service: ec2.InterfaceVpcEndpointAwsService.ECR,
+      ...endpointProps,
+    });
+
+    this.vpc.addInterfaceEndpoint('CloudWatchLogsEndpoint', {
+      service: ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS,
+      ...endpointProps,
+    });
+
+    this.vpc.addInterfaceEndpoint('SecretsManagerEndpoint', {
+      service: ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
+      ...endpointProps,
+    });
+
+    this.vpc.addInterfaceEndpoint('BedrockAgentCoreEndpoint', {
+      service: ec2.InterfaceVpcEndpointAwsService.BEDROCK_AGENT_RUNTIME,
+      ...endpointProps,
+    });
+
+    this.vpc.addInterfaceEndpoint('BedrockRuntimeEndpoint', {
+      service: ec2.InterfaceVpcEndpointAwsService.BEDROCK_RUNTIME,
+      ...endpointProps,
+    });
+
+    this.vpc.addInterfaceEndpoint('BedrockAgentCoreDataPlaneEndpoint', {
+      service: new ec2.InterfaceVpcEndpointService(
+        `com.amazonaws.${this.region}.bedrock-agentcore`
+      ),
+      ...endpointProps,
+    });
+
+    // STS: required for SDK credential refresh in isolated subnets (no NAT/internet).
+    // Without this, any AWS SDK call that needs to exchange credentials via STS will time out.
+    this.vpc.addInterfaceEndpoint('StsEndpoint', {
+      service: ec2.InterfaceVpcEndpointAwsService.STS,
+      ...endpointProps,
+    });
+
+    // CloudWatch (metrics): required for OTEL ADOT to export metrics to CloudWatch.
+    this.vpc.addInterfaceEndpoint('CloudWatchEndpoint', {
+      service: ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH,
+      ...endpointProps,
+    });
+
+    // X-Ray: required for OTEL ADOT to export traces.
+    this.vpc.addInterfaceEndpoint('XRayEndpoint', {
+      service: ec2.InterfaceVpcEndpointAwsService.XRAY,
+      ...endpointProps,
+    });
+
     // ========== IAM Roles (NO hardcoded names) ==========
     
     // Runtime role for AgentCore
@@ -144,10 +175,12 @@ export class GlitchFoundationStack extends cdk.Stack {
       // NO roleName - let CloudFormation generate it
     });
 
-    // Minimal CloudWatch Logs for /glitch/* so agent can write telemetry even if AgentCoreStack not yet deployed
+    // CloudWatch Logs: /glitch/* (telemetry) and /aws/bedrock-agentcore/* (runtime application logs).
+    // Application logs (stdout/stderr) are delivered by AgentCore to /aws/bedrock-agentcore/runtimes/<id>/...
+    // Both are required so logs work even if GlitchAgentCoreStack is not yet deployed.
     this.runtimeRole.addToPolicy(
       new iam.PolicyStatement({
-        sid: 'GlitchTelemetryLogs',
+        sid: 'CloudWatchLogs',
         effect: iam.Effect.ALLOW,
         actions: [
           'logs:CreateLogGroup',
@@ -158,7 +191,34 @@ export class GlitchFoundationStack extends cdk.Stack {
         resources: [
           `arn:aws:logs:${this.region}:${this.account}:log-group:/glitch/*`,
           `arn:aws:logs:${this.region}:${this.account}:log-group:/glitch/*:*`,
+          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/bedrock-agentcore/*`,
+          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/bedrock-agentcore/*:*`,
         ],
+      })
+    );
+
+    // X-Ray: OTEL ADOT traces exporter.
+    this.runtimeRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'XRayTracing',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'xray:PutTraceSegments',
+          'xray:PutTelemetryRecords',
+          'xray:GetSamplingRules',
+          'xray:GetSamplingTargets',
+        ],
+        resources: ['*'],
+      })
+    );
+
+    // CloudWatch metrics: OTEL ADOT metrics exporter.
+    this.runtimeRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'CloudWatchMetrics',
+        effect: iam.Effect.ALLOW,
+        actions: ['cloudwatch:PutMetricData'],
+        resources: ['*'],
       })
     );
 
