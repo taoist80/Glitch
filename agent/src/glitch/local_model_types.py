@@ -10,10 +10,10 @@ from typing import Any, Dict, List, Optional, TypedDict, Union
 
 # Host mapping (on-prem via EC2 Tailscale HTTP proxy)
 # AgentCore cannot use Tailscale routes directly (not a Tailscale node)
-# AgentCore → EC2 nginx proxy → Tailscale mesh → on-prem
-# Set GLITCH_OLLAMA_PROXY_HOST to the Tailscale EC2 private IP (stack output PrivateIp).
-# After any redeploy that replaces the EC2 instance, the IP changes — update and redeploy agent.
-_DEFAULT_PROXY_IP = "10.0.0.139"
+# AgentCore → EC2 nginx proxy (VPC private IP) → Tailscale mesh → on-prem
+# Set GLITCH_OLLAMA_PROXY_HOST to the EC2 VPC private IP (GlitchTailscaleStack output PrivateIp).
+# After any redeploy that replaces the EC2 instance, the IP changes — run "make deploy" to refresh.
+_DEFAULT_PROXY_IP = "10.0.0.82"  # Fallback only if env not set; prefer make deploy to set from stack
 MISTRAL_HOST = os.environ.get("GLITCH_OLLAMA_PROXY_HOST", _DEFAULT_PROXY_IP)
 LLAVA_HOST = os.environ.get("GLITCH_OLLAMA_PROXY_HOST", _DEFAULT_PROXY_IP)
 DEFAULT_OPENAI_PORT = 8080   # Nginx proxy port for LLaVA

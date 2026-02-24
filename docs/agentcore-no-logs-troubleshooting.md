@@ -2,6 +2,111 @@
 
 If you stop seeing "logging" in AgentCore (UI Telemetry tab, or CloudWatch) after a certain time (e.g. 11pm), use this checklist.
 
+## "The specified log group does not exist" (ResourceNotFoundException)
+
+The **runtime** log group `/aws/bedrock-agentcore/runtimes/<agent_id>-DEFAULT` is **created by the Bedrock AgentCore platform**, not by our CDK. It is created when the platform **starts a container** and begins capturing stdout/stderr. If you have never invoked the agent (or no container has started yet), this log group will not exist.
+
+**Fix:** Trigger at least one invocation so the platform starts a container:
+
+```bash
+cd agent
+agentcore invoke '{"prompt":"hello"}'
+```
+
+Or send a message via Telegram / Gateway so the runtime is invoked. Then list log groups to confirm creation:
+
+```bash
+aws logs describe-log-groups --log-group-name-prefix "/aws/bedrock-agentcore" --region us-west-2 --query 'logGroups[*].logGroupName' --output table
+```
+
+Then tail: `aws logs tail /aws/bedrock-agentcore/runtimes/Glitch-<your-agent-id>-DEFAULT --follow --region us-west-2`
+
+## "Mistral request timed out after 120.0s" (or 180s)
+
+This usually means the runtime container could not get a response from the local Ollama (Mistral) host within the request timeout. Common causes:
+
+**1. Proxy host not set (most common)**  
+The container talks to Ollama via the **Tailscale EC2** proxy. If `GLITCH_OLLAMA_PROXY_HOST` is not set in the runtime, the agent uses a default IP (e.g. `10.0.0.139`) which may be wrong or unreachable, so the connection hangs and times out.
+
+**Fix:** Run the full deploy workflow so the proxy host is set from the Tailscale stack and the agent is redeployed:
+
+```bash
+cd agent
+make deploy   # runs pre-deploy-configure.py (sets GLITCH_OLLAMA_PROXY_HOST from stack) then agentcore deploy
+```
+
+Ensure the **Tailscale stack** is deployed first (it must output `PrivateIp`). Check that `.bedrock_agentcore.yaml` has under `aws`:
+
+```yaml
+environment_variables:
+  GLITCH_OLLAMA_PROXY_HOST: "<Tailscale EC2 private IP>"
+```
+
+**2. Slow response or return path**  
+If the proxy host is correct but Ollama is slow (cold model, long generation) or the return path drops packets, the request can still time out.
+
+**Fix:** Increase the timeout via environment (no code change). In `agent/.bedrock_agentcore.yaml` under `aws.environment_variables` add:
+
+```yaml
+GLITCH_MISTRAL_TIMEOUT: "240"
+GLITCH_OLLAMA_TIMEOUT: "240"
+```
+
+Then run `agentcore deploy`. Defaults are 180s (Mistral) and 180s (Ollama tools) if not set.
+
+**3. Tailscale / nginx proxy host offline**  
+The AgentCore container reaches Ollama only via the **Tailscale EC2** instance (nginx proxies 11434 and 8080 to on-prem). If that EC2 is stopped or nginx is down, Mistral/local_chat will time out.
+
+**Check EC2 state:**
+
+```bash
+# Get instance ID from stack output
+INSTANCE_ID=$(aws cloudformation describe-stacks --stack-name GlitchTailscaleStack --region us-west-2 \
+  --query "Stacks[0].Outputs[?OutputKey=='InstanceId'].OutputValue" --output text)
+
+# Check state (running / stopped / stopped-terminated etc.)
+aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --region us-west-2 \
+  --query "Reservations[0].Instances[0].State.Name" --output text
+```
+
+**If state is `stopped`:** Start the instance, then update the agent config with the **new** private IP (stopping/starting can change the private IP):
+
+```bash
+aws ec2 start-instances --instance-ids "$INSTANCE_ID" --region us-west-2
+# Wait until state is running, then get new private IP:
+aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --region us-west-2 \
+  --query "Reservations[0].Instances[0].PrivateIpAddress" --output text
+```
+
+Set that IP in `agent/.bedrock_agentcore.yaml` under `aws.environment_variables.GLITCH_OLLAMA_PROXY_HOST`, then `agentcore deploy`.
+
+**If EC2 is running but nginx may be down:** Use SSM Session Manager to check and restart nginx:
+
+```bash
+aws ssm start-session --target "$INSTANCE_ID" --region us-west-2
+# On the instance:
+sudo systemctl status nginx
+sudo systemctl start nginx   # if stopped
+sudo systemctl restart nginx # if you changed config
+```
+
+**Quick connectivity test from your machine (if you have Tailscale and can reach the EC2):**  
+`curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 http://100.110.172.11:11434/api/tags` (use the EC2’s Tailscale IP or private IP from the same VPC). Expect 200 if nginx and Ollama are reachable.
+
+**4. Root-cause checklist when Mistral times out after a redeploy**
+
+After a Tailscale stack or EC2 redeploy, the instance's **VPC private IP** can change (e.g. from `10.0.0.139` to `10.0.0.82`). If the runtime still uses the old IP, it will time out and no traffic will reach the on-prem subnet (e.g. SNAT counters on the subnet router stay at zero). Check in this order:
+
+| Check | What to do | What it proves |
+|-------|------------|----------------|
+| **A. URL in runtime logs** | In CloudWatch → runtime log group → latest stream, search for `Mistral endpoint:` or `Mistral Ollama native request starting:`. Note the host in the URL. | If the URL shows `10.0.0.139` (or any IP other than the current EC2 private IP), the runtime has the wrong proxy host (stale env or no `environment_variables` in config). Fix: set `GLITCH_OLLAMA_PROXY_HOST` in `aws.environment_variables` to the **current** EC2 private IP and run **`make deploy`** (so pre-deploy script can refresh it from the stack). |
+| **B. Agent config** | In `agent/.bedrock_agentcore.yaml` under `aws.environment_variables`, confirm `GLITCH_OLLAMA_PROXY_HOST` is the **current** Tailscale EC2 private IP (from `GlitchTailscaleStack` output `PrivateIp`). | Ensures the next deploy sends the correct IP to the runtime. After any EC2 replace, run **`make deploy`** so `pre-deploy-configure.py` updates this from the stack. |
+| **C. Security group / NACL** | VPC Flow Logs: AgentCore ENI egress to EC2:11434, and EC2 ENI ingress on 11434 from AgentCore. | Confirms traffic is allowed from runtime to proxy. REJECT or missing flows → fix SGs or NACLs. |
+| **D. Listener on EC2** | On the Tailscale EC2: `ss -lntp | grep 11434`, `sudo systemctl status nginx`, `sudo nginx -T` (and nginx access/error logs). | Confirms nginx is listening and proxying to on-prem. |
+| **E. Tailscale routes** | On EC2: `tailscale status`, `tailscale debug prefs`, `ip route show table 52`. In Tailscale admin: which device advertises `10.10.110.0/24` (or /32s); which devices accept routes. | If EC2 should reach on-prem via Tailscale, it must have an approved route (e.g. accept routes from the subnet router). Conflicting advertise/accept between EC2 and the on-prem router can cause "works from one place, fails from another." |
+
+**One-line summary:** If the runtime log shows a URL with an **old** EC2 private IP, the runtime is not reaching the current proxy; fix `GLITCH_OLLAMA_PROXY_HOST` and use **`make deploy`** so the correct IP is set from the stack.
+
 ## Code change: 2/20 vs 2/21 (CloudWatch write path)
 
 **Yesterday (2/20) ~7pm** logging worked because the code at that time (commit `af75e9b` and before) had:
@@ -68,14 +173,52 @@ After redeploying, the runtime container starts only when the first **invocation
   - **`/glitch/telemetry`** → open stream **`invocations/<today-UTC>`**. You should see at least one event with **`"event_type": "agent_startup"`** (written once when the agent process starts). If that event is there, the CloudWatch write path and IAM are working.
   - **Runtime log group** → latest log stream. Look for lines like `GLITCH AGENT STARTUP`, `Starting Glitch agent...`, or `Startup heartbeat written to /glitch/telemetry`.
 
-### 3. Redeploy **infrastructure** (IAM) as well as the agent image
+### 3. AgentCore observability: OTEL config and log delivery
 
-The runtime role must allow CloudWatch Logs. If you only rebuilt and pushed the **container image** but did not redeploy the **CDK stack** that defines the role, the role might be missing `logs:CreateLogGroup`, `logs:CreateLogStream`, `logs:PutLogEvents` for `/glitch/*`.
+For logs and telemetry to appear in CloudWatch, two things must be in place.
 
-- From the repo root: **`cd infrastructure && pnpm cdk deploy`** (or whatever stack defines `GlitchAgentCoreRuntimeRole`).
-- Confirm the role has a policy with:
-  - `logs:CreateLogGroup`, `logs:CreateLogStream`, `logs:PutLogEvents`
-  - Resource: `arn:aws:logs:REGION:ACCOUNT:log-group:/glitch/*` (and optionally `.../log-group:/glitch/*:*`).
+**A. Container must run with ADOT auto-instrumentation**
+
+The [AgentCore observability docs](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/observability-configure.html) require:
+
+- **aws-opentelemetry-distro** in the image (we have it in the Dockerfile).
+- **Launch with `opentelemetry-instrument`** so OTEL traces/metrics are sent to CloudWatch.
+
+The Dockerfile must use:
+
+```dockerfile
+CMD ["opentelemetry-instrument", "python", "-m", "main"]
+```
+
+If the image still uses `CMD ["python", "-m", "main"]`, rebuild and redeploy the agent so the new CMD is used. Without this, the platform does not receive OTEL data and automatic collection will not work as documented.
+
+**B. Log delivery must be configured for the runtime (console)**
+
+Application logs (stdout/stderr) are delivered only if a **log delivery destination** is set for the runtime:
+
+1. Open [Agent Runtime](https://console.aws.amazon.com/bedrock-agentcore/agents) in the AgentCore console.
+2. Select your runtime (e.g. Glitch).
+3. Scroll to **Log delivery** → **Add** → choose **Amazon CloudWatch Logs**.
+4. **Log type:** APPLICATION_LOGS.
+5. Use the default destination log group (or set `/aws/bedrock-agentcore/runtimes/<agent_id>-DEFAULT`).
+6. Add and confirm status is **Delivery active**.
+
+Until this is done, the platform may not write runtime logs to CloudWatch even if observability is enabled in `.bedrock_agentcore.yaml`.
+
+**C. One-time: CloudWatch Transaction Search**
+
+For traces/spans, [enable Transaction Search](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/observability-configure.html) once in CloudWatch (Application Signals → Transaction search → Enable).
+
+**Where data appears after the above**
+
+| Data | Where |
+|------|--------|
+| Standard logs (stdout/stderr) | `/aws/bedrock-agentcore/runtimes/<agent_id>-DEFAULT/[runtime-logs]` |
+| OTEL structured logs | Same runtime log group / otel-rt-logs (with ADOT) |
+| Traces | CloudWatch Transaction Search, `/aws/spans/default` |
+| Metrics | CloudWatch Metrics, namespace `bedrock-agentcore` |
+
+**If you also use app-level writes to `/glitch/telemetry`**, the runtime role needs CloudWatch Logs permissions; **GlitchFoundationStack** attaches `GlitchTelemetryLogs` for `/glitch/*`. Redeploy Foundation if needed.
 
 ### 4. Check for warnings in the runtime log stream
 

@@ -814,8 +814,7 @@ The infrastructure uses a **consolidated foundation stack** design that eliminat
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                    PHASE 2: AGENT                               │
-│  pre-deploy-configure.py (reads SSM parameters)                 │
-│  agentcore deploy (creates runtime, writes ARN to yaml)         │
+│  make deploy (runs pre-deploy-configure.py + agentcore deploy)  │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -1403,8 +1402,7 @@ This creates VPC, IAM roles, security groups, and SSM parameters.
 
 ```bash
 cd ../agent
-python3 scripts/pre-deploy-configure.py  # Reads SSM, updates yaml
-agentcore deploy
+make deploy  # Runs pre-deploy-configure.py + agentcore deploy
 ```
 
 **Phase 3: Deploy Application Stacks**
@@ -1440,8 +1438,7 @@ If you need to update the agent:
 
 ```bash
 cd agent
-python3 scripts/pre-deploy-configure.py
-agentcore deploy
+make deploy  # Runs pre-deploy-configure.py + agentcore deploy
 ```
 
 ### Verify Deployment
@@ -1562,8 +1559,8 @@ Phase 1: Foundation                Phase 2: Agent
 │ • VPC + Subnets  │                         │
 │ • VPC Endpoints  │                         ▼
 │ • Security Groups│              ┌─────────────────────┐
-│ • IAM Roles      │              │ agentcore deploy    │
-│ • SSM Parameters │              │ (writes ARN to yaml)│
+│ • IAM Roles      │              │ make deploy         │
+│ • SSM Parameters │              │ (pre-config + deploy│
 └────────┬─────────┘              └──────────┬──────────┘
          │                                   │
          │    ┌──────────────────────────────┘
@@ -1654,8 +1651,7 @@ pnpm cdk deploy GlitchFoundationStack --require-approval never
 
 # Phase 2: Agent
 cd ../agent
-python3 scripts/pre-deploy-configure.py
-agentcore deploy
+make deploy  # Runs pre-deploy-configure.py + agentcore deploy
 
 # Phase 3: Application
 cd ../infrastructure

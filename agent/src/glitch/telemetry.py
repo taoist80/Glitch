@@ -244,6 +244,10 @@ def write_startup_heartbeat_to_cloudwatch() -> bool:
             except Exception as e3:
                 logger.warning("Startup heartbeat failed (CloudWatch): %s", e3)
                 return False
+        if getattr(e, "response", {}).get("Error", {}).get("Code") == "AccessDeniedException":
+            logger.warning(
+                "CloudWatch AccessDenied: runtime role needs logs:CreateLogGroup, CreateLogStream, PutLogEvents for /glitch/*. Deploy GlitchFoundationStack (and GlitchAgentCoreStack if used)."
+            )
         logger.warning("Startup heartbeat failed (CloudWatch): %s", e)
         return False
 

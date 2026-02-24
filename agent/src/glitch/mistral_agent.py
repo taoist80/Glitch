@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_MISTRAL_MODEL = "mistral-nemo:12b"
 ENV_MISTRAL_MODEL = "GLITCH_MISTRAL_OLLAMA_MODEL"
 ENV_USE_OPENAI_FORMAT = "GLITCH_MISTRAL_OPENAI_FORMAT"  # "1" or "true" to use port 8080
+ENV_MISTRAL_TIMEOUT = "GLITCH_MISTRAL_TIMEOUT"  # seconds for request (connect + read); default 180
+DEFAULT_MISTRAL_TIMEOUT = 180.0
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant. Be concise and accurate."
 
 
@@ -40,18 +42,23 @@ class MistralAgent:
         port: Optional[int] = None,
         model: Optional[str] = None,
         use_openai_format: Optional[bool] = None,
-        timeout: float = 120.0,
+        timeout: Optional[float] = None,
     ):
         self.host = host
         self.model = model or os.getenv(ENV_MISTRAL_MODEL) or DEFAULT_MISTRAL_MODEL
         # Mistral host (10.10.110.202) only has Ollama native API on port 11434
         # (no OpenAI-compatible endpoint on port 8080 like LLaVA has)
         self.port = port if port is not None else OLLAMA_NATIVE_PORT
-        self.timeout = timeout
+        _t = os.getenv(ENV_MISTRAL_TIMEOUT)
+        self.timeout = float(_t) if _t is not None and _t.strip() else (timeout if timeout is not None else DEFAULT_MISTRAL_TIMEOUT)
         self._buffer: Dict[str, List[ChatMessage]] = {}
+        base_url = f"http://{self.host}:{self.port}"
+        proxy_env = os.environ.get("GLITCH_OLLAMA_PROXY_HOST", "")
         logger.info(
-            "Created agent",
-            extra={"agent_id": "mistral", "model": self.model, "host": host, "port": self.port},
+            "Mistral endpoint: %s (GLITCH_OLLAMA_PROXY_HOST=%s)",
+            base_url,
+            proxy_env if proxy_env else "(not set, using default)",
+            extra={"agent_id": "mistral", "model": self.model, "host": self.host, "port": self.port, "url": base_url},
         )
 
     def _base_url(self) -> str:

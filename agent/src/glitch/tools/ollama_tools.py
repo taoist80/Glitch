@@ -25,21 +25,53 @@ _OLLAMA_CW_SEQUENCE_TOKENS: Dict[str, str] = {}
 _OLLAMA_CW_LOG_GROUP = os.environ.get("GLITCH_TELEMETRY_LOG_GROUP", "/glitch/telemetry")
 
 
+def _ollama_timeout() -> float:
+    """Timeout for Ollama requests (connect + read). Env GLITCH_OLLAMA_TIMEOUT, default 180."""
+    v = os.environ.get("GLITCH_OLLAMA_TIMEOUT", "").strip()
+    if v:
+        try:
+            return float(v)
+        except ValueError:
+            pass
+    return 180.0
+
+
+def _ollama_proxy_host() -> Optional[str]:
+    """When set, runtime must use Tailscale EC2 proxy; on-prem IPs are not routable from VPC."""
+    v = os.environ.get("GLITCH_OLLAMA_PROXY_HOST", "").strip()
+    return v or None
+
+
+def _ollama_chat_host() -> str:
+    """Chat endpoint: proxy host (port 11434) or direct 10.10.110.202 when on-prem."""
+    return _ollama_proxy_host() or "10.10.110.202"
+
+
+def _ollama_vision_host() -> str:
+    """Vision endpoint: proxy host (port 8080) or direct 10.10.110.137 when on-prem."""
+    return _ollama_proxy_host() or "10.10.110.137"
+
+
 @dataclass(frozen=True)
 class OllamaConfig:
     """Configuration for Ollama / local model endpoints.
 
-    Chat host (10.10.110.202): Ollama native on port 11434 (/api/tags, /api/generate).
-    Vision host (10.10.110.137): OpenAI-compatible on port 8080 (/v1/models, /v1/chat/completions).
+    When GLITCH_OLLAMA_PROXY_HOST is set (e.g. in AgentCore in VPC), chat_host and vision_host
+    both use the proxy; nginx on the proxy listens on 11434 (Mistral) and 8080 (LLaVA).
+    When unset (e.g. local dev on same network as Ollama), use direct on-prem IPs.
     """
     chat_host: str = "10.10.110.202"
     vision_host: str = "10.10.110.137"
     port: int = 11434
     vision_port: int = 8080
-    timeout: float = 120.0
+    timeout: float = 180.0
 
 
-DEFAULT_CONFIG = OllamaConfig()
+DEFAULT_CONFIG = OllamaConfig(
+    chat_host=_ollama_chat_host(),
+    vision_host=_ollama_vision_host(),
+    timeout=_ollama_timeout(),
+)
 
 
 class OllamaGeneratePayload(TypedDict, total=False):

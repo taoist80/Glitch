@@ -4,8 +4,9 @@ Pre-deploy hook: Auto-configure VPC settings before AgentCore deployment.
 
 This script runs automatically before `agentcore deploy` to:
 1. Fetch VPC subnet IDs, security group ID, and IAM role ARNs from SSM Parameters
-2. Update .bedrock_agentcore.yaml with correct configuration
-3. Validate configuration before proceeding
+2. Fetch Tailscale EC2 private IP from CloudFormation stack outputs
+3. Update .bedrock_agentcore.yaml with correct configuration
+4. Validate configuration before proceeding
 
 SSM Parameters (set by GlitchFoundationStack):
   /glitch/vpc/id                    - VPC ID
@@ -13,6 +14,14 @@ SSM Parameters (set by GlitchFoundationStack):
   /glitch/security-groups/agentcore - AgentCore security group ID
   /glitch/iam/runtime-role-arn      - Runtime role ARN
   /glitch/iam/codebuild-role-arn    - CodeBuild role ARN
+
+CloudFormation Outputs (from GlitchTailscaleStack):
+  PrivateIp                         - Tailscale EC2 VPC private IP (for Ollama proxy)
+
+Environment Variables set automatically:
+  GLITCH_OLLAMA_PROXY_HOST          - Tailscale EC2 private IP (required for VPC→on-prem routing)
+  GLITCH_OLLAMA_TIMEOUT             - Timeout for Ollama requests (default: 180s)
+  GLITCH_MISTRAL_TIMEOUT            - Timeout for Mistral requests (default: 180s)
 
 Exit codes:
   0 - Success (configuration updated or already correct)
@@ -174,17 +183,28 @@ def main():
             log("CodeBuild execution_role set from SSM", 'SUCCESS')
 
         # Ollama/Mistral proxy: set GLITCH_OLLAMA_PROXY_HOST from Tailscale EC2 private IP
+        # Also set default timeouts for Ollama requests (can be overridden via env)
         tailscale_outputs = get_stack_outputs(cfn_client, TAILSCALE_STACK_NAME)
         private_ip = tailscale_outputs.get('PrivateIp')
+        if 'aws' not in agent_config:
+            agent_config['aws'] = {}
+        if 'environment_variables' not in agent_config['aws']:
+            agent_config['aws']['environment_variables'] = {}
+        env_vars = agent_config['aws']['environment_variables']
+        
         if private_ip:
-            if 'aws' not in agent_config:
-                agent_config['aws'] = {}
-            if 'environment_variables' not in agent_config['aws']:
-                agent_config['aws']['environment_variables'] = {}
-            agent_config['aws']['environment_variables']['GLITCH_OLLAMA_PROXY_HOST'] = private_ip
+            env_vars['GLITCH_OLLAMA_PROXY_HOST'] = private_ip
             log(f"Ollama proxy host set to {private_ip}", 'SUCCESS')
         else:
             log(f"Tailscale stack not found; GLITCH_OLLAMA_PROXY_HOST unchanged", 'WARN')
+        
+        # Set default timeouts if not already configured
+        if 'GLITCH_OLLAMA_TIMEOUT' not in env_vars:
+            env_vars['GLITCH_OLLAMA_TIMEOUT'] = '180'
+            log("Ollama timeout set to 180s (default)", 'SUCCESS')
+        if 'GLITCH_MISTRAL_TIMEOUT' not in env_vars:
+            env_vars['GLITCH_MISTRAL_TIMEOUT'] = '180'
+            log("Mistral timeout set to 180s (default)", 'SUCCESS')
         
         save_config(config)
         log("VPC configuration updated successfully", 'SUCCESS')

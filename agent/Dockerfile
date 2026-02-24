@@ -26,4 +26,6 @@ COPY poet-soul.md /app/poet-soul.md
 
 EXPOSE 8080
 
-CMD ["python", "-m", "main"]
+# AgentCore observability: ADOT auto-instrumentation sends OTEL traces/metrics to CloudWatch.
+# See https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/observability-configure.html
+CMD ["opentelemetry-instrument", "python", "-m", "main"]

@@ -11,7 +11,7 @@ agents:
     container_runtime: docker
     source_path: /Users/jgilgen/IdeaProjects/AgentCore-Glitch/agent
     aws:
-      execution_role: arn:aws:iam::999776382415:role/GlitchAgentCoreRuntimeRole
+      execution_role: arn:aws:iam::999776382415:role/GlitchFoundationStack-RuntimeRoleFD8790A4-sLKBVjdrjs40
       execution_role_auto_create: false
       account: '999776382415'
       region: us-west-2
@@ -23,10 +23,10 @@ agents:
         network_mode: VPC
         network_mode_config:
           security_groups:
-          - sg-0ee269558dcb6be1b
+          - sg-07676d5bc70f6c385
           subnets:
-          - subnet-026f55384668578dc
-          - subnet-0e949f7ace1b9ae9e
+          - subnet-03b623395065bfb5a
+          - subnet-04f6687c2749b6b10
       protocol_configuration:
         server_protocol: HTTP
       observability:
@@ -35,20 +35,20 @@ agents:
         idle_runtime_session_timeout: 900
         max_lifetime: 28800
     bedrock_agentcore:
-      agent_id: Glitch-WUADDy8KyK
-      agent_arn: arn:aws:bedrock-agentcore:us-west-2:999776382415:runtime/Glitch-WUADDy8KyK
-      agent_session_id: null
+      agent_id: Glitch-tC207UDZC5
+      agent_arn: arn:aws:bedrock-agentcore:us-west-2:999776382415:runtime/Glitch-tC207UDZC5
+      agent_session_id: 7ede9bcc-5c46-4027-8c18-14db64a9b51b
     codebuild:
       project_name: bedrock-agentcore-glitch-builder
-      execution_role: arn:aws:iam::999776382415:role/GlitchAgentCoreCodeBuildRole
+      execution_role: arn:aws:iam::999776382415:role/GlitchFoundationStack-CodeBuildRole728CBADE-8DrF3LumRzLY
       source_bucket: bedrock-agentcore-codebuild-sources-999776382415-us-west-2
     memory:
       mode: STM_AND_LTM
       memory_id: Glitch_mem-IJtoBX7Ljd
-      memory_arn: null
-      memory_name: Glitch_memory
+      memory_arn: arn:aws:bedrock-agentcore:us-west-2:999776382415:memory/Glitch_mem-IJtoBX7Ljd
+      memory_name: Glitch_mem
       event_expiry_days: 30
-      first_invoke_memory_check_done: false
+      first_invoke_memory_check_done: true
       was_created_by_toolkit: false
     identity:
       credential_providers: []

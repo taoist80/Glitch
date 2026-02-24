@@ -144,6 +144,24 @@ export class GlitchFoundationStack extends cdk.Stack {
       // NO roleName - let CloudFormation generate it
     });
 
+    // Minimal CloudWatch Logs for /glitch/* so agent can write telemetry even if AgentCoreStack not yet deployed
+    this.runtimeRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'GlitchTelemetryLogs',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'logs:CreateLogGroup',
+          'logs:CreateLogStream',
+          'logs:PutLogEvents',
+          'logs:DescribeLogStreams',
+        ],
+        resources: [
+          `arn:aws:logs:${this.region}:${this.account}:log-group:/glitch/*`,
+          `arn:aws:logs:${this.region}:${this.account}:log-group:/glitch/*:*`,
+        ],
+      })
+    );
+
     // CodeBuild role for container builds
     this.codeBuildRole = new iam.Role(this, 'CodeBuildRole', {
       assumedBy: new iam.ServicePrincipal('codebuild.amazonaws.com'),

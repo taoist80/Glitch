@@ -2,14 +2,31 @@
 
 This directory contains deployment automation scripts that integrate VPC configuration and verification with AgentCore deployment.
 
+## ⚠️ IMPORTANT: Always Use `make deploy`
+
+**Do NOT run `agentcore deploy` directly.** Always use one of these commands:
+
+```bash
+# From the agent/ directory:
+make deploy           # Full workflow (recommended)
+./scripts/deploy.sh   # Same as above
+```
+
+Running `agentcore deploy` directly **bypasses** the pre-deploy configuration script, which means:
+- `GLITCH_OLLAMA_PROXY_HOST` won't be set (Ollama calls will fail)
+- VPC configuration may be stale
+- Timeouts won't be configured
+
 ## Quick Start
 
 ```bash
-# Full deployment workflow (recommended)
-./scripts/deploy.sh
+cd agent
 
-# Or using make
+# Full deployment workflow (recommended)
 make deploy
+
+# Or using the script directly
+./scripts/deploy.sh
 ```
 
 ## Scripts
@@ -39,13 +56,19 @@ Examples:
 
 ### `pre-deploy-configure.py` - VPC Auto-Configuration
 
-Automatically fetches VPC configuration from CloudFormation and updates `.bedrock_agentcore.yaml`.
+Automatically fetches VPC configuration from SSM Parameters and CloudFormation, then updates `.bedrock_agentcore.yaml`.
 
-**What it does:**
-- Reads subnet IDs from `GlitchVpcStack` outputs
-- Reads security group ID from `GlitchAgentCoreStack` outputs
-- Updates `network_mode_config` in the agent configuration
-- Skips if already configured or not in VPC mode
+**What it configures:**
+
+| Setting | Source | Purpose |
+|---------|--------|---------|
+| `subnets` | SSM `/glitch/vpc/private-subnet-ids` | VPC subnets for agent container |
+| `security_groups` | SSM `/glitch/security-groups/agentcore` | Security group for agent container |
+| `execution_role` | SSM `/glitch/iam/runtime-role-arn` | IAM role for agent runtime |
+| `codebuild.execution_role` | SSM `/glitch/iam/codebuild-role-arn` | IAM role for CodeBuild |
+| `GLITCH_OLLAMA_PROXY_HOST` | `GlitchTailscaleStack.PrivateIp` | VPC IP of nginx proxy for Ollama |
+| `GLITCH_OLLAMA_TIMEOUT` | Default `180` | Timeout for Ollama requests |
+| `GLITCH_MISTRAL_TIMEOUT` | Default `180` | Timeout for Mistral requests |
 
 **Usage:**
 ```bash
@@ -85,16 +108,21 @@ make clean          # Clean build artifacts
 
 ## Integration with AgentCore CLI
 
-The scripts work seamlessly with `agentcore` CLI:
+The scripts wrap `agentcore` CLI with pre/post hooks:
 
 ```bash
-# Standard deployment (manual)
+# ✅ CORRECT: Use the wrapper script
 cd agent
-agentcore deploy
+make deploy
+# or: ./scripts/deploy.sh
 
-# Automated deployment (with pre/post checks)
-cd agent
-./scripts/deploy.sh
+# ❌ WRONG: Direct agentcore deploy bypasses configuration
+# agentcore deploy   # DON'T DO THIS
+```
+
+If you need to pass arguments to `agentcore deploy`:
+```bash
+./scripts/deploy.sh -- --force
 ```
 
 ## Workflow Diagram
