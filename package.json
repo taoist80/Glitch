@@ -4,5 +4,8 @@
   "scripts": {
     "ui:local": "cd agent && PYTHONPATH=src GLITCH_MODE=server .venv/bin/python -m glitch",
     "build:ui": "cd ui && pnpm build"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
   }
 }
