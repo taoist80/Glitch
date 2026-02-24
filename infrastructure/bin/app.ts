@@ -13,7 +13,6 @@ import {
   GlitchStorageStack,
   GlitchGatewayStack,
   GlitchUiHostingStack,
-  GlitchCertificateStack,
   TelegramWebhookStack,
 } from '../lib/stack';
 
@@ -101,27 +100,13 @@ const telegramWebhookStack = new TelegramWebhookStack(app, 'GlitchTelegramWebhoo
 telegramWebhookStack.addDependency(storageStack);
 telegramWebhookStack.addDependency(secretsStack);
 
-// Extract hostname from Lambda Function URL
+// Extract hostname from Lambda Function URL (for Tailscale nginx proxy config)
 const gatewayUrlHostname = cdk.Fn.select(2, cdk.Fn.split('/', gatewayStack.functionUrl));
-
-// Certificate stack in us-east-1 (required for CloudFront)
-const certificateStack = new GlitchCertificateStack(app, 'GlitchCertificateStack', {
-  env: { account: env.account, region: 'us-east-1' },
-  domainName: customDomain,
-  crossRegionReferences: true,
-  description: 'ACM certificate for CloudFront (us-east-1)',
-});
 
 const uiHostingStack = new GlitchUiHostingStack(app, 'GlitchUiHostingStack', {
   env,
-  gatewayFunctionUrlHostname: gatewayUrlHostname,
-  domainName: customDomain,
-  certificateArn: certificateStack.certificate.certificateArn,
-  crossRegionReferences: true,
-  description: 'S3 + CloudFront hosting for UI',
+  description: 'S3 bucket for UI static assets (served via Tailscale EC2 nginx)',
 });
-uiHostingStack.addDependency(gatewayStack);
-uiHostingStack.addDependency(certificateStack);
 
 // Tailscale EC2 connector and nginx proxy
 const tailscaleStack = new TailscaleStack(app, 'GlitchTailscaleStack', {

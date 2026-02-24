@@ -4,9 +4,6 @@
  */
 import * as cdk from 'aws-cdk-lib';
 import * as cr from 'aws-cdk-lib/custom-resources';
-import * as acm from 'aws-cdk-lib/aws-certificatemanager';
-import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
-import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as events from 'aws-cdk-lib/aws-events';
@@ -1379,66 +1376,17 @@ def handler(event, context):
   }
 }
 
-// --- GlitchCertificateStack ---
-
-export interface GlitchCertificateStackProps extends cdk.StackProps {
-  readonly domainName: string;
-}
-
-/**
- * Certificate stack for CloudFront custom domain. Must be deployed in us-east-1.
- */
-export class GlitchCertificateStack extends cdk.Stack {
-  public readonly certificate: acm.Certificate;
-
-  constructor(scope: Construct, id: string, props: GlitchCertificateStackProps) {
-    super(scope, id, props);
-
-    const { domainName } = props;
-
-    this.certificate = new acm.Certificate(this, 'Certificate', {
-      domainName,
-      validation: acm.CertificateValidation.fromDns(),
-    });
-
-    new cdk.CfnOutput(this, 'CertificateArn', {
-      value: this.certificate.certificateArn,
-      description: 'ACM Certificate ARN for CloudFront',
-      exportName: 'GlitchCertificateArn',
-    });
-
-    new cdk.CfnOutput(this, 'DomainName', {
-      value: domainName,
-      description: 'Domain name for the certificate',
-    });
-
-    new cdk.CfnOutput(this, 'ValidationInstructions', {
-      value: `Add the CNAME record shown in ACM console to your DNS provider (Porkbun) to validate the certificate.`,
-      description: 'Instructions for certificate validation',
-    });
-  }
-}
-
 // --- GlitchUiHostingStack ---
 
-export interface GlitchUiHostingStackProps extends cdk.StackProps {
-  readonly gatewayFunctionUrlHostname: string;
-  readonly domainName?: string;
-  readonly certificateArn?: string;
-}
-
 /**
- * Glitch UI Hosting stack: S3 bucket + CloudFront distribution for serving the React UI.
+ * Glitch UI Hosting stack: S3 bucket for static UI assets.
+ * The UI is served via the Tailscale EC2 nginx proxy (proxy_pass to S3 website endpoint).
  */
 export class GlitchUiHostingStack extends cdk.Stack {
-  public readonly distribution: cloudfront.Distribution;
   public readonly uiBucket: s3.Bucket;
-  public readonly distributionUrl: string;
 
-  constructor(scope: Construct, id: string, props: GlitchUiHostingStackProps) {
+  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
-
-    const { gatewayFunctionUrlHostname, domainName, certificateArn } = props;
 
     this.uiBucket = new s3.Bucket(this, 'UiBucket', {
       bucketName: `glitch-ui-${this.account}-${this.region}`,
@@ -1464,116 +1412,22 @@ export class GlitchUiHostingStack extends cdk.Stack {
       })
     );
 
-    const oac = new cloudfront.S3OriginAccessControl(this, 'UiOac', {
-      originAccessControlName: 'glitch-ui-oac',
-      signing: cloudfront.Signing.SIGV4_ALWAYS,
-    });
-
-    const s3Origin = origins.S3BucketOrigin.withOriginAccessControl(this.uiBucket, {
-      originAccessControl: oac,
-    });
-
-    const lambdaOrigin = new origins.HttpOrigin(gatewayFunctionUrlHostname, {
-      protocolPolicy: cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
-    });
-
-    const apiOriginRequestPolicy = new cloudfront.OriginRequestPolicy(
-      this,
-      'ApiOriginRequestPolicy',
-      {
-        originRequestPolicyName: 'glitch-api-forward-headers',
-        headerBehavior: cloudfront.OriginRequestHeaderBehavior.allowList(
-          'X-Client-Id',
-          'X-Session-Id',
-          'Content-Type'
-        ),
-        queryStringBehavior: cloudfront.OriginRequestQueryStringBehavior.all(),
-        cookieBehavior: cloudfront.OriginRequestCookieBehavior.none(),
-      }
-    );
-
-    const certificate = certificateArn
-      ? acm.Certificate.fromCertificateArn(this, 'Certificate', certificateArn)
-      : undefined;
-
-    this.distribution = new cloudfront.Distribution(this, 'UiDistribution', {
-      comment: domainName ? `Glitch UI - ${domainName}` : 'Glitch UI - S3 static + Lambda API',
-      defaultRootObject: 'index.html',
-      domainNames: domainName ? [domainName] : undefined,
-      certificate,
-      defaultBehavior: {
-        origin: s3Origin,
-        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-        cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
-        allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
-      },
-      additionalBehaviors: {
-        '/api/*': {
-          origin: lambdaOrigin,
-          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-          cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
-          originRequestPolicy: apiOriginRequestPolicy,
-          allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
-        },
-        '/invocations': {
-          origin: lambdaOrigin,
-          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-          cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
-          originRequestPolicy: apiOriginRequestPolicy,
-          allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
-        },
-        '/health': {
-          origin: lambdaOrigin,
-          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-          cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
-          originRequestPolicy: apiOriginRequestPolicy,
-          allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
-        },
-      },
-      errorResponses: [],
-    });
-
-    this.distributionUrl = domainName
-      ? `https://${domainName}`
-      : `https://${this.distribution.distributionDomainName}`;
-
     new s3deploy.BucketDeployment(this, 'DeployUi', {
       sources: [s3deploy.Source.asset(path.join(__dirname, '../../ui/dist'))],
       destinationBucket: this.uiBucket,
-      distribution: this.distribution,
-      distributionPaths: ['/*'],
-    });
-
-    new cdk.CfnOutput(this, 'UiUrl', {
-      value: this.distributionUrl,
-      description: 'Glitch UI URL',
-      exportName: 'GlitchUiUrl',
-    });
-
-    new cdk.CfnOutput(this, 'CloudFrontDomainName', {
-      value: this.distribution.distributionDomainName,
-      description: 'CloudFront distribution domain name (for DNS CNAME)',
-      exportName: 'GlitchCloudFrontDomain',
     });
 
     new cdk.CfnOutput(this, 'UiBucketName', {
       value: this.uiBucket.bucketName,
-      description: 'S3 bucket for UI static assets',
+      description: 'S3 bucket for UI static assets (Tailscale nginx proxies to S3 website endpoint)',
       exportName: 'GlitchUiBucketName',
     });
 
-    new cdk.CfnOutput(this, 'DistributionId', {
-      value: this.distribution.distributionId,
-      description: 'CloudFront distribution ID',
-      exportName: 'GlitchUiDistributionId',
+    new cdk.CfnOutput(this, 'UiUrl', {
+      value: 'https://glitch.awoo.agency',
+      description: 'Glitch UI URL (via Tailscale EC2 nginx; point local DNS to Tailscale IP)',
+      exportName: 'GlitchUiUrl',
     });
-
-    if (domainName) {
-      new cdk.CfnOutput(this, 'DnsInstructions', {
-        value: `Add CNAME record: ${domainName} -> ${this.distribution.distributionDomainName}`,
-        description: 'DNS record to add in Porkbun',
-      });
-    }
   }
 }
 
@@ -1672,7 +1526,6 @@ export class TailscaleStack extends cdk.Stack {
     const userData = ec2.UserData.forLinux();
 
     const userDataCommands = [
-      '#!/bin/bash',
       'set -e',
       '',
       'echo "Installing AWS CLI and retrieving Tailscale auth key..."',
@@ -1740,6 +1593,8 @@ export class TailscaleStack extends cdk.Stack {
         ''
       );
 
+      // Certbot: retry during bootstrap (DNS propagation often needs a minute or two). No separate
+      // script or timer; we write TLS or HTTP config once below based on cert existence.
       if (enableTls && porkbunApiSecret) {
         const email = certbotEmail || 'admin@' + customDomain;
         userDataCommands.push(
@@ -1747,7 +1602,7 @@ export class TailscaleStack extends cdk.Stack {
           'yum install -y python3 python3-pip augeas-libs',
           'pip3 install certbot certbot-dns-porkbun',
           '',
-          '# Retrieve Porkbun API credentials',
+          '# Retrieve Porkbun API credentials (values from Secrets Manager at deploy time)',
           `PORKBUN_CREDS=$(aws secretsmanager get-secret-value --secret-id ${porkbunApiSecret.secretName} --query SecretString --output text --region ${this.region})`,
           'PORKBUN_API_KEY=$(echo "$PORKBUN_CREDS" | python3 -c "import sys,json; print(json.load(sys.stdin)[\'apiKey\'])")',
           'PORKBUN_SECRET_KEY=$(echo "$PORKBUN_CREDS" | python3 -c "import sys,json; print(json.load(sys.stdin)[\'secretApiKey\'])")',
@@ -1761,25 +1616,175 @@ export class TailscaleStack extends cdk.Stack {
           '',
           'unset PORKBUN_CREDS PORKBUN_API_KEY PORKBUN_SECRET_KEY',
           '',
-          `certbot certonly --non-interactive --agree-tos --email ${email} \\`,
-          `  --authenticator dns-porkbun \\`,
-          `  --dns-porkbun-credentials /etc/letsencrypt/porkbun.ini \\`,
-          `  --dns-porkbun-propagation-seconds 60 \\`,
-          `  -d ${customDomain}`,
+          '# Retry certbot (DNS propagation; do not fail bootstrap)',
+          `for attempt in 1 2 3 4 5; do`,
+          `  certbot certonly --non-interactive --agree-tos --email ${email} \\`,
+          `    --authenticator dns-porkbun \\`,
+          `    --dns-porkbun-credentials /etc/letsencrypt/porkbun.ini \\`,
+          `    --dns-porkbun-propagation-seconds 90 \\`,
+          `    -d ${customDomain} && break`,
+          '  echo "Certbot attempt $attempt failed, retrying in 90s..."',
+          '  sleep 90',
+          'done',
           '',
           'echo "0 3 * * * root certbot renew --quiet --post-hook \\"systemctl reload nginx\\"" > /etc/cron.d/certbot-renew',
           ''
         );
       }
 
+      // Always write glitch-proxy.conf when UI proxy is enabled (bucket/gateway from stack props, no hardcoding).
+      // When TLS is enabled: at runtime use TLS config if certs exist, else HTTP-only so nginx always starts.
+      const httpOnlyBlock = [
+        `cat > /etc/nginx/conf.d/glitch-proxy.conf << 'NGINXEOF'`,
+        'server {',
+        '    listen 80;',
+        `    server_name ${serverNames};`,
+        '',
+        '    location / {',
+        `        proxy_pass http://${uiBucketName}.s3-website-${this.region}.amazonaws.com;`,
+        `        proxy_set_header Host ${uiBucketName}.s3-website-${this.region}.amazonaws.com;`,
+        '        proxy_set_header X-Real-IP $remote_addr;',
+        '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+        '        proxy_set_header X-Forwarded-Proto $scheme;',
+        '    }',
+        '',
+        '    location /api/ {',
+        `        proxy_pass ${gatewayUrl}/api/;`,
+        `        proxy_set_header Host ${lambdaHost};`,
+        '        proxy_set_header X-Real-IP $remote_addr;',
+        '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+        '        proxy_set_header X-Forwarded-Proto https;',
+        '        proxy_ssl_server_name on;',
+        '    }',
+        '',
+        '    location /invocations {',
+        `        proxy_pass ${gatewayUrl}/invocations;`,
+        `        proxy_set_header Host ${lambdaHost};`,
+        '        proxy_set_header X-Real-IP $remote_addr;',
+        '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+        '        proxy_set_header X-Forwarded-Proto https;',
+        '        proxy_ssl_server_name on;',
+        '        proxy_read_timeout 300s;',
+        '        proxy_connect_timeout 60s;',
+        '        proxy_send_timeout 60s;',
+        '    }',
+        '',
+        '    location /health {',
+        `        proxy_pass ${gatewayUrl}/health;`,
+        `        proxy_set_header Host ${lambdaHost};`,
+        '        proxy_set_header X-Real-IP $remote_addr;',
+        '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+        '        proxy_set_header X-Forwarded-Proto https;',
+        '        proxy_ssl_server_name on;',
+        '    }',
+        '}',
+        'NGINXEOF',
+      ];
+
       if (enableTls) {
         userDataCommands.push(
-          `cat > /etc/nginx/conf.d/glitch-proxy.conf << 'NGINXEOF'`,
+          `CERT_DIR="/etc/letsencrypt/live/${customDomain}"`,
+          'if [ -f "$CERT_DIR/fullchain.pem" ] && [ -f "$CERT_DIR/privkey.pem" ]; then',
+          '  echo "Writing nginx glitch-proxy.conf (TLS)..."',
+          `  cat > /etc/nginx/conf.d/glitch-proxy.conf << 'NGINXEOF'`,
+          '  # Redirect HTTP to HTTPS',
+          '  server {',
+          '    listen 80;',
+          `    server_name ${serverNames};`,
+          `    return 301 https://${customDomain}$request_uri;`,
+          '  }',
+          '',
+          '  server {',
+          '    listen 443 ssl;',
+          '    http2 on;',
+          `    server_name ${serverNames};`,
+          '',
+          `    ssl_certificate /etc/letsencrypt/live/${customDomain}/fullchain.pem;`,
+          `    ssl_certificate_key /etc/letsencrypt/live/${customDomain}/privkey.pem;`,
+          '    ssl_protocols TLSv1.2 TLSv1.3;',
+          '    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;',
+          '    ssl_prefer_server_ciphers off;',
+          '',
+          '    location / {',
+          `        proxy_pass http://${uiBucketName}.s3-website-${this.region}.amazonaws.com;`,
+          `        proxy_set_header Host ${uiBucketName}.s3-website-${this.region}.amazonaws.com;`,
+          '        proxy_set_header X-Real-IP $remote_addr;',
+          '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+          '        proxy_set_header X-Forwarded-Proto $scheme;',
+          '    }',
+          '',
+          '    location /api/ {',
+          `        proxy_pass ${gatewayUrl}/api/;`,
+          `        proxy_set_header Host ${lambdaHost};`,
+          '        proxy_set_header X-Real-IP $remote_addr;',
+          '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+          '        proxy_set_header X-Forwarded-Proto https;',
+          '        proxy_ssl_server_name on;',
+          '    }',
+          '',
+          '    location /invocations {',
+          `        proxy_pass ${gatewayUrl}/invocations;`,
+          `        proxy_set_header Host ${lambdaHost};`,
+          '        proxy_set_header X-Real-IP $remote_addr;',
+          '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+          '        proxy_set_header X-Forwarded-Proto https;',
+          '        proxy_ssl_server_name on;',
+          '        proxy_read_timeout 300s;',
+          '        proxy_connect_timeout 60s;',
+          '        proxy_send_timeout 60s;',
+          '    }',
+          '',
+          '    location /health {',
+          `        proxy_pass ${gatewayUrl}/health;`,
+          `        proxy_set_header Host ${lambdaHost};`,
+          '        proxy_set_header X-Real-IP $remote_addr;',
+          '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+          '        proxy_set_header X-Forwarded-Proto https;',
+          '        proxy_ssl_server_name on;',
+          '    }',
+          '  }',
+          'NGINXEOF',
+          'else',
+          '  echo "Writing nginx glitch-proxy.conf (HTTP only; certs missing or certbot failed)..."',
+          ...httpOnlyBlock,
+          'fi'
+        );
+      } else {
+        userDataCommands.push(
+          'echo "Writing nginx glitch-proxy.conf (HTTP only)..."',
+          ...httpOnlyBlock
+        );
+      }
+
+      userDataCommands.push(
+        '',
+        'rm -f /etc/nginx/conf.d/default.conf',
+        'systemctl enable nginx',
+        'systemctl start nginx'
+      );
+
+      if (!enableTls) {
+        userDataCommands.push(
+          '',
+          'echo "Enabling Tailscale Serve for HTTPS..."',
+          'tailscale serve --bg http://127.0.0.1:80',
+          'echo "Tailscale Serve enabled. UI available via Tailscale HTTPS URL."'
+        );
+      } else {
+        userDataCommands.push(
+          '',
+          `echo "TLS enabled with Let's Encrypt. UI available at https://${customDomain}"`
+        );
+        // Delayed ensure-TLS: run 5 min after boot to retry certbot (DNS propagation) and switch nginx to 443 if certs exist.
+        // This avoids manual intervention when bootstrap certbot fails; EC2 IP is irrelevant for DNS-01 validation.
+        const ensureTlsEmail = certbotEmail || 'admin@' + customDomain;
+        // Nginx vars ($remote_addr etc.) must be literal in the script; use \$ so JS template doesn't expand them.
+        const tlsConfigLines = [
           '# Redirect HTTP to HTTPS',
           'server {',
           '    listen 80;',
           `    server_name ${serverNames};`,
-          `    return 301 https://${customDomain}$request_uri;`,
+          `    return 301 https://${customDomain}\$request_uri;`,
           '}',
           '',
           'server {',
@@ -1830,76 +1835,42 @@ export class TailscaleStack extends cdk.Stack {
           '        proxy_set_header X-Forwarded-Proto https;',
           '        proxy_ssl_server_name on;',
           '    }',
-          '}',
-          'NGINXEOF'
-        );
-      } else {
-        userDataCommands.push(
-          `cat > /etc/nginx/conf.d/glitch-proxy.conf << 'NGINXEOF'`,
-          'server {',
-          '    listen 80;',
-          `    server_name ${serverNames};`,
-          '',
-          '    location / {',
-          `        proxy_pass http://${uiBucketName}.s3-website-${this.region}.amazonaws.com;`,
-          `        proxy_set_header Host ${uiBucketName}.s3-website-${this.region}.amazonaws.com;`,
-          '        proxy_set_header X-Real-IP $remote_addr;',
-          '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
-          '        proxy_set_header X-Forwarded-Proto $scheme;',
-          '    }',
-          '',
-          '    location /api/ {',
-          `        proxy_pass ${gatewayUrl}/api/;`,
-          `        proxy_set_header Host ${lambdaHost};`,
-          '        proxy_set_header X-Real-IP $remote_addr;',
-          '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
-          '        proxy_set_header X-Forwarded-Proto https;',
-          '        proxy_ssl_server_name on;',
-          '    }',
-          '',
-          '    location /invocations {',
-          `        proxy_pass ${gatewayUrl}/invocations;`,
-          `        proxy_set_header Host ${lambdaHost};`,
-          '        proxy_set_header X-Real-IP $remote_addr;',
-          '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
-          '        proxy_set_header X-Forwarded-Proto https;',
-          '        proxy_ssl_server_name on;',
-          '        proxy_read_timeout 300s;',
-          '        proxy_connect_timeout 60s;',
-          '        proxy_send_timeout 60s;',
-          '    }',
-          '',
-          '    location /health {',
-          `        proxy_pass ${gatewayUrl}/health;`,
-          `        proxy_set_header Host ${lambdaHost};`,
-          '        proxy_set_header X-Real-IP $remote_addr;',
-          '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
-          '        proxy_set_header X-Forwarded-Proto https;',
-          '        proxy_ssl_server_name on;',
-          '    }',
-          '}',
-          'NGINXEOF'
-        );
-      }
-
-      userDataCommands.push(
-        '',
-        'rm -f /etc/nginx/conf.d/default.conf',
-        'systemctl enable nginx',
-        'systemctl start nginx'
-      );
-
-      if (!enableTls) {
+          '  }',
+        ];
         userDataCommands.push(
           '',
-          'echo "Enabling Tailscale Serve for HTTPS..."',
-          'tailscale serve --bg http://127.0.0.1:80',
-          'echo "Tailscale Serve enabled. UI available via Tailscale HTTPS URL."'
+          'echo "Scheduling delayed ensure-TLS (certbot retry + nginx 443) in 5 min..."',
+          'cat > /usr/local/bin/ensure-glitch-tls.sh << \'ENSUREEOF\'',
+          '#!/bin/bash',
+          'set -e',
+          `CERT_DIR="/etc/letsencrypt/live/${customDomain}"`,
+          'if [ ! -f "$CERT_DIR/fullchain.pem" ]; then',
+          `  certbot certonly --non-interactive --agree-tos --email ${ensureTlsEmail} \\`,
+          '    --authenticator dns-porkbun \\',
+          '    --dns-porkbun-credentials /etc/letsencrypt/porkbun.ini \\',
+          '    --dns-porkbun-propagation-seconds 90 \\',
+          `  -d ${customDomain} || true`,
+          'fi',
+          'if [ -f "$CERT_DIR/fullchain.pem" ]; then',
+          "  cat > /etc/nginx/conf.d/glitch-proxy.conf << 'NGINXEOF'"
         );
-      } else {
+        tlsConfigLines.forEach((line) => userDataCommands.push(line));
         userDataCommands.push(
-          '',
-          `echo "TLS enabled with Let's Encrypt. UI available at https://${customDomain}"`
+          'NGINXEOF',
+          '  nginx -t && systemctl reload nginx',
+          '  echo "ensure-glitch-tls: TLS enabled; nginx reloaded (port 443)."',
+          'else',
+          '  echo "ensure-glitch-tls: Certs still missing; writing HTTP-only glitch-proxy.conf..."',
+          '  ' + httpOnlyBlock[0]
+        );
+        httpOnlyBlock.slice(1).forEach((line) => userDataCommands.push(line));
+        userDataCommands.push(
+          '  nginx -t && systemctl reload nginx',
+          '  echo "ensure-glitch-tls: HTTP-only config written; nginx reloaded."',
+          'fi',
+          'ENSUREEOF',
+          'chmod +x /usr/local/bin/ensure-glitch-tls.sh',
+          '(sleep 300; /usr/local/bin/ensure-glitch-tls.sh) &'
         );
       }
     }
