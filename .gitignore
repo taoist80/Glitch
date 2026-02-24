@@ -225,6 +225,7 @@ samconfig.toml
 
 # AgentCore
 .bedrock_agentcore_cache/
+.bedrock_agentcore.yaml
 agentcore-logs/
 
 # Coverage and profiling

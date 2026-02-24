@@ -175,24 +175,43 @@ export class GlitchFoundationStack extends cdk.Stack {
       // NO roleName - let CloudFormation generate it
     });
 
-    // CloudWatch Logs: /glitch/* (telemetry) and /aws/bedrock-agentcore/* (runtime application logs).
-    // Application logs (stdout/stderr) are delivered by AgentCore to /aws/bedrock-agentcore/runtimes/<id>/...
-    // Both are required so logs work even if GlitchAgentCoreStack is not yet deployed.
+    // CloudWatch Logs permissions per official AgentCore runtime permissions reference:
+    // https://aws.github.io/bedrock-agentcore-starter-toolkit/user-guide/runtime/permissions.md
+    //
+    // DescribeLogGroups must be on log-group:* — the SDK calls this to discover whether
+    // the log group exists before writing. Without it the runtime fails silently even
+    // though PutLogEvents is allowed.
     this.runtimeRole.addToPolicy(
       new iam.PolicyStatement({
-        sid: 'CloudWatchLogs',
+        sid: 'CloudWatchLogsDescribeGroups',
         effect: iam.Effect.ALLOW,
-        actions: [
-          'logs:CreateLogGroup',
-          'logs:CreateLogStream',
-          'logs:PutLogEvents',
-          'logs:DescribeLogStreams',
-        ],
+        actions: ['logs:DescribeLogGroups'],
+        resources: [`arn:aws:logs:${this.region}:${this.account}:log-group:*`],
+      })
+    );
+
+    // CreateLogGroup + DescribeLogStreams scoped to the log group ARN (no :* suffix).
+    this.runtimeRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'CloudWatchLogsGroup',
+        effect: iam.Effect.ALLOW,
+        actions: ['logs:CreateLogGroup', 'logs:DescribeLogStreams'],
         resources: [
+          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/bedrock-agentcore/runtimes/*`,
           `arn:aws:logs:${this.region}:${this.account}:log-group:/glitch/*`,
-          `arn:aws:logs:${this.region}:${this.account}:log-group:/glitch/*:*`,
-          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/bedrock-agentcore/*`,
-          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/bedrock-agentcore/*:*`,
+        ],
+      })
+    );
+
+    // CreateLogStream + PutLogEvents scoped to the log stream ARN (:log-stream:*).
+    this.runtimeRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'CloudWatchLogsStream',
+        effect: iam.Effect.ALLOW,
+        actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
+        resources: [
+          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/bedrock-agentcore/runtimes/*:log-stream:*`,
+          `arn:aws:logs:${this.region}:${this.account}:log-group:/glitch/*:log-stream:*`,
         ],
       })
     );
