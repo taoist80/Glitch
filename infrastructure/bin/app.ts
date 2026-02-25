@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import 'source-map-support/register';
 import * as cdk from 'aws-cdk-lib';
+import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'yaml';
@@ -100,6 +101,21 @@ const telegramWebhookStack = new TelegramWebhookStack(app, 'GlitchTelegramWebhoo
 telegramWebhookStack.addDependency(storageStack);
 telegramWebhookStack.addDependency(secretsStack);
 
+// Write the webhook URL to SSM in a separate stack to avoid a CFN circular dependency.
+// TelegramWebhookStack cannot write its own FunctionUrl as an SSM param because:
+//   FunctionUrl → Function → ServiceRole → Policy → (anything) → FunctionUrl creates a cycle.
+// Putting the SSM write in a child stack that depends on TelegramWebhookStack breaks the cycle.
+const telegramSsmStack = new cdk.Stack(app, 'GlitchTelegramSsmStack', {
+  env,
+  description: 'SSM parameter: Telegram webhook URL (written separately to avoid CFN circular dep)',
+});
+new ssm.StringParameter(telegramSsmStack, 'SsmTelegramWebhookUrl', {
+  parameterName: SSM_PARAMS.TELEGRAM_WEBHOOK_URL,
+  stringValue: telegramWebhookStack.webhookUrl,
+  description: 'Telegram webhook Lambda Function URL (for runtime GLITCH_TELEGRAM_WEBHOOK_URL)',
+});
+telegramSsmStack.addDependency(telegramWebhookStack);
+
 // Extract hostname from Lambda Function URL (for Tailscale nginx proxy config)
 const gatewayUrlHostname = cdk.Fn.select(2, cdk.Fn.split('/', gatewayStack.functionUrl));
 
@@ -115,7 +131,7 @@ const tailscaleStack = new TailscaleStack(app, 'GlitchTailscaleStack', {
   tailscaleAuthKeySecret: secretsStack.tailscaleAuthKeySecret,
   agentCoreSecurityGroup: foundationStack.agentCoreSecurityGroup,
   agentCoreRuntimeArn,
-  instanceBootstrapVersion: '9',
+  instanceBootstrapVersion: '11',
   gatewayFunctionUrl: gatewayStack.functionUrl,
   gatewayHostname: gatewayUrlHostname,
   uiBucketName: uiHostingStack.uiBucket.bucketName,

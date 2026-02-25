@@ -22,6 +22,11 @@ Environment Variables set automatically:
   GLITCH_OLLAMA_PROXY_HOST          - Tailscale EC2 private IP (required for VPC→on-prem routing)
   GLITCH_OLLAMA_TIMEOUT             - Timeout for Ollama requests (default: 180s)
   GLITCH_MISTRAL_TIMEOUT            - Timeout for Mistral requests (default: 180s)
+  GLITCH_TELEGRAM_WEBHOOK_URL       - Lambda Function URL for Telegram webhook
+  GLITCH_CONFIG_TABLE               - DynamoDB table for Telegram config
+  GLITCH_TELEGRAM_SECRET_NAME       - Secrets Manager secret name for Telegram bot token
+  GLITCH_TELEMETRY_LOG_GROUP        - CloudWatch log group for telemetry
+  GLITCH_DEFAULT_CHAT_AGENT         - Default chat agent (glitch = Sonnet 4.5 brainstem)
 
 Exit codes:
   0 - Success (configuration updated or already correct)
@@ -50,6 +55,8 @@ SSM_PRIVATE_SUBNET_IDS = '/glitch/vpc/private-subnet-ids'
 SSM_AGENTCORE_SG_ID = '/glitch/security-groups/agentcore'
 SSM_RUNTIME_ROLE_ARN = '/glitch/iam/runtime-role-arn'
 SSM_CODEBUILD_ROLE_ARN = '/glitch/iam/codebuild-role-arn'
+SSM_TELEGRAM_WEBHOOK_URL = '/glitch/telegram/webhook-url'
+SSM_TELEGRAM_CONFIG_TABLE = '/glitch/telegram/config-table'
 
 # Fallback: CloudFormation stack names (for backward compatibility)
 FOUNDATION_STACK_NAME = 'GlitchFoundationStack'
@@ -106,12 +113,29 @@ def load_config() -> dict:
         return yaml.safe_load(f)
 
 
+ENV_DEPLOY_FILE = AGENT_DIR / '.env.deploy'
+
+
 def save_config(config: dict):
     """Save AgentCore configuration with explicit flush."""
     with open(CONFIG_FILE, 'w') as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
         f.flush()
         os.fsync(f.fileno())
+
+
+def save_env_deploy(env_vars: dict):
+    """Write env vars to .env.deploy for deploy.sh to pass as --env flags.
+
+    agentcore deploy strips environment_variables from the YAML on each run,
+    so we pass them explicitly via --env KEY=VALUE CLI flags instead.
+    """
+    with open(ENV_DEPLOY_FILE, 'w') as f:
+        for key, value in env_vars.items():
+            f.write(f"{key}={value}\n")
+        f.flush()
+        os.fsync(f.fileno())
+    log(f"Wrote {len(env_vars)} env vars to {ENV_DEPLOY_FILE.name} for deploy.sh", 'SUCCESS')
 
 
 def main():
@@ -205,8 +229,41 @@ def main():
         if 'GLITCH_MISTRAL_TIMEOUT' not in env_vars:
             env_vars['GLITCH_MISTRAL_TIMEOUT'] = '180'
             log("Mistral timeout set to 180s (default)", 'SUCCESS')
+
+        # Telegram: inject webhook URL, config table, and secret name so the runtime
+        # can register the webhook and read/write DynamoDB config without polling.
+        telegram_webhook_url = get_ssm_parameter(ssm_client, SSM_TELEGRAM_WEBHOOK_URL)
+        telegram_config_table = get_ssm_parameter(ssm_client, SSM_TELEGRAM_CONFIG_TABLE)
+
+        if telegram_webhook_url:
+            env_vars['GLITCH_TELEGRAM_WEBHOOK_URL'] = telegram_webhook_url
+            log(f"Telegram webhook URL set to {telegram_webhook_url}", 'SUCCESS')
+        else:
+            log("SSM /glitch/telegram/webhook-url not found; deploy GlitchTelegramWebhookStack first", 'WARN')
+
+        if telegram_config_table:
+            env_vars['GLITCH_CONFIG_TABLE'] = telegram_config_table
+            log(f"Telegram config table set to {telegram_config_table}", 'SUCCESS')
+        else:
+            # Fall back to the well-known default table name
+            env_vars['GLITCH_CONFIG_TABLE'] = 'glitch-telegram-config'
+            log("SSM /glitch/telegram/config-table not found; using default 'glitch-telegram-config'", 'WARN')
+
+        # Always set the secret name so the runtime can retrieve the bot token
+        env_vars['GLITCH_TELEGRAM_SECRET_NAME'] = 'glitch/telegram-bot-token'
+        log("Telegram secret name set to glitch/telegram-bot-token", 'SUCCESS')
+
+        # Telemetry: set log group so the runtime writes to and queries /glitch/telemetry
+        env_vars['GLITCH_TELEMETRY_LOG_GROUP'] = '/glitch/telemetry'
+        log("Telemetry log group set to /glitch/telemetry", 'SUCCESS')
+
+        # Default chat agent: use Glitch (Sonnet 4.5 brainstem) for all channels including Telegram.
+        # Mistral is still available via /mistral command in Telegram or explicit agent_id in payload.
+        env_vars['GLITCH_DEFAULT_CHAT_AGENT'] = 'glitch'
+        log("Default chat agent set to 'glitch' (Sonnet 4.5 brainstem)", 'SUCCESS')
         
         save_config(config)
+        save_env_deploy(env_vars)
         log("VPC configuration updated successfully", 'SUCCESS')
         
     except ClientError as e:

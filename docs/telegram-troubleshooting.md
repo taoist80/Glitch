@@ -91,7 +91,47 @@ If the webhook Lambda is working but you never see these, the Lambda might be us
 
 ---
 
-## 3. Quick checklist
+## 3. Automated troubleshooting script
+
+From the repo root (with AWS CLI configured and network access):
+
+```bash
+./infrastructure/scripts/telegram-troubleshoot.sh
+```
+
+This script prints:
+
+- Webhook Lambda Function URL and recent log events (errors and last 20)
+- Gateway logs containing "telegram" (for the Telegram tab’s GET /api/telegram/config)
+- Runtime log group (from `agent/.bedrock_agentcore.yaml`) and events containing "telegram"
+- DynamoDB `glitch-telegram-config` CONFIG item (pk=CONFIG, sk=telegram)
+- Short next-steps summary
+
+Use the output to see whether the webhook is receiving events, whether the gateway/runtime see Telegram API requests, and whether CONFIG exists.
+
+### Common script findings and fixes
+
+| Finding | Cause | Fix |
+|--------|--------|-----|
+| Runtime log: **"DynamoDB Telegram config load failed ... Connect timeout on endpoint URL: https://dynamodb.us-west-2.amazonaws.com/"** | Runtime is in a VPC (private isolated subnets) with no path to DynamoDB. | Add a **DynamoDB VPC gateway endpoint** in `GlitchFoundationStack` (see `infrastructure/lib/stack.ts`). Deploy `GlitchFoundationStack`, then the runtime will be able to reach DynamoDB and the Telegram tab will load without timing out. |
+| **Webhook: no recent events** when you send a Telegram message | Telegram is not sending updates to the Lambda URL (webhook not set or set to another URL). | Register the webhook with Telegram: `https://api.telegram.org/bot<TOKEN>/setWebhook?url=<LAMBDA_FUNCTION_URL>`. Get the URL from the script output or `aws lambda get-function-url-config --function-name glitch-telegram-webhook --region us-west-2`. |
+| Gateway shows GET /api/telegram/config, runtime shows "UI API request: GET /telegram/config", but UI still times out | Runtime is blocking on DynamoDB (connect timeout) before responding. | Same as first row: add DynamoDB VPC endpoint and redeploy foundation stack. |
+
+### Setting the Telegram webhook manually
+
+If the agent cannot register the webhook (e.g. runtime has no Lambda VPC endpoint to call `GetFunctionUrlConfig`), set it yourself:
+
+1. Get the Lambda Function URL (script output or):  
+   `WEBHOOK_URL=$(aws lambda get-function-url-config --function-name glitch-telegram-webhook --region us-west-2 --query 'FunctionUrl' --output text)`
+2. Get the bot token from Secrets Manager (or your env).
+3. Call Telegram:  
+   `curl "https://api.telegram.org/bot<TOKEN>/setWebhook?url=$WEBHOOK_URL"`  
+   To verify:  
+   `curl "https://api.telegram.org/bot<TOKEN>/getWebhookInfo"`
+
+---
+
+## 4. Quick checklist
 
 | Check | Command / Location |
 |-------|--------------------|
@@ -105,7 +145,7 @@ If the webhook Lambda is working but you never see these, the Lambda might be us
 
 ---
 
-## 4. If the webhook Lambda is missing
+## 5. If the webhook Lambda is missing
 
 The **TelegramWebhookStack** is defined in `infrastructure/lib/` as compiled JavaScript (`.js` and `.d.ts`); the TypeScript source (`.ts`) is not in the repo. That stack creates:
 

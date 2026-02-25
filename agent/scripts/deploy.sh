@@ -106,9 +106,28 @@ fi
 # Step 2: AgentCore deployment
 log ""
 log "=== Step 2: AgentCore Deployment ==="
-log "Running: agentcore deploy ${AGENTCORE_ARGS[*]}"
 
-if agentcore deploy "${AGENTCORE_ARGS[@]}"; then
+# Build --env flags from .env.deploy written by pre-deploy-configure.py.
+# agentcore deploy rewrites .bedrock_agentcore.yaml and strips environment_variables,
+# so we pass them explicitly via CLI flags which survive the rewrite.
+ENV_ARGS=()
+ENV_DEPLOY_FILE="$AGENT_DIR/.env.deploy"
+if [ -f "$ENV_DEPLOY_FILE" ]; then
+    while IFS= read -r line; do
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        key="${line%%=*}"
+        value="${line#*=}"
+        [[ -z "$key" ]] && continue
+        ENV_ARGS+=(--env "${key}=${value}")
+    done < "$ENV_DEPLOY_FILE"
+    log "Loaded ${#ENV_ARGS[@]} --env flags from .env.deploy"
+else
+    log "Warning: .env.deploy not found; environment variables will not be set in runtime"
+fi
+
+log "Running: agentcore deploy ${ENV_ARGS[*]} ${AGENTCORE_ARGS[*]}"
+
+if agentcore deploy "${ENV_ARGS[@]}" "${AGENTCORE_ARGS[@]}"; then
     log_success "AgentCore deployment completed"
 else
     DEPLOY_EXIT=$?

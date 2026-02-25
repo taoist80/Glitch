@@ -227,6 +227,7 @@ samconfig.toml
 .bedrock_agentcore_cache/
 .bedrock_agentcore.yaml
 agentcore-logs/
+agent/.env.deploy
 
 # Coverage and profiling
 .coverage

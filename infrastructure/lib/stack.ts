@@ -26,6 +26,8 @@ export const SSM_PARAMS = {
   AGENTCORE_SG_ID: '/glitch/security-groups/agentcore',
   RUNTIME_ROLE_ARN: '/glitch/iam/runtime-role-arn',
   CODEBUILD_ROLE_ARN: '/glitch/iam/codebuild-role-arn',
+  TELEGRAM_WEBHOOK_URL: '/glitch/telegram/webhook-url',
+  TELEGRAM_CONFIG_TABLE: '/glitch/telegram/config-table',
 } as const;
 
 // --- GlitchFoundationStack ---
@@ -104,6 +106,12 @@ export class GlitchFoundationStack extends cdk.Stack {
     // VPC Endpoints
     this.vpc.addGatewayEndpoint('S3Endpoint', {
       service: ec2.GatewayVpcEndpointAwsService.S3,
+      subnets: [{ subnetType: ec2.SubnetType.PRIVATE_ISOLATED }],
+    });
+
+    // DynamoDB: required for runtime Telegram config API (glitch-telegram-config) and webhook Lambda config.
+    this.vpc.addGatewayEndpoint('DynamoDbEndpoint', {
+      service: ec2.GatewayVpcEndpointAwsService.DYNAMODB,
       subnets: [{ subnetType: ec2.SubnetType.PRIVATE_ISOLATED }],
     });
 
@@ -707,7 +715,7 @@ def invoke_agent(prompt: str, session_id: str, stream: bool = False, agent_id: s
         req = urllib.request.Request(
             url, data=body, headers=dict(aws_request.headers), method='POST'
         )
-        with urllib.request.urlopen(req, timeout=180) as response:
+        with urllib.request.urlopen(req, timeout=280) as response:
             result = json.loads(response.read().decode())
             logger.info(f"Agent response keys: {list(result.keys()) if isinstance(result, dict) else 'not-dict'}")
             if isinstance(result, dict) and result.get('error'):
@@ -751,7 +759,7 @@ def invoke_api(path: str, method: str, body: dict, session_id: str) -> dict:
         req = urllib.request.Request(
             url, data=req_body, headers=dict(aws_request.headers), method='POST'
         )
-        with urllib.request.urlopen(req, timeout=180) as response:
+        with urllib.request.urlopen(req, timeout=280) as response:
             result = json.loads(response.read().decode())
             return result if isinstance(result, dict) else {"data": result}
     except urllib.error.HTTPError as e:
@@ -775,16 +783,15 @@ def decimal_default(obj):
 
 def handler(event, context):
     """Lambda handler for gateway. Routes requests to AgentCore Runtime."""
-    logger.info(f"Received event: {json.dumps(event)[:500]}")
-    
     # Handle CloudWatch Events keepalive
     if event.get('source') == 'aws.events':
         return {'statusCode': 200, 'body': json.dumps({'status': 'healthy'})}
     
-    # Parse request
+    # Parse request (Function URL uses payload 2.0: rawPath or requestContext.http.path)
     http_method = event.get('requestContext', {}).get('http', {}).get('method', 'GET')
-    path = event.get('rawPath', '/')
+    path = (event.get('rawPath') or event.get('requestContext', {}).get('http', {}).get('path') or '/')
     headers = event.get('headers', {})
+    logger.info(f"Gateway request: {http_method} path={path}")
     
     # Get or create client session
     client_id = headers.get('x-client-id') or headers.get('X-Client-Id') or 'anonymous'
@@ -826,9 +833,11 @@ def handler(event, context):
         # API proxy routes: /api/* (from nginx) or direct paths (from UI with Lambda base URL)
         elif path.startswith('/api/'):
             api_path = '/' + path[5:]
+            logger.info(f"Gateway forwarding to AgentCore: {http_method} {api_path}")
             response_body = invoke_api(api_path, http_method, body, session_id)
         elif (path in ('/status', '/telegram/config', '/ollama/health', '/memory/summary', '/telemetry', '/streaming-info', '/mcp/servers', '/agents', '/modes') or
               path.startswith('/skills') or path.startswith('/sessions/')):
+            logger.info(f"Gateway forwarding to AgentCore: {http_method} {path}")
             response_body = invoke_api(path, http_method, body, session_id)
         else:
             response_body = {'error': f'Unknown path: {path}'}
@@ -884,6 +893,7 @@ export class TelegramWebhookStack extends cdk.Stack {
         CONFIG_TABLE_NAME: configTable.tableName,
         TELEGRAM_SECRET_NAME: 'glitch/telegram-bot-token',
         AGENTCORE_RUNTIME_ARN: agentCoreRuntimeArn,
+        // WEBHOOK_FUNCTION_URL is added below after the Function URL is created
       },
     });
 
@@ -900,6 +910,17 @@ export class TelegramWebhookStack extends cdk.Stack {
           `${agentCoreRuntimeArn}/*`,
           `arn:aws:bedrock-agentcore:${this.region}:${this.account}:code-interpreter/*`,
         ],
+      })
+    );
+
+    // Read own Function URL from SSM on cold start for Telegram webhook self-registration.
+    // The URL is written by GlitchTelegramSsmStack (a separate stack) to avoid a CFN circular dep.
+    this.webhookFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadOwnWebhookUrlFromSsm',
+        effect: iam.Effect.ALLOW,
+        actions: ['ssm:GetParameter'],
+        resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter${SSM_PARAMS.TELEGRAM_WEBHOOK_URL}`],
       })
     );
 
@@ -935,6 +956,16 @@ export class TelegramWebhookStack extends cdk.Stack {
       description: 'Invoke AgentCore runtime keepalive every 10 min to avoid session termination',
     });
 
+    // SsmTelegramConfigTable: safe to write here (no circular dep — table name is not a FunctionUrl token).
+    new ssm.StringParameter(this, 'SsmTelegramConfigTable', {
+      parameterName: SSM_PARAMS.TELEGRAM_CONFIG_TABLE,
+      stringValue: configTable.tableName,
+      description: 'DynamoDB config table name (for runtime GLITCH_CONFIG_TABLE)',
+    });
+
+    // NOTE: SsmTelegramWebhookUrl is written in app.ts (GlitchTelegramSsmStack) to avoid a
+    // CloudFormation circular dependency: FunctionUrl → Function → ServiceRole → Policy → FunctionUrl.
+    // The CfnOutput below is for reference only.
     new cdk.CfnOutput(this, 'TelegramWebhookUrl', {
       value: this.webhookUrl,
       description: 'Telegram webhook Lambda Function URL',
@@ -943,6 +974,7 @@ export class TelegramWebhookStack extends cdk.Stack {
 
   private getLambdaCode(): string {
     return `
+# v3 - diagnostic logging, case-insensitive header lookup, cold-start webhook registration via SSM
 import json
 import os
 import logging
@@ -1184,11 +1216,94 @@ def send_telegram_message(chat_id: int, text: str, bot_token: str):
         logger.error(f"Failed to send Telegram message: {e}")
 
 
+def get_current_webhook_url(bot_token: str) -> str:
+    """Return the URL currently registered with Telegram, or '' on error."""
+    import urllib.request
+    url = f"https://api.telegram.org/bot{bot_token}/getWebhookInfo"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+            if data.get('ok'):
+                return (data.get('result') or {}).get('url') or ''
+    except Exception as e:
+        logger.warning("getWebhookInfo failed: %s", e)
+    return ''
+
+
+def ensure_webhook_registered(bot_token: str, webhook_url: str, webhook_secret: str) -> bool:
+    """Register webhook with Telegram if not already set to webhook_url.
+
+    Called on Lambda cold start. The Lambda has internet egress; the AgentCore
+    runtime does not (PRIVATE_ISOLATED subnets), so registration must happen here.
+    """
+    import urllib.request
+    current = get_current_webhook_url(bot_token)
+    if current.rstrip('/') == webhook_url.rstrip('/'):
+        logger.info("Telegram webhook already registered: %s", webhook_url)
+        return True
+    logger.info("Registering Telegram webhook: current=%r target=%r", current, webhook_url)
+    url = f"https://api.telegram.org/bot{bot_token}/setWebhook"
+    payload = {
+        'url': webhook_url,
+        'secret_token': webhook_secret,
+        'allowed_updates': ['message', 'edited_message', 'callback_query'],
+        'drop_pending_updates': False,
+    }
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read().decode())
+            if result.get('ok'):
+                logger.info("Telegram webhook registered successfully: %s", webhook_url)
+                return True
+            logger.error("setWebhook failed: %s", result)
+            return False
+    except Exception as e:
+        logger.error("setWebhook error: %s", e)
+        return False
+
+
+def get_own_function_url() -> str:
+    """Derive this Lambda's own Function URL from SSM (written by CDK at deploy time).
+
+    Cannot be injected as a CFN env var (circular dependency: URL depends on the
+    function, function env depends on URL). Instead we read the SSM parameter that
+    CDK writes after the Function URL is created — no circular dependency because
+    SSM is a separate resource that depends on FunctionUrl, not the other way around.
+    """
+    region = os.environ.get('AWS_REGION', 'us-west-2')
+    ssm_param = '/glitch/telegram/webhook-url'
+    try:
+        ssm = boto3.client('ssm', region_name=region)
+        resp = ssm.get_parameter(Name=ssm_param)
+        return resp['Parameter']['Value'].rstrip('/')
+    except Exception as e:
+        logger.warning("get_own_function_url via SSM failed: %s", e)
+    return ''
+
+
+# Register webhook on cold start (Lambda has internet; runtime does not).
+def _cold_start_register_webhook():
+    try:
+        webhook_url = get_own_function_url()
+        if not webhook_url:
+            logger.warning("Could not resolve own Function URL from SSM; skipping cold-start webhook registration")
+            return
+        bot_token = get_bot_token()
+        webhook_secret = get_webhook_secret()
+        ensure_webhook_registered(bot_token, webhook_url, webhook_secret)
+    except Exception as e:
+        logger.warning("Cold-start webhook registration failed: %s", e)
+
+_cold_start_register_webhook()
+
+
 def invoke_agent(prompt: str, session_id: str):
     if not AGENTCORE_RUNTIME_ARN:
         logger.warning("AGENTCORE_RUNTIME_ARN not set")
         return "Agent runtime not configured."
-    logger.info("Invoking agent: prompt_len=%d session_id=%s", len(prompt or ""), session_id)
+    logger.info("Invoking agent: prompt_len=%d session_id=%s runtime_arn=%s", len(prompt or ""), session_id, AGENTCORE_RUNTIME_ARN[:60])
     import urllib.request
     try:
         arn_parts = parse_runtime_arn(AGENTCORE_RUNTIME_ARN)
@@ -1196,7 +1311,9 @@ def invoke_agent(prompt: str, session_id: str):
         endpoint = get_data_plane_endpoint(region)
         encoded_arn = quote(AGENTCORE_RUNTIME_ARN, safe='')
         url = f"{endpoint}/runtimes/{encoded_arn}/invocations"
-        payload = {"prompt": prompt, "session_id": session_id}
+        logger.info("Invoke URL: %s", url)
+        # agent_id=glitch routes to the Glitch brainstem (Claude Sonnet 4.5 via Strands).
+        payload = {"prompt": prompt, "session_id": session_id, "agent_id": "glitch"}
         body = json.dumps(payload).encode('utf-8')
         headers = {
             'Content-Type': 'application/json',
@@ -1207,7 +1324,7 @@ def invoke_agent(prompt: str, session_id: str):
         if credentials:
             SigV4Auth(credentials, 'bedrock-agentcore', region).add_auth(aws_request)
         req = urllib.request.Request(url, data=body, headers=dict(aws_request.headers), method='POST')
-        with urllib.request.urlopen(req, timeout=180) as response:
+        with urllib.request.urlopen(req, timeout=280) as response:
             result = json.loads(response.read().decode())
             logger.info("Invoke agent success: has_message=%s", bool(isinstance(result, dict) and result.get('message')))
             return result if isinstance(result, dict) else str(result)
@@ -1216,43 +1333,58 @@ def invoke_agent(prompt: str, session_id: str):
         return f"Error: {e}"
 
 
+def _headers_get(headers: dict, key: str, default=None):
+    """Get header value case-insensitively (Lambda Function URL may normalize casing)."""
+    if not headers:
+        return default
+    key_lower = key.lower()
+    for k, v in headers.items():
+        if (k or '').lower() == key_lower:
+            return v
+    return default
+
+
 def handler(event, context):
-    logger.info("Received event: %s", json.dumps(event)[:500])
     try:
         if isinstance(event.get('body'), str):
             body = json.loads(event['body'])
         else:
-            body = event.get('body', {})
+            body = event.get('body', {}) or {}
     except Exception as e:
-        logger.error(f"Failed to parse body: {e}")
+        logger.error("Telegram webhook: Failed to parse body: %s", e)
         return {'statusCode': 400, 'body': 'Invalid JSON'}
-    headers = event.get('headers', {})
-    secret_token = headers.get('x-telegram-bot-api-secret-token')
+    update_id = body.get('update_id', '?')
+    logger.info("Telegram webhook received update_id=%s keys=%s", update_id, list(body.keys()))
+    headers = event.get('headers', {}) or {}
+    secret_token = _headers_get(headers, 'x-telegram-bot-api-secret-token')
     expected_secret = get_webhook_secret()
     if secret_token and secret_token != expected_secret:
-        logger.warning("Invalid webhook secret")
+        logger.warning("Telegram webhook: Invalid secret token, rejecting update_id=%s", update_id)
         return {'statusCode': 403, 'body': 'Forbidden'}
     try:
         bot_token = get_bot_token()
     except Exception as e:
-        logger.error(f"Failed to get bot token: {e}", exc_info=True)
+        logger.error("Telegram webhook: Failed to get bot token: %s", e, exc_info=True)
         return {'statusCode': 200, 'body': 'OK'}
     message = body.get('message', {})
     if not message:
+        logger.info("Telegram webhook: update_id=%s has no message (e.g. channel_post), ack", update_id)
         return {'statusCode': 200, 'body': 'OK'}
     chat_id = message.get('chat', {}).get('id')
     user_id = _int_or(message.get('from', {}).get('id'))
     text = (message.get('text') or '').strip()
     if not chat_id or not text:
+        logger.info("Telegram webhook: update_id=%s chat_id=%s empty text, ack", update_id, chat_id)
         return {'statusCode': 200, 'body': 'OK'}
-    logger.info("Message from user %s in chat %s: %s", user_id, chat_id, text[:100])
+    logger.info("Telegram webhook: message from user_id=%s chat_id=%s text=%s", user_id, chat_id, text[:80])
     try:
         config = get_config()
     except Exception as e:
-        logger.error(f"Failed to get config: {e}", exc_info=True)
+        logger.error("Telegram webhook: failed to get config: %s", e, exc_info=True)
         return {'statusCode': 200, 'body': 'OK'}
     is_claimed = config and config.get('status') in ('claimed', 'locked')
     if not is_claimed:
+        logger.info("Telegram webhook: bot not claimed (update_id=%s user_id=%s); user must /pair with code", update_id, user_id)
         if validate_pairing_code(text, user_id):
             send_telegram_message(chat_id, "✅ You are now the owner. Use /help for commands.", bot_token)
         else:
@@ -1301,25 +1433,31 @@ def handler(event, context):
     if is_group_chat(chat):
         bot_info = get_bot_info(bot_token)
         if not is_bot_mentioned(message, bot_info.get('username'), bot_info.get('id')):
+            logger.info("Telegram webhook: group chat but bot not mentioned, ack update_id=%s", update_id)
             return {'statusCode': 200, 'body': 'OK'}
         text = strip_bot_mention_from_text(message, bot_info.get('username'), bot_info.get('id'))
         if not text:
+            logger.info("Telegram webhook: group mention only, no text, ack update_id=%s", update_id)
             return {'statusCode': 200, 'body': 'OK'}
     elif is_private_chat(chat):
         if not is_user_allowed_dm(user_id, config):
+            logger.info("Telegram webhook: user_id=%s not allowed to DM, ack update_id=%s", user_id, update_id)
             send_telegram_message(chat_id, "You are not authorized to DM this bot.", bot_token)
             return {'statusCode': 200, 'body': 'OK'}
     try:
         base_session = f"telegram:dm:{chat_id}" if is_private_chat(chat) else f"telegram:group:{chat_id}"
         session_id = base_session.ljust(33, '0')
+        logger.info("Telegram webhook: invoking agent update_id=%s session_id=%s text_len=%s", update_id, session_id, len(text))
         result = invoke_agent(text, session_id)
         if isinstance(result, dict):
             message_text = result.get('message') or result.get('response') or str(result)
             send_telegram_message(chat_id, message_text, bot_token)
+            logger.info("Telegram webhook: agent replied, sent to chat_id=%s update_id=%s", chat_id, update_id)
         else:
             send_telegram_message(chat_id, str(result), bot_token)
+            logger.info("Telegram webhook: agent replied (str), sent to chat_id=%s update_id=%s", chat_id, update_id)
     except Exception as e:
-        logger.error(f"Error processing message: {e}", exc_info=True)
+        logger.error("Telegram webhook: error processing message: %s", e, exc_info=True)
         try:
             send_telegram_message(chat_id, "Sorry, something went wrong. Please try again.", bot_token)
         except Exception:
@@ -1655,6 +1793,9 @@ export class TailscaleStack extends cdk.Stack {
         '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
         '        proxy_set_header X-Forwarded-Proto https;',
         '        proxy_ssl_server_name on;',
+        '        proxy_read_timeout 300s;',
+        '        proxy_connect_timeout 60s;',
+        '        proxy_send_timeout 60s;',
         '    }',
         '',
         '    location /invocations {',
@@ -1720,6 +1861,9 @@ export class TailscaleStack extends cdk.Stack {
           '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
           '        proxy_set_header X-Forwarded-Proto https;',
           '        proxy_ssl_server_name on;',
+          '        proxy_read_timeout 300s;',
+          '        proxy_connect_timeout 60s;',
+          '        proxy_send_timeout 60s;',
           '    }',
           '',
           '    location /invocations {',
@@ -1813,6 +1957,9 @@ export class TailscaleStack extends cdk.Stack {
           '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
           '        proxy_set_header X-Forwarded-Proto https;',
           '        proxy_ssl_server_name on;',
+          '        proxy_read_timeout 300s;',
+          '        proxy_connect_timeout 60s;',
+          '        proxy_send_timeout 60s;',
           '    }',
           '',
           '    location /invocations {',
@@ -2092,6 +2239,14 @@ export class AgentCoreStack extends cdk.Stack {
               `arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/soul/s3-bucket`,
               `arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/soul/s3-key`,
               `arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/soul/poet-soul-s3-key`,
+            ],
+          }),
+          new iam.PolicyStatement({
+            sid: 'TelegramWebhookLambdaUrlRead',
+            effect: iam.Effect.ALLOW,
+            actions: ['lambda:GetFunctionUrlConfig'],
+            resources: [
+              `arn:aws:lambda:${this.region}:${this.account}:function:glitch-telegram-webhook`,
             ],
           }),
           new iam.PolicyStatement({

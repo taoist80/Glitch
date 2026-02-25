@@ -299,11 +299,13 @@ def _load_telegram_config_for_api():
     default_table = "glitch-telegram-config"
     table_name = config_table or default_table
     
-    # Try to read from DynamoDB if we have a table name
+    # Try to read from DynamoDB if we have a table name (short timeout to avoid hanging the UI)
     if config_table or webhook_url_env or is_agentcore:
         try:
+            from botocore.config import Config
             region = _get_dynamodb_region()
-            dynamodb = boto3.resource("dynamodb", region_name=region)
+            cfg = Config(read_timeout=5, connect_timeout=2, retries={"max_attempts": 1, "mode": "standard"})
+            dynamodb = boto3.resource("dynamodb", region_name=region, config=cfg)
             table = dynamodb.Table(table_name)
             response = table.get_item(Key={"pk": "CONFIG", "sk": "telegram"})
             if "Item" in response:
@@ -319,7 +321,7 @@ def _load_telegram_config_for_api():
                     "mode": item.get("mode", "webhook"),
                 }, True
         except (ClientError, Exception) as e:
-            logger.warning("DynamoDB Telegram config load failed (expected if no DynamoDB permissions): %s", e)
+            logger.warning("DynamoDB Telegram config load failed (expected if no DynamoDB permissions or timeout): %s", e)
         
         # Fallback: we're in AgentCore/webhook mode but can't read DynamoDB
         # Return enabled=True with default config since the webhook Lambda handles Telegram
@@ -499,20 +501,70 @@ async def get_memory_summary() -> MemorySummaryResponse:
 
 @router.get("/telemetry", response_model=TelemetryResponse)
 async def get_telemetry() -> TelemetryResponse:
-    """Get collected telemetry: recent history, running totals by period, thresholds, and current alerts."""
+    """Get collected telemetry: recent history, running totals by period, thresholds, and current alerts.
+
+    Strategy:
+    - this_hour: in-memory only (fast, current session).
+    - today / this_week / this_month: CloudWatch Logs (/glitch/telemetry) always, merged with
+      in-memory so data is complete even mid-session.
+    - history list: in-memory for this session; supplemented from CloudWatch (last month) when
+      in-memory is empty (cold start / container restart).
+    """
     try:
         from glitch.telemetry import (
             get_telemetry_history,
             get_running_totals,
             get_telemetry_thresholds,
             check_thresholds,
+            query_cloudwatch_telemetry,
+            get_cloudwatch_aggregates,
+            aggregate_metrics,
+            _merge_aggregates,
         )
+        import os as _os
+
+        log_group = _os.environ.get("GLITCH_TELEMETRY_LOG_GROUP", "/glitch/telemetry")
+
+        # ── History list ──────────────────────────────────────────────────────
         history = get_telemetry_history(limit=100)
-        running_totals = get_running_totals()
+        if not history:
+            # Cold start: no in-memory data yet — pull last month from CloudWatch.
+            logger.info("In-memory telemetry empty; querying CloudWatch %s", log_group)
+            try:
+                cw_history = query_cloudwatch_telemetry(period="month", log_group=log_group)
+                if cw_history:
+                    history = cw_history[:100]
+                    logger.info("CloudWatch history: %d entries", len(history))
+            except Exception as cw_err:
+                logger.warning("CloudWatch history query failed: %s", cw_err)
+
+        # ── Running totals ────────────────────────────────────────────────────
+        # this_hour: in-memory only (current process, fast).
+        # today / this_week / this_month: always query CloudWatch and merge with in-memory
+        # so totals survive container restarts and reflect the full calendar period.
+        running_totals = get_running_totals()   # in-memory for all buckets
+
+        period_map = {
+            "today": "day",
+            "this_week": "week",
+            "this_month": "month",
+        }
+        for bucket, cw_period in period_map.items():
+            try:
+                cw_agg = get_cloudwatch_aggregates(cw_period, log_group=log_group)
+                if cw_agg and cw_agg.get("invocation_count", 0) > 0:
+                    running_totals[bucket] = _merge_aggregates(
+                        running_totals.get(bucket, {}), cw_agg
+                    )
+            except Exception as cw_err:
+                logger.warning("CloudWatch aggregates failed for %s: %s", bucket, cw_err)
+
         thresholds = get_telemetry_thresholds()
         alerts = check_thresholds(running_totals)
-        logger.info("Telemetry: history=%d entries, running_totals=%s, thresholds=%d",
-                    len(history), list(running_totals.keys()), len(thresholds))
+        logger.info(
+            "Telemetry: history=%d entries, running_totals=%s, thresholds=%d",
+            len(history), list(running_totals.keys()), len(thresholds),
+        )
         return TelemetryResponse(
             history=_sanitize_for_json(history) if isinstance(history, list) else [],
             running_totals=_sanitize_for_json(running_totals) if isinstance(running_totals, dict) else {},

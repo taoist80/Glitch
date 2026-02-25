@@ -267,66 +267,67 @@ async def main() -> None:
     # Initialize Telegram channel if bot token is in Secrets Manager
     telegram_channel = None
     telegram_token = get_telegram_bot_token()
-    
-    # In AgentCore mode, skip Telegram channel init (webhook Lambda handles it)
+
+    # In AgentCore mode the runtime is in PRIVATE_ISOLATED VPC subnets with no internet egress.
+    # Webhook registration (setWebhook → api.telegram.org) must happen in the webhook Lambda,
+    # which has full internet access. The runtime only loads DynamoDB config and optionally
+    # starts the polling channel in local/non-AgentCore mode.
     is_agentcore = os.path.exists("/app") or "agentcore" in os.getenv("AWS_EXECUTION_ENV", "").lower()
-    
-    if telegram_token and not is_agentcore:
+
+    if telegram_token:
         try:
-            logger.info("Telegram bot token retrieved from Secrets Manager, initializing Telegram channel...")
-            
-            # Determine config backend: DynamoDB (webhook mode) or local file (polling mode)
-            use_dynamodb = os.getenv("GLITCH_CONFIG_BACKEND", "dynamodb").lower() == "dynamodb"
             config_table = os.getenv("GLITCH_CONFIG_TABLE", "glitch-telegram-config")
-            
+            use_dynamodb = os.getenv("GLITCH_CONFIG_BACKEND", "dynamodb").lower() == "dynamodb"
+
             if use_dynamodb:
-                logger.info(f"Using DynamoDB config backend (table: {config_table})")
+                logger.info("Using DynamoDB config backend (table: %s)", config_table)
                 config_manager = DynamoDBConfigManager(table_name=config_table)
                 config = config_manager.load(bot_token=telegram_token)
-                
-                # Register webhook if URL is available
-                webhook_url = get_webhook_url()
-                if webhook_url:
-                    webhook_secret = config_manager.get_webhook_secret()
-                    if register_telegram_webhook(telegram_token, webhook_url, webhook_secret):
-                        config_manager.set_webhook_url(webhook_url)
-                        logger.info("Telegram webhook mode enabled - Lambda handles incoming messages")
-                    else:
-                        logger.warning("Failed to register webhook, falling back to polling")
+
+                if is_agentcore:
+                    # Webhook registration is handled by the glitch-telegram-webhook Lambda
+                    # on its cold start (it has internet access; this container does not).
+                    logger.info("AgentCore mode: webhook registration delegated to glitch-telegram-webhook Lambda")
                 else:
-                    logger.info("No webhook URL configured, using polling mode")
+                    # Local mode: register webhook and start polling channel
+                    webhook_url = get_webhook_url()
+                    if webhook_url:
+                        webhook_secret = config_manager.get_webhook_secret()
+                        if register_telegram_webhook(telegram_token, webhook_url, webhook_secret):
+                            config_manager.set_webhook_url(webhook_url)
+                            logger.info("Telegram webhook registered: %s", webhook_url)
+                        else:
+                            logger.warning("Failed to register Telegram webhook")
+                    else:
+                        logger.info("No webhook URL configured (GLITCH_TELEGRAM_WEBHOOK_URL not set)")
             else:
-                # Local file config (original behavior)
                 config_dir = os.getenv("GLITCH_CONFIG_DIR")
                 config_path = Path(config_dir) if config_dir else None
                 config_manager = ConfigManager(config_dir=config_path)
                 config = config_manager.load(bot_token=telegram_token)
-            
-            # Initialize bootstrap system
-            bootstrap = OwnerBootstrap(config_manager)
-            
-            # Create Poet sub-agent for Telegram routing
-            poet_agent = create_poet_agent()
-            
-            # Create Telegram channel
-            telegram_channel = TelegramChannel(
-                config_manager=config_manager,
-                bootstrap=bootstrap,
-                agent=agent,
-                poet_agent=poet_agent,
-            )
-            
-            # Start Telegram channel in background
-            await telegram_channel.start()
-            
-            logger.info("Telegram channel started successfully")
+
+            if not is_agentcore:
+                # Local / non-AgentCore: start the polling channel
+                logger.info("Starting Telegram polling channel...")
+                bootstrap = OwnerBootstrap(config_manager)
+                poet_agent = create_poet_agent()
+                telegram_channel = TelegramChannel(
+                    config_manager=config_manager,
+                    bootstrap=bootstrap,
+                    agent=agent,
+                    poet_agent=poet_agent,
+                )
+                await telegram_channel.start()
+                logger.info("Telegram channel started successfully")
+            else:
+                logger.info("AgentCore mode: webhook Lambda handles incoming messages; polling channel not started")
+
         except Exception as e:
-            logger.error(f"Failed to initialize Telegram channel: {e}", exc_info=True)
+            logger.error("Failed to initialize Telegram: %s", e, exc_info=True)
             # Continue without Telegram if it fails
-    elif is_agentcore:
-        logger.info("AgentCore mode detected - Telegram handled by webhook Lambda, skipping channel init")
     else:
-        logger.info("No Telegram bot token found in Secrets Manager (glitch/telegram-bot-token), skipping Telegram channel")
+        logger.info("No Telegram bot token found in Secrets Manager (%s), skipping Telegram",
+                    os.getenv("GLITCH_TELEGRAM_SECRET_NAME", "glitch/telegram-bot-token"))
     
     mode = os.getenv("GLITCH_MODE", "server")
     logger.info(f"Mode determined: {mode}")

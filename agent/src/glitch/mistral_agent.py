@@ -30,6 +30,18 @@ DEFAULT_MISTRAL_TIMEOUT = 180.0
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant. Be concise and accurate."
 
 
+def _load_soul_system_prompt() -> str:
+    """Load SOUL.md as the default system prompt for Mistral. Falls back to DEFAULT_SYSTEM_PROMPT."""
+    try:
+        from glitch.agent import load_soul
+        soul = load_soul()
+        if soul and soul.strip():
+            return soul.strip()
+    except Exception as e:
+        logger.debug("Could not load SOUL.md for Mistral: %s", e)
+    return DEFAULT_SYSTEM_PROMPT
+
+
 class MistralAgent:
     """Chat agent backed by Mistral (mistral-nemo:12b) at 10.10.110.202.
 
@@ -199,9 +211,12 @@ class MistralAgent:
         prompt: str,
         session_id: Optional[str] = None,
         system_prompt: Optional[str] = None,
+        **kwargs: Any,
     ) -> InvocationResponse:
         sid = session_id or "default"
-        messages = self._get_messages(sid, prompt, system_prompt=system_prompt or DEFAULT_SYSTEM_PROMPT)
+        # Use caller-supplied system_prompt, then SOUL.md, then hardcoded default
+        effective_system = system_prompt or _load_soul_system_prompt()
+        messages = self._get_messages(sid, prompt, system_prompt=effective_system)
         # Use Ollama's native /api/chat endpoint (port 11434)
         result = await self._call_ollama_native(messages, sid)
         if "error" not in result and result.get("message"):
