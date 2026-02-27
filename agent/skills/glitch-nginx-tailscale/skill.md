@@ -16,6 +16,12 @@ The Tailscale EC2 has AWS SSM Agent installed. All remote access is via SSM — 
   - `run_tailscale_renew_tls` — renew an existing cert (uses dnspython patch to bypass Tailscale DNS interception).
   - `protect_send_telegram_alert` — send a report to the owner via Telegram.
 
+- **Interactive terminal** (for the user to run manually if needed):
+  ```bash
+  aws ssm start-session --target $(aws cloudformation describe-stacks --stack-name GlitchTailscaleStack --query 'Stacks[0].Outputs[?OutputKey==`InstanceId`].OutputValue' --output text)
+  ```
+  Share this command with the user when they need an interactive shell on the instance.
+
 ## Workflow 1: Nginx health check
 
 1. Run standard checks in one SSM call:
