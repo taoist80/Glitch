@@ -2,12 +2,17 @@
 
 You are managing the nginx proxy and SSL certificate on the Tailscale EC2 that serves the Glitch UI. Use this skill for connection issues, nginx problems, and SSL cert generation or renewal.
 
+## CRITICAL: Do NOT use SSH
+
+**Never ask for SSH credentials. Never use `ssh_*` tools for this task.**
+The Tailscale EC2 has AWS SSM Agent installed. All remote access is via SSM — no SSH keys, no passwords, no Tailscale IP needed.
+
 ## Context
 
-- **Target**: Tailscale EC2 (instance ID from SSM `/glitch/tailscale/instance-id`). Access only via Tailscale IP (100.x.x.x); ports 80/443 are not open on the public IP.
-- **Tools**:
-  - `run_tailscale_ssm_command(commands)` — run shell commands on the instance via SSM.
-  - `run_tailscale_ensure_tls` — obtain a new cert (first-time or after replace) and enable nginx HTTPS.
+- **Target**: Tailscale EC2. The instance ID is stored in SSM at `/glitch/tailscale/instance-id` — the tailscale tools read it automatically.
+- **Tools** (use these, not SSH):
+  - `run_tailscale_ssm_command(commands)` — run shell commands on the instance via AWS SSM Run Command. No SSH needed.
+  - `run_tailscale_ensure_tls` — obtain a new cert (first-time or after instance replace) and switch nginx to HTTPS.
   - `run_tailscale_renew_tls` — renew an existing cert (uses dnspython patch to bypass Tailscale DNS interception).
   - `protect_send_telegram_alert` — send a report to the owner via Telegram.
 

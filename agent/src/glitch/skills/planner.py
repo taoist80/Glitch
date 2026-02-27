@@ -246,7 +246,18 @@ class TaskPlanner:
         noun_phrase_pattern = r"\b(\w+(?:\s+\w+)?(?:\s+(?:system|management|tools?|module|feature|code)))\b"
         matches = re.findall(noun_phrase_pattern, message, re.IGNORECASE)
         triggers.extend(matches)
-        
+
+        # Also include all significant words and 2-word phrases from the message so
+        # skill triggers like "nginx", "ui not loading", "glitch ui" can match directly.
+        words = re.findall(r'\b[a-z][\w./-]*\b', message)
+        triggers.extend(words)
+        # 2-word phrases
+        for i in range(len(words) - 1):
+            triggers.append(f"{words[i]} {words[i+1]}")
+        # 3-word phrases
+        for i in range(len(words) - 2):
+            triggers.append(f"{words[i]} {words[i+1]} {words[i+2]}")
+
         # Add custom triggers
         for trigger in self.custom_triggers:
             if trigger.lower() in message:
