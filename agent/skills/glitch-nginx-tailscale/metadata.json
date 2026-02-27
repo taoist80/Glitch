@@ -1,7 +1,7 @@
 {
   "id": "glitch-nginx-tailscale",
   "version": "1.2.0",
-  "description": "Troubleshoot nginx on the Tailscale EC2 proxy (Glitch UI/gateway), manage SSL certs (obtain/renew via Porkbun DNS-01), and report issues via Telegram. Uses AWS SSM — no SSH required.",
+  "description": "Troubleshoot nginx on the Tailscale EC2 proxy (Glitch UI/gateway), manage SSL certs (obtain/renew via Porkbun DNS-01), and report issues via Telegram. Use when user asks about nginx, the Glitch UI, glitch.awoo.agency, SSL certs, Tailscale EC2, UI not loading, or certificate renewal. Uses AWS SSM — no SSH required.",
   "triggers": [
     "nginx",
     "glitch ui",

@@ -382,9 +382,14 @@ async def ssh_list_hosts() -> str:
     hosts = _get_ssh_hosts()
     if not hosts:
         return (
-            "No pre-registered SSH hosts. You can still connect to any host by passing "
-            "user@hostname or user@hostname:port directly to ssh_run_command. "
-            "The agent will try key auth first; if that fails, pass password='<password>' "
+            "No pre-registered SSH hosts.\n\n"
+            "IMPORTANT: If you are trying to access the Tailscale EC2 (nginx, Glitch UI, "
+            "glitch.awoo.agency, SSL certs) — STOP. Do NOT ask for SSH credentials. "
+            "Use run_tailscale_ssm_command, run_tailscale_ensure_tls, or run_tailscale_renew_tls "
+            "instead. These tools connect via AWS SSM and require no SSH, no passwords, and no "
+            "host configuration.\n\n"
+            "For other hosts: pass user@hostname or user@hostname:port directly to "
+            "ssh_run_command. Key auth is tried first; if it fails, pass password='<password>' "
             "to install the key automatically."
         )
     lines = [
@@ -398,14 +403,17 @@ async def ssh_list_hosts() -> str:
 async def ssh_run_command(host: str, command: str, password: Optional[str] = None) -> str:
     """Run a shell command on a remote host over SSH.
 
-    Accepts a registered host alias (from ssh_list_hosts) OR an ad-hoc user@host or
-    user@host:port string. No pre-registration required — the agent tries key-based
-    auth first. If key auth fails and a password is provided, the key is installed
-    automatically so future connections are passwordless.
+    NOT FOR TAILSCALE EC2: If you need to run commands on the Tailscale EC2 (nginx,
+    Glitch UI, glitch.awoo.agency, SSL certs), use run_tailscale_ssm_command instead —
+    it requires no SSH, no credentials, and no host configuration.
+
+    This tool is for other hosts (e.g. on-prem machines). Accepts a registered host
+    alias OR an ad-hoc user@host or user@host:port string. Key auth is tried first;
+    if it fails and a password is provided, the key is installed automatically.
 
     Args:
-        host: Host alias (e.g. "bastion") or user@hostname[:port] (e.g. "ec2-user@10.0.0.5").
-        command: Shell command to run (e.g. "ls -la /tmp", "systemctl status nginx").
+        host: Host alias (e.g. "bastion") or user@hostname[:port] (e.g. "ubuntu@10.0.0.5").
+        command: Shell command to run.
         password: Optional password for first-time key installation. Only needed if key
                   auth fails (i.e. the public key hasn't been installed on this host yet).
 

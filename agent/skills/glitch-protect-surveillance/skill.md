@@ -2,6 +2,10 @@
 
 You are operating the UniFi Protect surveillance integration. This skill covers all 23 surveillance skills across 5 phases. Use the protect_* tools for all camera, entity, and alert operations.
 
+## Instructions
+
+When this skill is active, route by user intent: vehicle/plate → Phase 1 extraction and entity matching; baseline or "what's normal" → Phase 2; anomalies or threats → Phase 3–4; alerts or reporting → Phase 5. Always use `vision_agent` (LLaVA) for images — never external vision APIs. Follow the Tool Usage Guidelines at the end.
+
 ## Architecture
 
 - **Image analysis**: Always use `vision_agent` (local LLaVA) for ALL image processing. Never send images to external APIs.
@@ -560,3 +564,27 @@ Quick actions:
 - Apply adaptive thresholds (adjust for camera FP rate)
 - Log every observation to DB for learning
 - Include snapshot with alerts when available
+
+## Examples
+
+**User says:** "What car is at the driveway?"
+**Actions:** Get recent events for that camera, fetch snapshot, run `vision_agent` with vehicle prompt, extract plate if visible, optionally `protect_search_entities` by plate. Return vehicle profile and entity match if known.
+
+**User says:** "Set up a daily security briefing"
+**Actions:** Use Phase 5 briefing workflow: aggregate events, summarize by camera, highlight anomalies or alerts, format for Telegram or reply.
+
+**User says:** "Register this person as hostile"
+**Actions:** Extract features from snapshot, `protect_register_entity(type="person", features=..., trust_level="hostile")`, store observation. Confirm and explain alert behavior.
+
+## Troubleshooting
+
+**Error:** MCP or protect_* tool fails (connection, auth)
+**Cause:** Protect MCP server not connected or credentials not loaded.
+**Solution:** Ask user to check MCP connection and env/SSM for credentials. Do not invent credentials.
+
+**Error:** vision_agent unreachable or times out
+**Cause:** LLaVA host (on-prem) may be off or runtime not on Tailscale.
+**Solution:** Report that local vision is unavailable; suggest user check Ollama/LLaVA host and network. Do not substitute external vision APIs.
+
+**Symptom:** Too many false positive alerts
+**Solution:** Use baseline (Phase 2) to establish normal traffic; use `protect_should_alert` and adaptive thresholds; consider raising alert bar for that camera.

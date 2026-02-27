@@ -1,7 +1,7 @@
 {
   "id": "glitch-protect-surveillance",
   "version": "1.0.0",
-  "description": "UniFi Protect surveillance integration: entity detection, identification, anomaly detection, threat assessment, cross-camera tracking, and adaptive alerting across 5 phases.",
+  "description": "UniFi Protect surveillance integration: entity detection, identification, anomaly detection, threat assessment, cross-camera tracking, and adaptive alerting. Use when user mentions Protect, cameras, surveillance, vehicles, license plates, alerts, security, motion, or UniFi.",
   "triggers": [
     "protect",
     "camera",

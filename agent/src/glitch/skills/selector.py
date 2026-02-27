@@ -75,14 +75,16 @@ class SkillSelector:
                     score, reasons = self._score_skill(skill, task_spec, is_tag_match=True)
                     candidates.append((skill, score, reasons))
                     
-        # Collect candidates from raw triggers
+        # Collect candidates from raw triggers using substring matching so that
+        # skill triggers like "check nginx" match when the user message contains
+        # those words anywhere (not requiring exact phrase equality).
         raw_triggers = task_spec.get("raw_triggers", [])
-        for trigger in raw_triggers:
-            for skill in self.registry.find_by_trigger(trigger):
-                if skill.metadata.id not in seen_ids:
-                    seen_ids.add(skill.metadata.id)
-                    score, reasons = self._score_skill(skill, task_spec, is_trigger_match=True)
-                    candidates.append((skill, score, reasons))
+        full_trigger_text = " ".join(raw_triggers)
+        for skill in self.registry.find_by_trigger_substring(full_trigger_text):
+            if skill.metadata.id not in seen_ids:
+                seen_ids.add(skill.metadata.id)
+                score, reasons = self._score_skill(skill, task_spec, is_trigger_match=True)
+                candidates.append((skill, score, reasons))
                     
         total_candidates = len(candidates)
         

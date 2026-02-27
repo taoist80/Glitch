@@ -1,7 +1,7 @@
 {
   "id": "glitch-telemetry-maintainer",
   "version": "1.0.0",
-  "description": "Expert guidance for maintaining and extending the Glitch telemetry system",
+  "description": "Maintain and extend the Glitch telemetry system (in-memory history, CloudWatch logs and metrics, thresholds). Use when user asks about telemetry, metrics, observability, CloudWatch, monitoring, adding a metric, or setting thresholds.",
   "triggers": [
     "telemetry",
     "metrics",

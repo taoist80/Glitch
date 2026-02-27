@@ -2,6 +2,10 @@
 
 You are working on the Glitch agent's telemetry system. This skill provides expert guidance for maintaining, extending, and debugging the telemetry infrastructure.
 
+## Instructions
+
+When this skill is active, use the tools and patterns below. Prefer the telemetry tools (`telemetry`, `set_telemetry_threshold`, `add_telemetry_metric`, etc.) for any request about metrics, usage, or alerts. For code changes, refer to Key Files and Guidelines.
+
 ## Architecture Overview
 
 The telemetry system has three tiers:
@@ -92,3 +96,24 @@ set_telemetry_thresholds([
 1. Run unit tests: `pytest agent/tests/`
 2. Check telemetry output: Use `telemetry()` tool
 3. Verify CloudWatch: Check log group and metrics in AWS Console
+
+## Examples
+
+**User says:** "What's our token usage this week?"
+**Actions:** Call `telemetry(period="week", running_totals=True)`. Summarize input/output tokens and any threshold alerts.
+
+**User says:** "Alert me if we exceed 100k tokens per day"
+**Actions:** Call `set_telemetry_threshold(metric="total_tokens", period="day", limit=100000)`. Confirm the threshold is set and when it will be checked.
+
+**User says:** "Add a custom metric for API latency"
+**Actions:** Call `add_telemetry_metric(name="api_latency_ms", unit="Milliseconds")`. Explain that the client must call `record_telemetry_metric(name="api_latency_ms", value=<ms>)` each invocation.
+
+## Troubleshooting
+
+**Error:** "Threshold not firing" or "Alert not showing"
+**Cause:** Period name may not match (use hour, day, week, month, or this_hour, today, this_week, this_month). Metric name must be exact (e.g. total_tokens, invocation_count).
+**Solution:** Use `list_telemetry_thresholds()` to verify. Update with `update_telemetry_threshold()` if limit is wrong.
+
+**Error:** CloudWatch metrics or logs missing
+**Cause:** Env vars `GLITCH_TELEMETRY_LOG_GROUP` or `GLITCH_TELEMETRY_NAMESPACE` not set in runtime.
+**Solution:** User must set these in the agent runtime environment; then redeploy. Do not invent values.

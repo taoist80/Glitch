@@ -26,7 +26,6 @@ agents:
           - sg-07676d5bc70f6c385
           subnets:
           - subnet-03b623395065bfb5a
-          - subnet-04f6687c2749b6b10
       protocol_configuration:
         server_protocol: HTTP
       observability:

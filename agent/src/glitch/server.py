@@ -317,7 +317,7 @@ async def invoke(payload: InvocationRequest, context: RequestContext) -> Invocat
 
         invoke_step = "check_keepalive"
         # Keepalive from scheduled Lambda to avoid idleRuntimeSessionTimeout (default 15 min).
-        if session_id == "system:keepalive":
+        if session_id.startswith("system:keepalive"):
             prompt = (payload.get("prompt") or "").strip().lower()
             if prompt in ("", "ping", "keepalive"):
                 logger.debug("Keepalive received, skipping agent")

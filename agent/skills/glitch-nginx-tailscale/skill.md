@@ -81,6 +81,27 @@ run_tailscale_ssm_command(commands=[
 ])
 ```
 
+## Examples
+
+**User says:** "Check nginx status on the Tailscale EC2"
+**Actions:** Run Workflow 1 (nginx health check) via `run_tailscale_ssm_command`. Summarize status and any errors. If TLS is missing, suggest `run_tailscale_ensure_tls`.
+
+**User says:** "The UI at glitch.awoo.agency isn't loading"
+**Actions:** Run Workflow 1. Check listeners on 80/443, nginx -t, and error.log. If connection refused, advise trying http first or running ensure_tls. Report via Telegram if critical.
+
+## Troubleshooting
+
+**Error:** "Could not read Tailscale instance ID from SSM"
+**Cause:** Tailscale stack not deployed or parameter `/glitch/tailscale/instance-id` missing.
+**Solution:** User must deploy GlitchTailscaleStack; then the parameter is populated. Do not fall back to SSH.
+
+**Error:** nginx -t fails or "certificate not found"
+**Cause:** Config syntax error or cert not yet issued.
+**Solution:** Run `run_tailscale_ensure_tls` for first-time cert, or fix config paths. Check error.log via SSM.
+
+**Symptom:** User says "use SSH" or provides SSH credentials for the EC2
+**Solution:** Use SSM tools only. Tell the user no SSH is needed — the skill uses AWS SSM Run Command.
+
 ## Output
 
 - Always summarize findings in your reply.

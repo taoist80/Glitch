@@ -171,6 +171,19 @@ export class GlitchFoundationStack extends cdk.Stack {
       ...endpointProps,
     });
 
+    // SSM: required for agent tools that call SSM Parameter Store or SSM Run Command
+    // (e.g. reading /glitch/tailscale/instance-id and running commands on the Tailscale EC2).
+    this.vpc.addInterfaceEndpoint('SsmEndpoint', {
+      service: ec2.InterfaceVpcEndpointAwsService.SSM,
+      ...endpointProps,
+    });
+
+    // SSM Messages: required for SSM Run Command to deliver command output back to the service.
+    this.vpc.addInterfaceEndpoint('SsmMessagesEndpoint', {
+      service: ec2.InterfaceVpcEndpointAwsService.SSM_MESSAGES,
+      ...endpointProps,
+    });
+
     // ========== IAM Roles (NO hardcoded names) ==========
     
     // Runtime role for AgentCore
@@ -689,6 +702,7 @@ def invoke_agent(prompt: str, session_id: str, stream: bool = False, agent_id: s
         agent_id, mode_id = get_session_agent_mode(session_id)
 
     import urllib.request
+    import urllib.error
 
     try:
         arn_parts = parse_runtime_arn(AGENTCORE_RUNTIME_ARN)
@@ -721,6 +735,18 @@ def invoke_agent(prompt: str, session_id: str, stream: bool = False, agent_id: s
             if isinstance(result, dict) and result.get('error'):
                 logger.warning(f"Agent returned error: {result.get('error')}")
             return result if isinstance(result, dict) else {"message": str(result)}
+    except urllib.error.HTTPError as he:
+        resp_body = ""
+        try:
+            if he.fp:
+                resp_body = he.fp.read().decode('utf-8', errors='replace')
+        except Exception:
+            pass
+        logger.error(
+            "AgentCore HTTP %s %s response_body: %s",
+            he.code, he.reason, resp_body[:2000] if resp_body else "(empty)",
+        )
+        return {"error": f"HTTP Error {he.code}: {he.reason}"}
     except Exception as e:
         logger.error(f"Failed to invoke agent: {e}", exc_info=True)
         return {"error": f"gateway_invoke_agent: {e}"}
@@ -1450,9 +1476,14 @@ def handler(event, context):
         logger.info("Telegram webhook: invoking agent update_id=%s session_id=%s text_len=%s", update_id, session_id, len(text))
         result = invoke_agent(text, session_id)
         if isinstance(result, dict):
-            message_text = result.get('message') or result.get('response') or str(result)
-            send_telegram_message(chat_id, message_text, bot_token)
-            logger.info("Telegram webhook: agent replied, sent to chat_id=%s update_id=%s", chat_id, update_id)
+            error = result.get('error')
+            if error:
+                logger.warning("Telegram webhook: agent returned error: %s update_id=%s", error, update_id)
+                send_telegram_message(chat_id, "Sorry, I couldn't process that request. Please try again.", bot_token)
+            else:
+                message_text = result.get('message') or result.get('response') or str(result)
+                send_telegram_message(chat_id, message_text, bot_token)
+                logger.info("Telegram webhook: agent replied, sent to chat_id=%s update_id=%s", chat_id, update_id)
         else:
             send_telegram_message(chat_id, str(result), bot_token)
             logger.info("Telegram webhook: agent replied (str), sent to chat_id=%s update_id=%s", chat_id, update_id)
@@ -1495,9 +1526,10 @@ def handler(event, context):
         endpoint = get_data_plane_endpoint(region)
         encoded_arn = quote(arn, safe='')
         url = endpoint + "/runtimes/" + encoded_arn + "/invocations"
-        payload = {"prompt": "ping", "session_id": "system:keepalive"}
+        keepalive_session_id = "system:keepalive" + "0" * 17
+        payload = {"prompt": "ping", "session_id": keepalive_session_id}
         body = json.dumps(payload).encode('utf-8')
-        headers = {'Content-Type': 'application/json', 'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id': 'system:keepalive'}
+        headers = {'Content-Type': 'application/json', 'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id': keepalive_session_id}
         session = boto3.Session()
         creds = session.get_credentials()
         if creds:
@@ -1978,7 +2010,8 @@ export class TailscaleStack extends cdk.Stack {
         `  UI_BUCKET="${uiBucketName ?? ''}"`,
         `  CUSTOM_DOMAIN="${customDomain ?? ''}"`,
         'fi',
-        'GATEWAY_HOST=$(echo "$GATEWAY_URL" | sed "s|https\\?://||")',
+        'GATEWAY_URL="${GATEWAY_URL%/}"',
+        'GATEWAY_HOST=$(echo "$GATEWAY_URL" | sed "s|https\\?://||" | sed "s|/\\+$||")',
         'SERVER_NAMES="${CUSTOM_DOMAIN:+$CUSTOM_DOMAIN }_"',
         `CERT_DIR="/etc/letsencrypt/live/${customDomain ?? '$CUSTOM_DOMAIN'}"`,
         'if [ -n "$CUSTOM_DOMAIN" ] && [ -f "$CERT_DIR/fullchain.pem" ]; then',
@@ -1987,7 +2020,7 @@ export class TailscaleStack extends cdk.Stack {
         'server {',
         '    listen 80 default_server;',
         '    server_name $SERVER_NAMES;',
-        '    return 301 https://$CUSTOM_DOMAIN$request_uri;',
+        '    return 301 https://$CUSTOM_DOMAIN\\$request_uri;',
         '}',
         'server {',
         '    listen 443 ssl;',
@@ -2001,15 +2034,15 @@ export class TailscaleStack extends cdk.Stack {
         '    location / {',
         '        proxy_pass http://$UI_BUCKET.s3-website-$REGION.amazonaws.com;',
         '        proxy_set_header Host $UI_BUCKET.s3-website-$REGION.amazonaws.com;',
-        '        proxy_set_header X-Real-IP $remote_addr;',
-        '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
-        '        proxy_set_header X-Forwarded-Proto $scheme;',
+        '        proxy_set_header X-Real-IP \\$remote_addr;',
+        '        proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;',
+        '        proxy_set_header X-Forwarded-Proto \\$scheme;',
         '    }',
         '    location /api/ {',
         '        proxy_pass $GATEWAY_URL/api/;',
         '        proxy_set_header Host $GATEWAY_HOST;',
-        '        proxy_set_header X-Real-IP $remote_addr;',
-        '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+        '        proxy_set_header X-Real-IP \\$remote_addr;',
+        '        proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;',
         '        proxy_set_header X-Forwarded-Proto https;',
         '        proxy_ssl_server_name on;',
         '        proxy_read_timeout 300s;',
@@ -2019,8 +2052,8 @@ export class TailscaleStack extends cdk.Stack {
         '    location /invocations {',
         '        proxy_pass $GATEWAY_URL/invocations;',
         '        proxy_set_header Host $GATEWAY_HOST;',
-        '        proxy_set_header X-Real-IP $remote_addr;',
-        '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+        '        proxy_set_header X-Real-IP \\$remote_addr;',
+        '        proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;',
         '        proxy_set_header X-Forwarded-Proto https;',
         '        proxy_ssl_server_name on;',
         '        proxy_read_timeout 300s;',
@@ -2030,8 +2063,8 @@ export class TailscaleStack extends cdk.Stack {
         '    location /health {',
         '        proxy_pass $GATEWAY_URL/health;',
         '        proxy_set_header Host $GATEWAY_HOST;',
-        '        proxy_set_header X-Real-IP $remote_addr;',
-        '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+        '        proxy_set_header X-Real-IP \\$remote_addr;',
+        '        proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;',
         '        proxy_set_header X-Forwarded-Proto https;',
         '        proxy_ssl_server_name on;',
         '    }',
@@ -2046,15 +2079,15 @@ export class TailscaleStack extends cdk.Stack {
         '    location / {',
         '        proxy_pass http://$UI_BUCKET.s3-website-$REGION.amazonaws.com;',
         '        proxy_set_header Host $UI_BUCKET.s3-website-$REGION.amazonaws.com;',
-        '        proxy_set_header X-Real-IP $remote_addr;',
-        '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
-        '        proxy_set_header X-Forwarded-Proto $scheme;',
+        '        proxy_set_header X-Real-IP \\$remote_addr;',
+        '        proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;',
+        '        proxy_set_header X-Forwarded-Proto \\$scheme;',
         '    }',
         '    location /api/ {',
         '        proxy_pass $GATEWAY_URL/api/;',
         '        proxy_set_header Host $GATEWAY_HOST;',
-        '        proxy_set_header X-Real-IP $remote_addr;',
-        '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+        '        proxy_set_header X-Real-IP \\$remote_addr;',
+        '        proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;',
         '        proxy_set_header X-Forwarded-Proto https;',
         '        proxy_ssl_server_name on;',
         '        proxy_read_timeout 300s;',
@@ -2064,8 +2097,8 @@ export class TailscaleStack extends cdk.Stack {
         '    location /invocations {',
         '        proxy_pass $GATEWAY_URL/invocations;',
         '        proxy_set_header Host $GATEWAY_HOST;',
-        '        proxy_set_header X-Real-IP $remote_addr;',
-        '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+        '        proxy_set_header X-Real-IP \\$remote_addr;',
+        '        proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;',
         '        proxy_set_header X-Forwarded-Proto https;',
         '        proxy_ssl_server_name on;',
         '        proxy_read_timeout 300s;',
@@ -2075,8 +2108,8 @@ export class TailscaleStack extends cdk.Stack {
         '    location /health {',
         '        proxy_pass $GATEWAY_URL/health;',
         '        proxy_set_header Host $GATEWAY_HOST;',
-        '        proxy_set_header X-Real-IP $remote_addr;',
-        '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+        '        proxy_set_header X-Real-IP \\$remote_addr;',
+        '        proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;',
         '        proxy_set_header X-Forwarded-Proto https;',
         '        proxy_ssl_server_name on;',
         '    }',
@@ -2138,6 +2171,17 @@ export class TailscaleStack extends cdk.Stack {
           '#!/bin/bash',
           'set -e',
           `CERT_DIR="/etc/letsencrypt/live/${customDomain}"`,
+          '# Recreate Porkbun credentials from Secrets Manager if missing (e.g. after instance replacement)',
+          'if [ ! -f /etc/letsencrypt/porkbun.ini ]; then',
+          '  echo "porkbun.ini missing, recreating from Secrets Manager..."',
+          `  PORKBUN_CREDS=$(aws secretsmanager get-secret-value --secret-id ${porkbunApiSecret!.secretName} --query SecretString --output text --region ${this.region})`,
+          '  PORKBUN_API_KEY=$(echo "$PORKBUN_CREDS" | python3 -c "import sys,json; print(json.load(sys.stdin)[\'apiKey\'])")',
+          '  PORKBUN_SECRET_KEY=$(echo "$PORKBUN_CREDS" | python3 -c "import sys,json; print(json.load(sys.stdin)[\'secretApiKey\'])")',
+          '  mkdir -p /etc/letsencrypt',
+          '  printf "dns_porkbun_key = %s\\ndns_porkbun_secret = %s\\n" "$PORKBUN_API_KEY" "$PORKBUN_SECRET_KEY" > /etc/letsencrypt/porkbun.ini',
+          '  chmod 600 /etc/letsencrypt/porkbun.ini',
+          '  unset PORKBUN_CREDS PORKBUN_API_KEY PORKBUN_SECRET_KEY',
+          'fi',
           'if [ ! -f "$CERT_DIR/fullchain.pem" ]; then',
           `  certbot certonly --non-interactive --agree-tos --email ${ensureTlsEmail} \\`,
           '    --authenticator dns-porkbun \\',
@@ -2478,23 +2522,23 @@ export class AgentCoreStack extends cdk.Stack {
                 new iam.PolicyStatement({
                   sid: 'TailscaleSsmSendCommand',
                   effect: iam.Effect.ALLOW,
+                  actions: ['ssm:SendCommand'],
+                  resources: [
+                    `arn:aws:ec2:${this.region}:${this.account}:instance/${tailscaleInstance.instanceId}`,
+                    // AWS-managed documents have no account ID in their ARN (arn:aws:ssm:region::document/...)
+                    `arn:aws:ssm:${this.region}::document/AWS-RunShellScript`,
+                  ],
+                }),
+                new iam.PolicyStatement({
+                  sid: 'TailscaleSsmReadCommand',
+                  effect: iam.Effect.ALLOW,
+                  // GetCommandInvocation/ListCommands require ssm: resource ARNs, not ec2: instance ARNs
                   actions: [
-                    'ssm:SendCommand',
                     'ssm:GetCommandInvocation',
                     'ssm:ListCommands',
                     'ssm:ListCommandInvocations',
                   ],
-                  resources: [
-                    `arn:aws:ec2:${this.region}:${this.account}:instance/${tailscaleInstance.instanceId}`,
-                  ],
-                }),
-                new iam.PolicyStatement({
-                  sid: 'TailscaleSsmDocument',
-                  effect: iam.Effect.ALLOW,
-                  actions: ['ssm:SendCommand'],
-                  resources: [
-                    `arn:aws:ssm:${this.region}:${this.account}:document/AWS-RunShellScript`,
-                  ],
+                  resources: [`arn:aws:ssm:${this.region}:${this.account}:*`],
                 }),
               ]
             : []),

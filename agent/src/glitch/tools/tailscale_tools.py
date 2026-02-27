@@ -11,6 +11,7 @@ import time
 from typing import List, Optional
 
 import boto3
+from botocore.config import Config
 from strands import tool
 
 logger = logging.getLogger(__name__)
@@ -19,13 +20,15 @@ REGION = os.environ.get("AWS_REGION", "us-west-2")
 SSM_INSTANCE_ID_PARAM = "/glitch/tailscale/instance-id"
 SCRIPT_PATH = "/usr/local/bin/ensure-glitch-tls.sh"
 POLL_INTERVAL = 5
-MAX_WAIT_SECONDS = 180
+MAX_WAIT_SECONDS = 60
+# Hard cap on boto3 API calls so a slow SSM endpoint can't block indefinitely.
+_SSM_CLIENT_CONFIG = Config(connect_timeout=10, read_timeout=15, retries={"max_attempts": 2})
 
 
 def _get_instance_id() -> Optional[str]:
     """Read Tailscale EC2 instance ID from SSM Parameter Store."""
     try:
-        client = boto3.client("ssm", region_name=REGION)
+        client = boto3.client("ssm", region_name=REGION, config=_SSM_CLIENT_CONFIG)
         resp = client.get_parameter(Name=SSM_INSTANCE_ID_PARAM)
         return resp["Parameter"]["Value"].strip()
     except Exception as e:
@@ -42,7 +45,7 @@ def _run_ensure_tls_sync() -> str:
             "Ensure the Tailscale stack has been deployed and the instance ID is written to SSM."
         )
 
-    ssm = boto3.client("ssm", region_name=REGION)
+    ssm = boto3.client("ssm", region_name=REGION, config=_SSM_CLIENT_CONFIG)
     try:
         cmd = ssm.send_command(
             InstanceIds=[instance_id],
@@ -104,7 +107,7 @@ def _run_ssm_commands_sync(commands: List[str]) -> str:
         for cmd in commands
     ]
 
-    ssm = boto3.client("ssm", region_name=REGION)
+    ssm = boto3.client("ssm", region_name=REGION, config=_SSM_CLIENT_CONFIG)
     try:
         cmd = ssm.send_command(
             InstanceIds=[instance_id],
@@ -148,7 +151,13 @@ async def run_tailscale_ssm_command(commands: List[str]) -> str:
         Combined status, stdout, and stderr from the SSM command invocation.
     """
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _run_ssm_commands_sync, commands)
+    try:
+        return await asyncio.wait_for(
+            loop.run_in_executor(None, _run_ssm_commands_sync, commands),
+            timeout=90,
+        )
+    except asyncio.TimeoutError:
+        return "SSM command timed out after 90s. The EC2 instance may be unreachable or SSM agent unresponsive."
 
 
 RENEW_SCRIPT = "/usr/local/bin/renew-glitch-tls.sh"

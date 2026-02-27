@@ -46,6 +46,15 @@ Two separate issues are involved:
 
 If any step fails, the user gets no reply (or an error message if the Lambda sends one).
 
+### When you get no message at all
+
+- **DM (private chat):** You must be the **owner** or in the **allowed-DM list**. Otherwise the Lambda sends "You are not authorized to DM this bot." and returns 200. If you get nothing, the Lambda may not be receiving the update (webhook not set) or may be failing before `send_telegram_message`.
+- **Group:** The bot must be **@mentioned** in the message. If you don’t @mention the bot, the Lambda acks the update (returns 200) and sends **no** message to the chat by design.
+- **Webhook not set:** If Telegram’s webhook URL is wrong or empty, Telegram never calls the Lambda, so there are no webhook log events when you send a message. Set the webhook (see “Setting the Telegram webhook manually” below) and confirm with `getWebhookInfo`.
+- **Runtime cold or timeout:** First request after idle can take a long time (VPC ENI, container start). The webhook Lambda waits up to 280s. If the runtime doesn’t respond in time, the Lambda catches the error and should send "Sorry, something went wrong." If you get nothing, the Lambda might have crashed before sending (check webhook Lambda logs).
+
+Run `./infrastructure/scripts/telegram-troubleshoot.sh` and use the output to see whether the webhook is receiving events and whether the runtime shows `GLITCH_INVOKE_ENTRY` for your message.
+
 ### Step 1: Confirm the webhook Lambda exists
 
 ```bash

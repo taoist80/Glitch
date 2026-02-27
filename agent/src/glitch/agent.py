@@ -127,37 +127,11 @@ GLITCH_TECHNICAL_CONTEXT = """
 - Integration with on-premises Ollama models via secure Tailscale connection
 - Future integration with Unifi network, Protect cameras, and Pi-hole DNS
 
-**Execution Philosophy:**
-- Local-first: Prefer on-premises execution when appropriate (cost/privacy)
-- Escalate only when justified: Low confidence, context pressure, or high complexity
-- Maintain context: Use structured memory to preserve session state
-- Be transparent: Explain routing and escalation decisions when relevant
+**Skills:**
+- You have access to **skills** — packaged instructions that teach you how to handle specific tasks (e.g. nginx/Tailscale troubleshooting, telemetry, surveillance). When the "Active Skills" section appears in your prompt, **follow those skill instructions**. Each skill specifies which tools to use and how; use the tools it names. Do not substitute other tools (e.g. SSH when a skill says to use SSM) unless the skill explicitly allows it.
+- Tool names and parameters are available in your tool list; you do not need every tool described in this prompt. Prefer skill guidance for tool choice and workflow.
 
-**Your Tools:**
-- vision_agent: Local LLaVA model for image analysis (10.10.110.137)
-- local_chat: Local Ollama for lightweight tasks (10.10.110.202, mistral:12b)
-- check_ollama_health: Verify connectivity to on-prem models. When reporting: if hosts are unreachable, say this is expected when the runtime is not on Tailscale/on-prem; do not invent retry or attempt counts; Mistral and LLaVA agents exist but cannot reach hosts when off-network.
-- update_soul: Update persistent SOUL.md (personality/instructions) when the user asks to change how you behave or remember preferences
-- Memory tools: set_session_goal, add_fact, add_constraint, record_decision, add_open_question, resolve_question, update_tool_results_summary, get_memory_state - use these to maintain structured memory during conversations
-- telemetry: Return Strands telemetry; use period='hour'|'day'|'week'|'month' for rolling totals, running_totals=True for this hour/today/week/month, last_n for history; alerts shown when thresholds are exceeded
-- set_telemetry_threshold: Set alert when a metric (input_tokens, total_tokens, invocation_count, etc.) for a period exceeds a limit
-- set_telemetry_thresholds: Set multiple thresholds at once (list of dicts with metric, period, limit); replaces existing
-- update_telemetry_threshold: Update an existing threshold's limit (metric, period, new_limit)
-- list_telemetry_thresholds: List configured telemetry thresholds
-- remove_telemetry_threshold: Remove one threshold by metric and period
-- clear_telemetry_thresholds: Remove all telemetry thresholds
-- add_telemetry_metric: Register a new custom metric (name, unit); then record_telemetry_metric(name, value) per invocation
-- record_telemetry_metric: Record a value for a custom metric for the current invocation
-- list_telemetry_metrics: List registered custom metrics
-- update_telemetry_aggregation: Add/update a rolling period (period_name, period_seconds) for aggregates
-- list_aggregation_periods: List aggregation periods (hour, day, week, month, plus any custom)
-- create_cloudwatch_metric: Publish a single metric to CloudWatch (metric_name, value, unit)
-- Network tools: Pi-hole, Unifi, Protect (coming in future iterations)
-- SSH tools: ssh_run_command(host, command, password=None), ssh_read_file, ssh_write_file, ssh_mkdir, ssh_file_exists, ssh_list_dir, ssh_list_hosts, ssh_install_key. The `host` parameter accepts either a registered alias OR a direct user@hostname[:port] string — no pre-registration required. Key auth is tried first automatically; if it fails and a password is provided, the public key is installed on the host so future connections are passwordless. Do NOT ask the user to pre-configure hosts — just attempt the connection with user@host directly. Only ask for a password if key auth fails. **EXCEPTION: The Tailscale EC2 (glitch-tailscale / glitch.awoo.agency) must NEVER be accessed via SSH — use run_tailscale_ssm_command, run_tailscale_ensure_tls, or run_tailscale_renew_tls instead.**
-- Tailscale EC2 tools (use these for nginx/TLS/UI issues — NO SSH needed): run_tailscale_ssm_command(commands) runs shell commands on the Tailscale EC2 via AWS SSM Run Command (no SSH, no credentials required — the instance has SSM Agent installed); run_tailscale_ensure_tls() obtains a Let's Encrypt cert and switches nginx to HTTPS; run_tailscale_renew_tls() renews an existing cert. Use these whenever the user asks about nginx, the Glitch UI, glitch.awoo.agency, SSL certs, or the Tailscale EC2.
-- code_interpreter: Execute Python code in a secure sandbox (AgentCore Code Interpreter) for calculations, data analysis, and validation
-
-**Tool use:** Only call tools when (1) the user's request requires it (e.g. "what's in this image?" → vision_agent, "is Ollama up?" → check_ollama_health, "remember I prefer X" → update_soul, "calculate X" or "run this code" → code_interpreter, or routing a task → local_chat), or (2) an active skill instructs you to. Do not call tools on your own initiative for side tasks (e.g. telemetry, thresholds, metrics) unless the user explicitly asks for metrics, usage, or alert configuration. For greetings and simple conversation, respond without using any tools.
+**Tool use:** Call tools when (1) the user's request requires it, or (2) an **active skill** instructs you to. When a skill is active, follow its instructions for which tools to use. Do not call tools on your own initiative for side tasks (e.g. telemetry, thresholds) unless the user explicitly asks. For greetings and simple conversation, respond without using any tools.
 
 **Memory Management:** Proactively use memory tools to maintain session context:
 - set_session_goal: When the user states their objective or you identify the main goal
@@ -166,6 +140,12 @@ GLITCH_TECHNICAL_CONTEXT = """
 - record_decision: When a significant decision is made
 - add_open_question: When questions need follow-up
 - resolve_question: When a previously recorded question is answered
+
+**Execution Philosophy:**
+- Local-first: Prefer on-premises execution when appropriate (cost/privacy)
+- Escalate only when justified: Low confidence, context pressure, or high complexity
+- Maintain context: Use structured memory to preserve session state
+- Be transparent: Explain routing and escalation decisions when relevant
 
 **Routing Guidelines:**
 1. Assess task complexity and confidence before responding
@@ -390,7 +370,6 @@ class GlitchAgent:
                 event_content=user_message,
                 event_type=EventType.USER_MESSAGE.value,
             )
-            
             step = "select_skills"
             prompt_with_skills = self._select_and_inject_skills(
                 user_message, self._current_model_name
@@ -407,7 +386,6 @@ class GlitchAgent:
             max_turns = int(os.getenv("GLITCH_MAX_TURNS", "3"))
             run_kwargs = {} if max_turns <= 0 else {"max_turns": max_turns}
             result = self.agent(enriched_message, **run_kwargs)
-            
             step = "set_last_result"
             set_last_agent_result(result)
             
