@@ -41,6 +41,17 @@ from glitch.tools.pihole_tools import (
     pihole_update_dns_record,
 )
 from glitch.tools.soul_tools import update_soul
+from glitch.tools.ssh_tools import (
+    ssh_list_hosts,
+    ssh_install_key,
+    ssh_run_command,
+    ssh_read_file,
+    ssh_write_file,
+    ssh_mkdir,
+    ssh_file_exists,
+    ssh_list_dir,
+)
+from glitch.tools.protect_tools import ALL_PROTECT_TOOLS
 
 
 class ToolRegistry:
@@ -91,6 +102,17 @@ class ToolRegistry:
             pihole_update_dns_record,
         ]
         self._groups["soul"] = [update_soul]
+        self._groups["protect"] = ALL_PROTECT_TOOLS
+        self._groups["ssh"] = [
+            ssh_list_hosts,
+            ssh_install_key,
+            ssh_run_command,
+            ssh_read_file,
+            ssh_write_file,
+            ssh_mkdir,
+            ssh_file_exists,
+            ssh_list_dir,
+        ]
 
     def register_group(self, name: str, tools: List[Callable]) -> None:
         """Register a group of tools (replaces existing group with same name)."""
