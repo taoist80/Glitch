@@ -60,6 +60,8 @@ from glitch.tools.pihole_tools import (
     PiholeConfig,
 )
 
+from glitch.tools.protect_tools import ALL_PROTECT_TOOLS
+
 __all__ = [
     # Ollama tools
     "vision_agent",
@@ -97,4 +99,6 @@ __all__ = [
     "pihole_delete_dns_record",
     "pihole_update_dns_record",
     "PiholeConfig",
+    # Protect tools
+    "ALL_PROTECT_TOOLS",
 ]

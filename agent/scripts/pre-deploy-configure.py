@@ -261,7 +261,40 @@ def main():
         # Mistral is still available via /mistral command in Telegram or explicit agent_id in payload.
         env_vars['GLITCH_DEFAULT_CHAT_AGENT'] = 'glitch'
         log("Default chat agent set to 'glitch' (Sonnet 4.5 brainstem)", 'SUCCESS')
-        
+
+        # SSH hosts: merge from .env.ssh if present; else fall back to SSM so redeploys
+        # (e.g. from a machine without .env.ssh) still get SSH config.
+        SSM_SSH_HOSTS = '/glitch/ssh/hosts'
+        env_ssh = AGENT_DIR / '.env.ssh'
+        ssh_hosts_set = False
+        if env_ssh.exists():
+            try:
+                with open(env_ssh) as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith('#') and '=' in line:
+                            key, _, value = line.partition('=')
+                            key, value = key.strip(), value.strip()
+                            if key == 'GLITCH_SSH_HOSTS' and value:
+                                env_vars['GLITCH_SSH_HOSTS'] = value
+                                log("SSH hosts merged from .env.ssh", 'SUCCESS')
+                                ssh_hosts_set = True
+                                break
+            except Exception as e:
+                log(f"Could not read .env.ssh: {e}", 'WARN')
+        if not ssh_hosts_set:
+            try:
+                ssh_hosts_value = get_ssm_parameter(ssm_client, SSM_SSH_HOSTS)
+                if ssh_hosts_value and ssh_hosts_value.strip():
+                    env_vars['GLITCH_SSH_HOSTS'] = ssh_hosts_value.strip()
+                    log("SSH hosts set from SSM /glitch/ssh/hosts", 'SUCCESS')
+            except Exception:
+                pass
+        # Ensure runtime knows which secret holds the SSH key (default used by code if unset).
+        if 'GLITCH_SSH_SECRET_NAME' not in env_vars:
+            env_vars['GLITCH_SSH_SECRET_NAME'] = 'glitch/ssh-key'
+            log("SSH secret name set to glitch/ssh-key", 'SUCCESS')
+
         save_config(config)
         save_env_deploy(env_vars)
         log("VPC configuration updated successfully", 'SUCCESS')

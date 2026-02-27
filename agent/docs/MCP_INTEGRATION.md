@@ -66,9 +66,23 @@ mcp_servers:
 - **args**: Arguments for the command
 - **env**: Environment variables (supports `${VAR}` expansion)
 - **prefix**: Tool name prefix (currently not applied by Strands)
+- **ssh_host**: Optional. SSH host alias (from `GLITCH_SSH_HOSTS`). When set, the stdio command is run on this host over SSH instead of locally.
 - **tool_filters**: Control which tools to load
   - **allowed**: List of tool names or regex patterns to include
   - **rejected**: List of tool names or regex patterns to exclude
+
+### Loading config from a remote host
+
+Set `GLITCH_MCP_CONFIG_REMOTE=host_alias:remote_path` (e.g. `bastion:~/mcp_servers.yaml`). The loader fetches that file via SSH (using the same key and host list as the SSH tools) and uses it instead of the local `mcp_servers.yaml`. Requires SSH key and the host to be in `GLITCH_SSH_HOSTS` (or SSM `/glitch/ssh/hosts`).
+
+### Running MCP servers on a remote host
+
+Add **ssh_host** to a server entry (value = host alias from `GLITCH_SSH_HOSTS`). The manager runs the command on that host over SSH and forwards stdio, so the MCP server process runs remotely while the agent connects to it as if it were local. Use this when the server must run in a different environment (e.g. different Node/npx, or access to remote-only resources).
+
+### Alignment with Strands and AgentCore docs
+
+- **Strands**: The agent uses `MCPClient` with a callable that returns an async context manager yielding `(read_stream, write_stream)` (see [Strands MCP tools](https://strandsagents.com/latest/documentation/docs/user-guide/concepts/tools/mcp-tools)). We use `stdio_client(StdioServerParameters(...))` for local servers and `stdio_ssh_client(...)` for remote; both yield the same anyio stream types. We pass `tool_filters` and `prefix` as recommended.
+- **AgentCore**: The [MCP protocol contract](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-mcp-protocol-contract.html) (stateless streamable-http, path `/mcp`) applies to MCP servers **deployed as** AgentCore Runtime containers. Our agent runs in Runtime and acts as an MCP **client** connecting to stdio (or stdio-over-SSH) servers; that pattern is consistent with [Host agent or tools with AgentCore Runtime](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agents-tools-runtime.html) and framework-agnostic MCP support.
 
 ## Environment Variables
 

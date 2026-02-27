@@ -13,6 +13,7 @@ from strands.tools.mcp import MCPClient
 
 from glitch.mcp.types import MCPConfig, MCPServerConfig
 from glitch.mcp.loader import load_mcp_config
+from glitch.mcp.stdio_ssh import stdio_ssh_client
 
 logger = logging.getLogger(__name__)
 
@@ -84,13 +85,6 @@ class MCPServerManager:
             ValueError: If transport type is unsupported
         """
         if config.transport == "stdio":
-            # Create stdio transport parameters
-            server_params = StdioServerParameters(
-                command=config.command,
-                args=config.args,
-                env=config.env if config.env else None,
-            )
-            
             # Build tool filters (convert empty lists to None for MCPClient)
             tool_filters = None
             if config.tool_filters:
@@ -101,22 +95,40 @@ class MCPServerManager:
                     filters["rejected"] = config.tool_filters["rejected"]
                 if filters:
                     tool_filters = filters
-            
-            # Create MCPClient with stdio transport
-            # Note: prefix parameter is passed separately, not to MCPClient constructor
+
+            # Strands MCPClient: callable returning async context manager yielding (read_stream, write_stream).
+            # See Strands docs (MCP tools, prefix, tool_filters) and AgentCore "Deploy MCP servers in Runtime"
+            # for hosted MCP (streamable-http at 0.0.0.0:8000/mcp); our agent is the client connecting to stdio/SSH.
             client_kwargs = {"tool_filters": tool_filters} if tool_filters else {}
-            
-            client = MCPClient(
-                lambda: stdio_client(server_params),
-                **client_kwargs,
-            )
-            
-            # Store prefix for later use if needed
             if config.prefix:
-                # Note: Strands MCPClient may not support runtime prefix modification
-                # This would need to be handled by wrapping tool names in the agent
-                logger.debug(f"Tool prefix '{config.prefix}' configured for {config.name} (may not be applied)")
-            
+                client_kwargs["prefix"] = config.prefix
+
+            if config.ssh_host:
+                # Run MCP server on remote host over SSH (stdio over SSH)
+                client = MCPClient(
+                    lambda: stdio_ssh_client(
+                        ssh_host_alias=config.ssh_host,
+                        command=config.command,
+                        args=config.args,
+                        env=config.env if config.env else None,
+                        encoding="utf-8",
+                        encoding_errors="replace",
+                    ),
+                    **client_kwargs,
+                )
+                logger.info("MCP server '%s' configured for remote host '%s'", config.name, config.ssh_host)
+            else:
+                # Local stdio transport
+                server_params = StdioServerParameters(
+                    command=config.command,
+                    args=config.args,
+                    env=config.env if config.env else None,
+                )
+                client = MCPClient(
+                    lambda: stdio_client(server_params),
+                    **client_kwargs,
+                )
+
             return client
         
         elif config.transport == "sse":

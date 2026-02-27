@@ -151,6 +151,7 @@ const agentCoreStack = new AgentCoreStack(app, 'GlitchAgentCoreStack', {
   vpc: foundationStack.vpc,
   agentCoreSecurityGroup: foundationStack.agentCoreSecurityGroup,
   runtimeRole: foundationStack.runtimeRole,
+  tailscaleInstance: tailscaleStack.instance,
   description: 'AgentCore runtime policies',
 });
 agentCoreStack.addDependency(foundationStack);

@@ -1,0 +1,33 @@
+{
+  "id": "glitch-nginx-tailscale",
+  "version": "1.1.0",
+  "description": "Troubleshoot nginx on the Tailscale EC2 proxy (Glitch UI/gateway), manage SSL certs (obtain/renew via Porkbun DNS-01), and report issues via Telegram.",
+  "triggers": [
+    "nginx",
+    "glitch ui",
+    "connection refused",
+    "tailscale proxy",
+    "glitch.awoo",
+    "ui not loading",
+    "proxy not working",
+    "tailscale ec2",
+    "ensure-glitch-tls",
+    "certificate",
+    "https not working",
+    "ssl cert",
+    "renew cert",
+    "cert expiry",
+    "certbot",
+    "let's encrypt",
+    "letsencrypt",
+    "porkbun",
+    "https",
+    "tls"
+  ],
+  "tags": ["infrastructure", "nginx", "tailscale", "troubleshooting", "telegram", "ssl", "certbot"],
+  "priority": 75,
+  "model_allowlist": null,
+  "model_denylist": null,
+  "required_tools": ["run_tailscale_ssm_command", "run_tailscale_renew_tls", "protect_send_telegram_alert"],
+  "author": "Glitch Team"
+}

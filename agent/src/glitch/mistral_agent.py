@@ -29,17 +29,51 @@ ENV_MISTRAL_TIMEOUT = "GLITCH_MISTRAL_TIMEOUT"  # seconds for request (connect +
 DEFAULT_MISTRAL_TIMEOUT = 180.0
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant. Be concise and accurate."
 
+_SOUL_CACHE: Optional[str] = None
+
 
 def _load_soul_system_prompt() -> str:
-    """Load SOUL.md as the default system prompt for Mistral. Falls back to DEFAULT_SYSTEM_PROMPT."""
+    """Load SOUL.md as the system prompt for Mistral, cached after first load.
+
+    Tries S3 (if GLITCH_SOUL_S3_BUCKET is set), then /app/SOUL.md (container),
+    then the local source-tree SOUL.md. Falls back to DEFAULT_SYSTEM_PROMPT.
+    """
+    global _SOUL_CACHE
+    if _SOUL_CACHE is not None:
+        return _SOUL_CACHE
+
+    # Try the canonical load_soul() helper first (handles S3 + all local paths)
     try:
         from glitch.agent import load_soul
         soul = load_soul()
         if soul and soul.strip():
-            return soul.strip()
+            logger.info("Mistral: loaded SOUL.md via load_soul() (%d chars)", len(soul))
+            _SOUL_CACHE = soul.strip()
+            return _SOUL_CACHE
     except Exception as e:
-        logger.debug("Could not load SOUL.md for Mistral: %s", e)
-    return DEFAULT_SYSTEM_PROMPT
+        logger.warning("Mistral: load_soul() failed (%s: %s), trying direct file paths", type(e).__name__, e)
+
+    # Direct fallback: try known container and source-tree paths
+    from pathlib import Path
+    candidates = [
+        Path("/app/SOUL.md"),
+        Path(__file__).parent.parent.parent / "SOUL.md",
+        Path.home() / "SOUL.md",
+    ]
+    for p in candidates:
+        try:
+            if p.exists():
+                soul = p.read_text(encoding="utf-8").strip()
+                if soul:
+                    logger.info("Mistral: loaded SOUL.md from %s (%d chars)", p, len(soul))
+                    _SOUL_CACHE = soul
+                    return _SOUL_CACHE
+        except Exception as e:
+            logger.warning("Mistral: could not read %s: %s", p, e)
+
+    logger.warning("Mistral: SOUL.md not found on any path, using DEFAULT_SYSTEM_PROMPT")
+    _SOUL_CACHE = DEFAULT_SYSTEM_PROMPT
+    return _SOUL_CACHE
 
 
 class MistralAgent:

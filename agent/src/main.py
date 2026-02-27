@@ -24,6 +24,13 @@ import os
 # Strands SDK: allow non-interactive tool execution (required for AgentCore/serverless).
 # Set before any Strands/glitch.agent imports.
 os.environ.setdefault("BYPASS_TOOL_CONSENT", "true")
+
+# Load SSH config from agent/.env.ssh when present (written by scripts/ssh-setup.sh).
+_env_ssh = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env.ssh")
+if os.path.isfile(_env_ssh):
+    from dotenv import load_dotenv
+    load_dotenv(_env_ssh)
+
 import sys
 import time
 import boto3
