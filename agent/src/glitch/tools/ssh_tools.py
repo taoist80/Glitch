@@ -89,11 +89,23 @@ def _get_ssh_hosts() -> List[Dict[str, Any]]:
 
 
 def _resolve_host(host_alias: str) -> Optional[Dict[str, Any]]:
-    """Resolve alias to host config. Returns None if not found."""
+    """Resolve alias or user@host[:port] to host config dict.
+
+    Accepts either a registered alias (e.g. "bastion") or an ad-hoc
+    user@host or user@host:port string. Ad-hoc targets are returned as an
+    unregistered host entry so callers can attempt connection without
+    requiring pre-registration.
+    """
     hosts = _get_ssh_hosts()
     for h in hosts:
         if h["alias"] == host_alias:
             return h
+    # Accept ad-hoc user@host[:port] so the agent can connect to new hosts
+    # without requiring prior registration.
+    parsed = _parse_host_target(host_alias)
+    if parsed:
+        user, host, port = parsed
+        return {"alias": host_alias, "host": host, "user": user, "port": port}
     return None
 
 
@@ -253,31 +265,99 @@ async def _run_on_host(
     *args,
     **kwargs,
 ) -> Tuple[bool, str]:
-    """Run an async callback with an open SSH connection. Returns (success, message)."""
+    """Run an async callback with an open SSH connection. Returns (success, message).
+
+    Accepts either a registered alias or an ad-hoc user@host[:port] string.
+    Tries key-based auth first. If auth fails and a password is supplied via
+    the 'password' kwarg, falls back to password auth and installs the public
+    key so future connections are key-only.
+    """
     resolved = _resolve_host(host_alias)
     if not resolved:
-        return False, f"Unknown host alias: {host_alias}. Use ssh_list_hosts to see configured hosts."
+        return False, (
+            f"Cannot resolve host '{host_alias}'. "
+            "Pass user@hostname or user@hostname:port directly, or check ssh_list_hosts."
+        )
 
     key = _get_ssh_private_key()
-    if not key:
-        return False, "SSH key not configured. Set GLITCH_SSH_KEY_PATH or add glitch/ssh-key to Secrets Manager."
+    password = kwargs.pop("password", None)
 
     import asyncssh
 
-    try:
-        conn = await asyncssh.connect(
-            resolved["host"],
-            port=resolved["port"],
-            username=resolved["user"],
-            client_keys=[key],
-            known_hosts=None,
+    conn = None
+
+    # Try key auth first (works for registered hosts and new hosts where key was already installed).
+    if key:
+        try:
+            conn = await asyncssh.connect(
+                resolved["host"],
+                port=resolved["port"],
+                username=resolved["user"],
+                client_keys=[key],
+                known_hosts=None,
+            )
+        except asyncssh.PermissionDenied:
+            logger.info("Key auth denied for %s, will try password if provided", resolved["host"])
+            conn = None
+        except asyncssh.Error as e:
+            logger.warning("SSH connect to %s (%s): %s", host_alias, resolved["host"], e)
+            return False, f"SSH connection failed to {resolved['user']}@{resolved['host']}:{resolved['port']}: {e}"
+        except Exception as e:
+            logger.exception("SSH connect error to %s", host_alias)
+            return False, f"SSH connection error: {e}"
+
+    # Fall back to password auth if key auth didn't work and a password was supplied.
+    if conn is None and password:
+        try:
+            conn = await asyncssh.connect(
+                resolved["host"],
+                port=resolved["port"],
+                username=resolved["user"],
+                password=password,
+                known_hosts=None,
+            )
+            # Auto-install the public key so future connections don't need a password.
+            pub = _get_ssh_public_key_content()
+            if pub:
+                try:
+                    await conn.run("mkdir -p -m 700 ~/.ssh")
+                    home_res = await conn.run("echo $HOME")
+                    home = (home_res.stdout or "").strip() or "~"
+                    auth_keys = home.rstrip("/") + "/.ssh/authorized_keys"
+                    sftp = await conn.start_sftp_client()
+                    try:
+                        try:
+                            f = await sftp.open(auth_keys, "r")
+                            existing = await f.read()
+                            await f.close()
+                        except Exception:
+                            existing = ""
+                        if pub not in existing:
+                            new_content = (existing.rstrip() + "\n" + pub + "\n").lstrip()
+                            f = await sftp.open(auth_keys, "w")
+                            try:
+                                await f.write(new_content)
+                            finally:
+                                await f.close()
+                            logger.info("Auto-installed public key on %s", resolved["host"])
+                    finally:
+                        sftp.exit()
+                except Exception as e:
+                    logger.warning("Auto key install on %s failed: %s", resolved["host"], e)
+        except asyncssh.Error as e:
+            return False, (
+                f"SSH auth failed for {resolved['user']}@{resolved['host']}:{resolved['port']}: {e}. "
+                "Provide the correct password so the agent can install its public key."
+            )
+        except Exception as e:
+            return False, f"SSH connection error: {e}"
+
+    if conn is None:
+        return False, (
+            f"Cannot authenticate to {resolved['user']}@{resolved['host']}:{resolved['port']}. "
+            "Key auth failed and no password was provided. "
+            "Call ssh_run_command with password='<password>' to install the key automatically."
         )
-    except asyncssh.Error as e:
-        logger.warning("SSH connect to %s (%s): %s", host_alias, resolved["host"], e)
-        return False, f"SSH connection failed to {host_alias} ({resolved['host']}): {e}"
-    except Exception as e:
-        logger.exception("SSH connect error to %s", host_alias)
-        return False, f"SSH connection error: {e}"
 
     try:
         result = await fn(conn, *args, **kwargs)
@@ -296,13 +376,16 @@ async def ssh_list_hosts() -> str:
     """List the SSH hosts the agent is configured to connect to.
 
     Returns a list of host aliases and connection details (user@host:port).
-    Use these aliases with ssh_run_command, ssh_read_file, ssh_write_file, and ssh_mkdir.
+    These aliases (or user@host strings directly) can be used with ssh_run_command,
+    ssh_read_file, ssh_write_file, and ssh_mkdir.
     """
     hosts = _get_ssh_hosts()
     if not hosts:
         return (
-            "No SSH hosts configured. Set GLITCH_SSH_HOSTS (JSON array of "
-            "{alias, host, user, port}) or SSM parameter /glitch/ssh/hosts."
+            "No pre-registered SSH hosts. You can still connect to any host by passing "
+            "user@hostname or user@hostname:port directly to ssh_run_command. "
+            "The agent will try key auth first; if that fails, pass password='<password>' "
+            "to install the key automatically."
         )
     lines = [
         f"- {h['alias']}: {h['user']}@{h['host']}:{h['port']}"
@@ -312,12 +395,19 @@ async def ssh_list_hosts() -> str:
 
 
 @tool
-async def ssh_run_command(host: str, command: str) -> str:
+async def ssh_run_command(host: str, command: str, password: Optional[str] = None) -> str:
     """Run a shell command on a remote host over SSH.
 
+    Accepts a registered host alias (from ssh_list_hosts) OR an ad-hoc user@host or
+    user@host:port string. No pre-registration required — the agent tries key-based
+    auth first. If key auth fails and a password is provided, the key is installed
+    automatically so future connections are passwordless.
+
     Args:
-        host: Host alias from ssh_list_hosts (e.g. bastion, devbox).
-        command: Shell command to run (e.g. "ls -la /tmp", "cat /etc/hostname").
+        host: Host alias (e.g. "bastion") or user@hostname[:port] (e.g. "ec2-user@10.0.0.5").
+        command: Shell command to run (e.g. "ls -la /tmp", "systemctl status nginx").
+        password: Optional password for first-time key installation. Only needed if key
+                  auth fails (i.e. the public key hasn't been installed on this host yet).
 
     Returns:
         Combined stdout and stderr, or an error message if connection or command failed.
@@ -330,17 +420,18 @@ async def ssh_run_command(host: str, command: str) -> str:
             return f"exit_code={result.exit_status}\nstdout:\n{out}\nstderr:\n{err}"
         return out or "(no output)"
 
-    ok, msg = await _run_on_host(host, _run)
+    ok, msg = await _run_on_host(host, _run, password=password)
     return msg
 
 
 @tool
-async def ssh_read_file(host: str, remote_path: str) -> str:
+async def ssh_read_file(host: str, remote_path: str, password: Optional[str] = None) -> str:
     """Read the contents of a file on a remote host.
 
     Args:
-        host: Host alias from ssh_list_hosts.
+        host: Host alias or user@hostname[:port].
         remote_path: Absolute or relative path on the remote host (e.g. /etc/hostname, ~/config.yaml).
+        password: Optional password for first-time key installation.
 
     Returns:
         File contents as text, or an error message.
@@ -351,18 +442,19 @@ async def ssh_read_file(host: str, remote_path: str) -> str:
             return f"exit_code={result.exit_status}\nstderr: {result.stderr or 'unknown'}"
         return (result.stdout or "")
 
-    ok, msg = await _run_on_host(host, _read)
+    ok, msg = await _run_on_host(host, _read, password=password)
     return msg
 
 
 @tool
-async def ssh_write_file(host: str, remote_path: str, content: str) -> str:
+async def ssh_write_file(host: str, remote_path: str, content: str, password: Optional[str] = None) -> str:
     """Write content to a file on a remote host. Creates parent directories if needed.
 
     Args:
-        host: Host alias from ssh_list_hosts.
+        host: Host alias or user@hostname[:port].
         remote_path: Path on the remote host (e.g. /tmp/out.txt, ~/mcp_servers.yaml).
         content: Full file content to write (text).
+        password: Optional password for first-time key installation.
 
     Returns:
         Success message or error.
@@ -383,17 +475,18 @@ async def ssh_write_file(host: str, remote_path: str, content: str) -> str:
         finally:
             sftp.exit()
 
-    ok, msg = await _run_on_host(host, _write)
+    ok, msg = await _run_on_host(host, _write, password=password)
     return msg if ok else f"Error: {msg}"
 
 
 @tool
-async def ssh_mkdir(host: str, remote_path: str) -> str:
+async def ssh_mkdir(host: str, remote_path: str, password: Optional[str] = None) -> str:
     """Create a directory on a remote host (like mkdir -p).
 
     Args:
-        host: Host alias from ssh_list_hosts.
+        host: Host alias or user@hostname[:port].
         remote_path: Directory path on the remote host (e.g. /tmp/glitch, ~/config/mcp).
+        password: Optional password for first-time key installation.
 
     Returns:
         Success message or error.
@@ -402,17 +495,18 @@ async def ssh_mkdir(host: str, remote_path: str) -> str:
         await conn.run(f"mkdir -p -- {remote_path!r}")
         return f"Created directory {remote_path}"
 
-    ok, msg = await _run_on_host(host, _mkdir)
+    ok, msg = await _run_on_host(host, _mkdir, password=password)
     return msg if ok else f"Error: {msg}"
 
 
 @tool
-async def ssh_file_exists(host: str, remote_path: str) -> str:
+async def ssh_file_exists(host: str, remote_path: str, password: Optional[str] = None) -> str:
     """Check whether a path on a remote host exists (file or directory).
 
     Args:
-        host: Host alias from ssh_list_hosts.
+        host: Host alias or user@hostname[:port].
         remote_path: Path on the remote host.
+        password: Optional password for first-time key installation.
 
     Returns:
         'yes' or 'no', or an error message if the host is unknown or connection failed.
@@ -421,19 +515,20 @@ async def ssh_file_exists(host: str, remote_path: str) -> str:
         result = await conn.run(f"test -e {remote_path!r} && echo yes || echo no")
         return (result.stdout or "").strip() or "no"
 
-    ok, msg = await _run_on_host(host, _exists)
+    ok, msg = await _run_on_host(host, _exists, password=password)
     if not ok:
         return f"Error: {msg}"
     return msg
 
 
 @tool
-async def ssh_list_dir(host: str, remote_path: str) -> str:
+async def ssh_list_dir(host: str, remote_path: str, password: Optional[str] = None) -> str:
     """List entries in a directory on a remote host (names only, one per line).
 
     Args:
-        host: Host alias from ssh_list_hosts.
+        host: Host alias or user@hostname[:port].
         remote_path: Directory path on the remote host (e.g. /tmp, ~/.cursor).
+        password: Optional password for first-time key installation.
 
     Returns:
         Newline-separated list of entry names, or an error message.
@@ -446,5 +541,5 @@ async def ssh_list_dir(host: str, remote_path: str) -> str:
         finally:
             sftp.exit()
 
-    ok, msg = await _run_on_host(host, _listdir)
+    ok, msg = await _run_on_host(host, _listdir, password=password)
     return msg if ok else f"Error: {msg}"
