@@ -11,16 +11,16 @@ The Tailscale EC2 has AWS SSM Agent installed. All remote access is via SSM — 
 
 - **Target**: Tailscale EC2. The instance ID is stored in SSM at `/glitch/tailscale/instance-id` — the tailscale tools read it automatically.
 - **Tools** (use these, not SSH):
-  - `run_tailscale_ssm_command(commands)` — run shell commands on the instance via AWS SSM Run Command. No SSH needed.
+  - `run_tailscale_ssm_command(commands)` — run shell commands on the instance via AWS SSM Run Command. Commands are automatically prefixed with `sudo` (SSM runs as `ssm-user`, not root). No SSH needed.
   - `run_tailscale_ensure_tls` — obtain a new cert (first-time or after instance replace) and switch nginx to HTTPS.
   - `run_tailscale_renew_tls` — renew an existing cert (uses dnspython patch to bypass Tailscale DNS interception).
   - `protect_send_telegram_alert` — send a report to the owner via Telegram.
 
-- **Interactive terminal** (for the user to run manually if needed):
+- **Interactive terminal** — share this with the user when they need a shell on the instance:
   ```bash
   aws ssm start-session --target $(aws cloudformation describe-stacks --stack-name GlitchTailscaleStack --query 'Stacks[0].Outputs[?OutputKey==`InstanceId`].OutputValue' --output text)
   ```
-  Share this command with the user when they need an interactive shell on the instance.
+  Once connected, use `sudo` for most commands (e.g. `sudo systemctl status nginx`, `sudo nginx -t`, `sudo cat /var/log/nginx/error.log`).
 
 ## Workflow 1: Nginx health check
 

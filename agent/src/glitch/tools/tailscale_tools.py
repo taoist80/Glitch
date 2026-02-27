@@ -81,7 +81,11 @@ def _run_ensure_tls_sync() -> str:
 
 
 def _run_ssm_commands_sync(commands: List[str]) -> str:
-    """Run shell commands on the Tailscale EC2 via SSM and return combined output."""
+    """Run shell commands on the Tailscale EC2 via SSM and return combined output.
+
+    Commands are prefixed with 'sudo' automatically so they run with root privileges
+    (AWS-RunShellScript runs as ssm-user on Amazon Linux 2023, not root).
+    """
     instance_id = _get_instance_id()
     if not instance_id:
         return (
@@ -90,12 +94,22 @@ def _run_ssm_commands_sync(commands: List[str]) -> str:
         )
     if not commands:
         return "No commands provided."
+
+    # Prefix each command with sudo so they run with root privileges.
+    # ssm-user on Amazon Linux 2023 is not root; most nginx/certbot/systemctl
+    # commands require elevated privileges.
+    sudoed = [
+        cmd if cmd.startswith("sudo ") or cmd.startswith("#") or not cmd.strip()
+        else f"sudo {cmd}"
+        for cmd in commands
+    ]
+
     ssm = boto3.client("ssm", region_name=REGION)
     try:
         cmd = ssm.send_command(
             InstanceIds=[instance_id],
             DocumentName="AWS-RunShellScript",
-            Parameters={"commands": commands},
+            Parameters={"commands": sudoed},
             TimeoutSeconds=60,
         )
         command_id = cmd["Command"]["CommandId"]
@@ -123,11 +137,12 @@ async def run_tailscale_ssm_command(commands: List[str]) -> str:
     """Run one or more shell commands on the Tailscale EC2 instance via SSM Run Command.
 
     Use for troubleshooting (e.g. nginx status, listeners, config test, logs). Instance ID
-    is read from SSM parameter /glitch/tailscale/instance-id. Commands run with root
-    (AWS-RunShellScript runs as root). Avoid interactive or long-running commands.
+    is read from SSM parameter /glitch/tailscale/instance-id. Commands are automatically
+    prefixed with sudo — do NOT add sudo yourself. Avoid interactive or long-running commands.
 
     Args:
         commands: List of shell command strings to run in order on the instance.
+                  Do not prefix with sudo; it is added automatically.
 
     Returns:
         Combined status, stdout, and stderr from the SSM command invocation.
