@@ -131,7 +131,7 @@ const tailscaleStack = new TailscaleStack(app, 'GlitchTailscaleStack', {
   tailscaleAuthKeySecret: secretsStack.tailscaleAuthKeySecret,
   agentCoreSecurityGroup: foundationStack.agentCoreSecurityGroup,
   agentCoreRuntimeArn,
-  instanceBootstrapVersion: '11',
+  instanceBootstrapVersion: '12',
   gatewayFunctionUrl: gatewayStack.functionUrl,
   gatewayHostname: gatewayUrlHostname,
   uiBucketName: uiHostingStack.uiBucket.bucketName,

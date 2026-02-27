@@ -1755,6 +1755,45 @@ export class TailscaleStack extends cdk.Stack {
       // script or timer; we write TLS or HTTP config once below based on cert existence.
       if (enableTls && porkbunApiSecret) {
         const email = certbotEmail || 'admin@' + customDomain;
+
+        // Store renew script in SSM to keep UserData under the 25600-byte EC2 limit.
+        const renewScriptContent = [
+          '#!/bin/bash',
+          '# Renew Let\'s Encrypt cert via Porkbun DNS-01, bypassing Tailscale DNS interception.',
+          'set -e',
+          'python3 - << \'PYEOF\'',
+          'import dns.resolver',
+          '_orig = dns.resolver.Resolver.__init__',
+          'def _p(self, filename=None, configure=True):',
+          '    _orig(self, filename=filename, configure=configure)',
+          '    self.nameservers = ["8.8.8.8", "8.8.4.4"]',
+          '    self.timeout = 10',
+          '    self.lifetime = 30',
+          'dns.resolver.Resolver.__init__ = _p',
+          'dns.resolver.default_resolver = dns.resolver.Resolver(configure=False)',
+          'dns.resolver.default_resolver.nameservers = ["8.8.8.8", "8.8.4.4"]',
+          'dns.resolver.default_resolver.timeout = 10',
+          'dns.resolver.default_resolver.lifetime = 30',
+          'import certbot.main, sys',
+          'sys.argv = ["certbot", "renew", "--quiet",',
+          '    "--authenticator", "dns-porkbun",',
+          '    "--dns-porkbun-credentials", "/etc/letsencrypt/porkbun.ini",',
+          '    "--dns-porkbun-propagation-seconds", "600",',
+          '    "--post-hook", "systemctl reload nginx"]',
+          'certbot.main.main()',
+          'PYEOF',
+        ].join('\n');
+
+        new ssm.StringParameter(this, 'RenewTlsScript', {
+          parameterName: '/glitch/scripts/renew-glitch-tls',
+          stringValue: renewScriptContent,
+          description: 'renew-glitch-tls.sh: certbot renewal with dnspython patch for Tailscale',
+        });
+        role.addToPolicy(new iam.PolicyStatement({
+          actions: ['ssm:GetParameter'],
+          resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/scripts/renew-glitch-tls`],
+        }));
+
         userDataCommands.push(
           'echo "Setting up Let\'s Encrypt with Porkbun DNS..."',
           'yum install -y python3 python3-pip augeas-libs',
@@ -1785,33 +1824,7 @@ export class TailscaleStack extends cdk.Stack {
           '  sleep 90',
           'done',
           '',
-          // Install renew script that patches dnspython to bypass Tailscale DNS interception
-          'cat > /usr/local/bin/renew-glitch-tls.sh << \'RENEWEOF\'',
-          '#!/bin/bash',
-          '# Renew Let\'s Encrypt cert via Porkbun DNS-01, bypassing Tailscale DNS interception.',
-          'set -e',
-          'python3 - << \'PYEOF\'',
-          'import dns.resolver',
-          '_orig = dns.resolver.Resolver.__init__',
-          'def _p(self, filename=None, configure=True):',
-          '    _orig(self, filename=filename, configure=configure)',
-          '    self.nameservers = ["8.8.8.8", "8.8.4.4"]',
-          '    self.timeout = 10',
-          '    self.lifetime = 30',
-          'dns.resolver.Resolver.__init__ = _p',
-          'dns.resolver.default_resolver = dns.resolver.Resolver(configure=False)',
-          'dns.resolver.default_resolver.nameservers = ["8.8.8.8", "8.8.4.4"]',
-          'dns.resolver.default_resolver.timeout = 10',
-          'dns.resolver.default_resolver.lifetime = 30',
-          'import certbot.main, sys',
-          'sys.argv = ["certbot", "renew", "--quiet",',
-          '    "--authenticator", "dns-porkbun",',
-          '    "--dns-porkbun-credentials", "/etc/letsencrypt/porkbun.ini",',
-          '    "--dns-porkbun-propagation-seconds", "600",',
-          '    "--post-hook", "systemctl reload nginx"]',
-          'certbot.main.main()',
-          'PYEOF',
-          'RENEWEOF',
+          `aws ssm get-parameter --name /glitch/scripts/renew-glitch-tls --query Parameter.Value --output text --region ${this.region} > /usr/local/bin/renew-glitch-tls.sh`,
           'chmod +x /usr/local/bin/renew-glitch-tls.sh',
           '',
           'echo "0 3 * * * root /usr/local/bin/renew-glitch-tls.sh >> /var/log/glitch-tls-renew.log 2>&1" > /etc/cron.d/certbot-renew',
@@ -1950,8 +1963,8 @@ export class TailscaleStack extends cdk.Stack {
       }
 
       // Install a helper script that reads config from SSM and writes glitch-proxy.conf.
-      // This can be re-run any time to restore the config without a full redeploy.
-      const writeProxyScriptLines = [
+      // Stored in SSM to keep UserData under the 25600-byte EC2 limit.
+      const writeProxyScriptContent = [
         '#!/bin/bash',
         'set -e',
         `REGION="${this.region}"`,
@@ -1967,14 +1980,14 @@ export class TailscaleStack extends cdk.Stack {
         'fi',
         'GATEWAY_HOST=$(echo "$GATEWAY_URL" | sed "s|https\\?://||")',
         'SERVER_NAMES="${CUSTOM_DOMAIN:+$CUSTOM_DOMAIN }_"',
-        `CERT_DIR="/etc/letsencrypt/live/${customDomain ?? '\\$CUSTOM_DOMAIN'}"`,
+        `CERT_DIR="/etc/letsencrypt/live/${customDomain ?? '$CUSTOM_DOMAIN'}"`,
         'if [ -n "$CUSTOM_DOMAIN" ] && [ -f "$CERT_DIR/fullchain.pem" ]; then',
         '  echo "write-glitch-proxy-conf: writing TLS config..."',
         `  cat > /etc/nginx/conf.d/glitch-proxy.conf << NGINXEOF`,
         'server {',
         '    listen 80 default_server;',
         '    server_name $SERVER_NAMES;',
-        '    return 301 https://$CUSTOM_DOMAIN\\$request_uri;',
+        '    return 301 https://$CUSTOM_DOMAIN$request_uri;',
         '}',
         'server {',
         '    listen 443 ssl;',
@@ -1988,15 +2001,15 @@ export class TailscaleStack extends cdk.Stack {
         '    location / {',
         '        proxy_pass http://$UI_BUCKET.s3-website-$REGION.amazonaws.com;',
         '        proxy_set_header Host $UI_BUCKET.s3-website-$REGION.amazonaws.com;',
-        '        proxy_set_header X-Real-IP \\$remote_addr;',
-        '        proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;',
-        '        proxy_set_header X-Forwarded-Proto \\$scheme;',
+        '        proxy_set_header X-Real-IP $remote_addr;',
+        '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+        '        proxy_set_header X-Forwarded-Proto $scheme;',
         '    }',
         '    location /api/ {',
         '        proxy_pass $GATEWAY_URL/api/;',
         '        proxy_set_header Host $GATEWAY_HOST;',
-        '        proxy_set_header X-Real-IP \\$remote_addr;',
-        '        proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;',
+        '        proxy_set_header X-Real-IP $remote_addr;',
+        '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
         '        proxy_set_header X-Forwarded-Proto https;',
         '        proxy_ssl_server_name on;',
         '        proxy_read_timeout 300s;',
@@ -2006,8 +2019,8 @@ export class TailscaleStack extends cdk.Stack {
         '    location /invocations {',
         '        proxy_pass $GATEWAY_URL/invocations;',
         '        proxy_set_header Host $GATEWAY_HOST;',
-        '        proxy_set_header X-Real-IP \\$remote_addr;',
-        '        proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;',
+        '        proxy_set_header X-Real-IP $remote_addr;',
+        '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
         '        proxy_set_header X-Forwarded-Proto https;',
         '        proxy_ssl_server_name on;',
         '        proxy_read_timeout 300s;',
@@ -2017,8 +2030,8 @@ export class TailscaleStack extends cdk.Stack {
         '    location /health {',
         '        proxy_pass $GATEWAY_URL/health;',
         '        proxy_set_header Host $GATEWAY_HOST;',
-        '        proxy_set_header X-Real-IP \\$remote_addr;',
-        '        proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;',
+        '        proxy_set_header X-Real-IP $remote_addr;',
+        '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
         '        proxy_set_header X-Forwarded-Proto https;',
         '        proxy_ssl_server_name on;',
         '    }',
@@ -2033,15 +2046,15 @@ export class TailscaleStack extends cdk.Stack {
         '    location / {',
         '        proxy_pass http://$UI_BUCKET.s3-website-$REGION.amazonaws.com;',
         '        proxy_set_header Host $UI_BUCKET.s3-website-$REGION.amazonaws.com;',
-        '        proxy_set_header X-Real-IP \\$remote_addr;',
-        '        proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;',
-        '        proxy_set_header X-Forwarded-Proto \\$scheme;',
+        '        proxy_set_header X-Real-IP $remote_addr;',
+        '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+        '        proxy_set_header X-Forwarded-Proto $scheme;',
         '    }',
         '    location /api/ {',
         '        proxy_pass $GATEWAY_URL/api/;',
         '        proxy_set_header Host $GATEWAY_HOST;',
-        '        proxy_set_header X-Real-IP \\$remote_addr;',
-        '        proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;',
+        '        proxy_set_header X-Real-IP $remote_addr;',
+        '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
         '        proxy_set_header X-Forwarded-Proto https;',
         '        proxy_ssl_server_name on;',
         '        proxy_read_timeout 300s;',
@@ -2051,8 +2064,8 @@ export class TailscaleStack extends cdk.Stack {
         '    location /invocations {',
         '        proxy_pass $GATEWAY_URL/invocations;',
         '        proxy_set_header Host $GATEWAY_HOST;',
-        '        proxy_set_header X-Real-IP \\$remote_addr;',
-        '        proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;',
+        '        proxy_set_header X-Real-IP $remote_addr;',
+        '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
         '        proxy_set_header X-Forwarded-Proto https;',
         '        proxy_ssl_server_name on;',
         '        proxy_read_timeout 300s;',
@@ -2062,8 +2075,8 @@ export class TailscaleStack extends cdk.Stack {
         '    location /health {',
         '        proxy_pass $GATEWAY_URL/health;',
         '        proxy_set_header Host $GATEWAY_HOST;',
-        '        proxy_set_header X-Real-IP \\$remote_addr;',
-        '        proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;',
+        '        proxy_set_header X-Real-IP $remote_addr;',
+        '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
         '        proxy_set_header X-Forwarded-Proto https;',
         '        proxy_ssl_server_name on;',
         '    }',
@@ -2072,13 +2085,23 @@ export class TailscaleStack extends cdk.Stack {
         'fi',
         'nginx -t && systemctl reload nginx 2>/dev/null || systemctl start nginx',
         'echo "write-glitch-proxy-conf: done."',
-      ];
+      ].join('\n');
+
+      new ssm.StringParameter(this, 'WriteProxyConfScript', {
+        parameterName: '/glitch/scripts/write-glitch-proxy-conf',
+        stringValue: writeProxyScriptContent,
+        description: 'write-glitch-proxy-conf.sh: writes nginx glitch-proxy.conf from SSM params',
+        tier: ssm.ParameterTier.ADVANCED,
+      });
+      role.addToPolicy(new iam.PolicyStatement({
+        actions: ['ssm:GetParameter'],
+        resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/scripts/write-glitch-proxy-conf`],
+      }));
+
       userDataCommands.push(
         '',
         'echo "Installing write-glitch-proxy-conf.sh helper..."',
-        `cat > /usr/local/bin/write-glitch-proxy-conf.sh << 'WPCEOF'`,
-        ...writeProxyScriptLines,
-        'WPCEOF',
+        `aws ssm get-parameter --name /glitch/scripts/write-glitch-proxy-conf --query Parameter.Value --output text --region ${this.region} > /usr/local/bin/write-glitch-proxy-conf.sh`,
         'chmod +x /usr/local/bin/write-glitch-proxy-conf.sh',
         ''
       );
@@ -2109,74 +2132,9 @@ export class TailscaleStack extends cdk.Stack {
           `echo "TLS enabled with Let's Encrypt. UI available at https://${customDomain}"`
         );
         // Delayed ensure-TLS: run 5 min after boot to retry certbot (DNS propagation) and switch nginx to 443 if certs exist.
-        // This avoids manual intervention when bootstrap certbot fails; EC2 IP is irrelevant for DNS-01 validation.
+        // Stored in SSM to keep UserData under the 25600-byte EC2 limit.
         const ensureTlsEmail = certbotEmail || 'admin@' + customDomain;
-        // Nginx vars ($remote_addr etc.) must be literal in the script; use \$ so JS template doesn't expand them.
-        const tlsConfigLines = [
-          '# Redirect HTTP to HTTPS',
-          'server {',
-          '    listen 80 default_server;',
-          `    server_name ${serverNames};`,
-          `    return 301 https://${customDomain}\$request_uri;`,
-          '}',
-          '',
-          'server {',
-          '    listen 443 ssl;',
-          '    http2 on;',
-          `    server_name ${serverNames};`,
-          '',
-          `    ssl_certificate /etc/letsencrypt/live/${customDomain}/fullchain.pem;`,
-          `    ssl_certificate_key /etc/letsencrypt/live/${customDomain}/privkey.pem;`,
-          '    ssl_protocols TLSv1.2 TLSv1.3;',
-          '    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;',
-          '    ssl_prefer_server_ciphers off;',
-          '',
-          '    location / {',
-          `        proxy_pass http://${uiBucketName}.s3-website-${this.region}.amazonaws.com;`,
-          `        proxy_set_header Host ${uiBucketName}.s3-website-${this.region}.amazonaws.com;`,
-          '        proxy_set_header X-Real-IP $remote_addr;',
-          '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
-          '        proxy_set_header X-Forwarded-Proto $scheme;',
-          '    }',
-          '',
-          '    location /api/ {',
-          `        proxy_pass ${gatewayUrl}/api/;`,
-          `        proxy_set_header Host ${lambdaHost};`,
-          '        proxy_set_header X-Real-IP $remote_addr;',
-          '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
-          '        proxy_set_header X-Forwarded-Proto https;',
-          '        proxy_ssl_server_name on;',
-          '        proxy_read_timeout 300s;',
-          '        proxy_connect_timeout 60s;',
-          '        proxy_send_timeout 60s;',
-          '    }',
-          '',
-          '    location /invocations {',
-          `        proxy_pass ${gatewayUrl}/invocations;`,
-          `        proxy_set_header Host ${lambdaHost};`,
-          '        proxy_set_header X-Real-IP $remote_addr;',
-          '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
-          '        proxy_set_header X-Forwarded-Proto https;',
-          '        proxy_ssl_server_name on;',
-          '        proxy_read_timeout 300s;',
-          '        proxy_connect_timeout 60s;',
-          '        proxy_send_timeout 60s;',
-          '    }',
-          '',
-          '    location /health {',
-          `        proxy_pass ${gatewayUrl}/health;`,
-          `        proxy_set_header Host ${lambdaHost};`,
-          '        proxy_set_header X-Real-IP $remote_addr;',
-          '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
-          '        proxy_set_header X-Forwarded-Proto https;',
-          '        proxy_ssl_server_name on;',
-          '    }',
-          '  }',
-        ];
-        userDataCommands.push(
-          '',
-          'echo "Scheduling delayed ensure-TLS (certbot retry + nginx 443) in 5 min..."',
-          'cat > /usr/local/bin/ensure-glitch-tls.sh << \'ENSUREEOF\'',
+        const ensureTlsScriptContent = [
           '#!/bin/bash',
           'set -e',
           `CERT_DIR="/etc/letsencrypt/live/${customDomain}"`,
@@ -2185,26 +2143,26 @@ export class TailscaleStack extends cdk.Stack {
           '    --authenticator dns-porkbun \\',
           '    --dns-porkbun-credentials /etc/letsencrypt/porkbun.ini \\',
           '    --dns-porkbun-propagation-seconds 90 \\',
-          `  -d ${customDomain} || true`,
+          `    -d ${customDomain} || true`,
           'fi',
-          'if [ -f "$CERT_DIR/fullchain.pem" ]; then',
-          "  cat > /etc/nginx/conf.d/glitch-proxy.conf << 'NGINXEOF'"
-        );
-        tlsConfigLines.forEach((line) => userDataCommands.push(line));
+          '/usr/local/bin/write-glitch-proxy-conf.sh',
+          'echo "ensure-glitch-tls: done."',
+        ].join('\n');
+
+        new ssm.StringParameter(this, 'EnsureTlsScript', {
+          parameterName: '/glitch/scripts/ensure-glitch-tls',
+          stringValue: ensureTlsScriptContent,
+          description: 'ensure-glitch-tls.sh: certbot first-run + nginx TLS switch',
+        });
+        role.addToPolicy(new iam.PolicyStatement({
+          actions: ['ssm:GetParameter'],
+          resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/scripts/ensure-glitch-tls`],
+        }));
+
         userDataCommands.push(
-          'NGINXEOF',
-          '  nginx -t && systemctl reload nginx',
-          '  echo "ensure-glitch-tls: TLS enabled; nginx reloaded (port 443)."',
-          'else',
-          '  echo "ensure-glitch-tls: Certs still missing; writing HTTP-only glitch-proxy.conf..."',
-          '  ' + httpOnlyBlock[0]
-        );
-        httpOnlyBlock.slice(1).forEach((line) => userDataCommands.push(line));
-        userDataCommands.push(
-          '  nginx -t && systemctl reload nginx',
-          '  echo "ensure-glitch-tls: HTTP-only config written; nginx reloaded."',
-          'fi',
-          'ENSUREEOF',
+          '',
+          'echo "Installing ensure-glitch-tls.sh (delayed TLS setup)..."',
+          `aws ssm get-parameter --name /glitch/scripts/ensure-glitch-tls --query Parameter.Value --output text --region ${this.region} > /usr/local/bin/ensure-glitch-tls.sh`,
           'chmod +x /usr/local/bin/ensure-glitch-tls.sh',
           '(sleep 300; /usr/local/bin/ensure-glitch-tls.sh) &'
         );
@@ -2249,70 +2207,33 @@ export class TailscaleStack extends cdk.Stack {
     });
     eniLookup.node.addDependency(this.instance);
 
-    // Write nginx config values to SSM so the instance (and operator) can always reconstruct glitch-proxy.conf
+    // Write nginx config values to SSM so the instance (and operator) can always reconstruct glitch-proxy.conf.
+    // Using ssm.StringParameter directly — avoids AwsCustomResource IAM ordering issues.
     if (enableUiProxy && gatewayFunctionUrl) {
-      const nginxGatewayUrl = gatewayFunctionUrl.replace(/\/$/, '');
-      const nginxBucket = uiBucketName!;
-      const nginxDomain = customDomain ?? '';
-      const nginxSsmPolicy = cr.AwsCustomResourcePolicy.fromStatements([
-        new iam.PolicyStatement({
-          actions: ['ssm:PutParameter', 'ssm:DeleteParameter'],
-          resources: [
-            `arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/nginx/gateway-url`,
-            `arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/nginx/ui-bucket`,
-            `arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/nginx/custom-domain`,
-          ],
-        }),
-      ]);
-      const makeNginxParam = (id: string, name: string, value: string) =>
-        new cr.AwsCustomResource(this, id, {
-          onCreate: { service: 'SSM', action: 'putParameter', parameters: { Name: name, Value: value, Type: 'String', Overwrite: true }, physicalResourceId: cr.PhysicalResourceId.of(id) },
-          onUpdate: { service: 'SSM', action: 'putParameter', parameters: { Name: name, Value: value, Type: 'String', Overwrite: true }, physicalResourceId: cr.PhysicalResourceId.of(id) },
-          onDelete: { service: 'SSM', action: 'deleteParameter', parameters: { Name: name } },
-          policy: nginxSsmPolicy,
-        });
-      makeNginxParam('NginxGatewayUrlParam', '/glitch/nginx/gateway-url', nginxGatewayUrl);
-      makeNginxParam('NginxUiBucketParam', '/glitch/nginx/ui-bucket', nginxBucket);
-      makeNginxParam('NginxCustomDomainParam', '/glitch/nginx/custom-domain', nginxDomain);
+      new ssm.StringParameter(this, 'NginxGatewayUrlParam', {
+        parameterName: '/glitch/nginx/gateway-url',
+        stringValue: gatewayFunctionUrl.replace(/\/$/, ''),
+        description: 'Glitch gateway Lambda Function URL (for nginx proxy)',
+      });
+      new ssm.StringParameter(this, 'NginxUiBucketParam', {
+        parameterName: '/glitch/nginx/ui-bucket',
+        stringValue: uiBucketName!,
+        description: 'Glitch UI S3 bucket name (for nginx proxy)',
+      });
+      new ssm.StringParameter(this, 'NginxCustomDomainParam', {
+        parameterName: '/glitch/nginx/custom-domain',
+        stringValue: customDomain ?? '',
+        description: 'Glitch custom domain (for nginx TLS config)',
+      });
     }
 
-    // Write instance ID to SSM so the orchestration agent can run ensure-glitch-tls via SSM SendCommand
-    const instanceIdParam = new cr.AwsCustomResource(this, 'TailscaleInstanceIdToSsm', {
-      onCreate: {
-        service: 'SSM',
-        action: 'putParameter',
-        parameters: {
-          Name: '/glitch/tailscale/instance-id',
-          Value: this.instance.instanceId,
-          Type: 'String',
-          Overwrite: true,
-        },
-        physicalResourceId: cr.PhysicalResourceId.of('GlitchTailscaleInstanceIdParam'),
-      },
-      onUpdate: {
-        service: 'SSM',
-        action: 'putParameter',
-        parameters: {
-          Name: '/glitch/tailscale/instance-id',
-          Value: this.instance.instanceId,
-          Type: 'String',
-          Overwrite: true,
-        },
-        physicalResourceId: cr.PhysicalResourceId.of('GlitchTailscaleInstanceIdParam'),
-      },
-      onDelete: {
-        service: 'SSM',
-        action: 'deleteParameter',
-        parameters: { Name: '/glitch/tailscale/instance-id' },
-      },
-      policy: cr.AwsCustomResourcePolicy.fromStatements([
-        new iam.PolicyStatement({
-          actions: ['ssm:PutParameter', 'ssm:DeleteParameter'],
-          resources: [
-            `arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/tailscale/instance-id`,
-          ],
-        }),
-      ]),
+    // Write instance ID to SSM so the orchestration agent can run ensure-glitch-tls via SSM SendCommand.
+    // Using ssm.StringParameter directly (CDK token resolves at deploy time) — avoids AwsCustomResource
+    // IAM ordering issues that caused ssm:PutParameter authorization failures.
+    const instanceIdParam = new ssm.StringParameter(this, 'TailscaleInstanceIdParam', {
+      parameterName: '/glitch/tailscale/instance-id',
+      stringValue: this.instance.instanceId,
+      description: 'Tailscale EC2 instance ID (for agent SSM SendCommand)',
     });
     instanceIdParam.node.addDependency(this.instance);
 
