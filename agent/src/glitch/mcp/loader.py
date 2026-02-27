@@ -87,8 +87,57 @@ def _expand_env_vars_in_dict(data: Dict[str, Any], strict_env: bool = False) -> 
     return result
 
 
+def _load_remote_mcp_config_content() -> Optional[str]:
+    """If GLITCH_MCP_CONFIG_REMOTE is set (host_alias:remote_path), fetch content via SSH."""
+    remote = os.environ.get("GLITCH_MCP_CONFIG_REMOTE", "").strip()
+    if not remote or ":" not in remote:
+        return None
+    host_alias, _, remote_path = remote.partition(":")
+    host_alias = host_alias.strip()
+    remote_path = remote_path.strip()
+    if not host_alias or not remote_path:
+        return None
+    try:
+        import asyncio
+        from glitch.tools.ssh_tools import _resolve_host, _get_ssh_private_key
+        import asyncssh
+
+        resolved = _resolve_host(host_alias)
+        if not resolved:
+            logger.warning("GLITCH_MCP_CONFIG_REMOTE: unknown host alias %s", host_alias)
+            return None
+        key = _get_ssh_private_key()
+        if not key:
+            logger.warning("GLITCH_MCP_CONFIG_REMOTE: SSH key not configured")
+            return None
+
+        async def _fetch() -> str:
+            conn = await asyncssh.connect(
+                resolved["host"],
+                port=resolved["port"],
+                username=resolved["user"],
+                client_keys=[key],
+                known_hosts=None,
+            )
+            try:
+                result = await conn.run(f"cat -- {remote_path!r}")
+                if result.exit_status != 0:
+                    raise RuntimeError(result.stderr or f"exit {result.exit_status}")
+                return result.stdout or ""
+            finally:
+                conn.close()
+
+        return asyncio.run(_fetch())
+    except Exception as e:
+        logger.warning("Failed to load remote MCP config from %s: %s", remote, e)
+        return None
+
+
 def load_mcp_config(path: Optional[Path] = None, strict_env: Optional[bool] = None) -> MCPConfig:
-    """Load MCP server configuration from YAML file.
+    """Load MCP server configuration from YAML file or from a remote host via SSH.
+
+    If GLITCH_MCP_CONFIG_REMOTE is set to "host_alias:remote_path" (e.g. bastion:~/mcp_servers.yaml),
+    that file is fetched via SSH and used instead of the local path.
 
     Args:
         path: Path to configuration file (defaults to agent/mcp_servers.yaml)
@@ -99,24 +148,32 @@ def load_mcp_config(path: Optional[Path] = None, strict_env: Optional[bool] = No
         MCPConfig with loaded server configurations
 
     Raises:
-        FileNotFoundError: If config file doesn't exist
+        FileNotFoundError: If config file doesn't exist (local path only)
         ValueError: If config is invalid or (when strict_env) a required env var is unset
     """
-    config_path = path or get_default_mcp_config_path()
-
     if strict_env is None:
         strict_env = os.environ.get("GLITCH_MCP_STRICT_ENV", "false").lower() in ("true", "1", "yes")
 
-    if not config_path.exists():
+    raw_content: Optional[str] = None
+    config_path = path or get_default_mcp_config_path()
+
+    remote_content = _load_remote_mcp_config_content()
+    if remote_content is not None:
+        raw_content = remote_content
+        logger.info("Loaded MCP config from remote (GLITCH_MCP_CONFIG_REMOTE)")
+    elif config_path.exists():
+        with open(config_path, "r") as f:
+            raw_content = f.read()
+
+    if not raw_content:
         logger.warning("MCP config file not found: %s", config_path)
         return MCPConfig(servers={})
 
     try:
-        with open(config_path, "r") as f:
-            raw_config = yaml.safe_load(f)
+        raw_config = yaml.safe_load(raw_content)
 
         if not raw_config:
-            logger.warning("Empty MCP config file: %s", config_path)
+            logger.warning("Empty MCP config")
             return MCPConfig(servers={})
 
         if not isinstance(raw_config, dict) or "mcp_servers" not in raw_config:
@@ -142,6 +199,7 @@ def load_mcp_config(path: Optional[Path] = None, strict_env: Optional[bool] = No
                     env=server_data.get('env', {}),
                     prefix=server_data.get('prefix'),
                     tool_filters=server_data.get('tool_filters', {"allowed": [], "rejected": []}),
+                    ssh_host=server_data.get('ssh_host'),
                 )
                 logger.info("Loaded MCP server config: %s", name)
             except ValueError as e:

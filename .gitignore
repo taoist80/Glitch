@@ -203,6 +203,8 @@ temp/
 *.key
 *.p12
 *.pfx
+agent/glitch_agent_key
+agent/glitch_agent_key.pub
 .env.production
 .env.staging
 credentials.json
@@ -228,6 +230,7 @@ samconfig.toml
 .bedrock_agentcore.yaml
 agentcore-logs/
 agent/.env.deploy
+agent/.env.ssh
 
 # Coverage and profiling
 .coverage

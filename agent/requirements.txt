@@ -12,6 +12,7 @@ pydantic>=2.0.0
 python-dotenv>=1.0.0
 python-telegram-bot>=21.0.0
 pyyaml>=6.0
+asyncssh>=2.14.0
 
 # Optional: AgentCore Code Interpreter
 strands-agents-tools[agent_core_code_interpreter]

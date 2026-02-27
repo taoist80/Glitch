@@ -89,6 +89,34 @@ Runs post-deployment checks to verify the agent is properly configured.
 python3 scripts/post-deploy-verify.py
 ```
 
+### SSH key setup (for SSH tools)
+
+The agent can connect to remote hosts via SSH. You need a project key and to install it on each host.
+
+**One-time setup:**
+
+1. **Generate the key and config** (from `agent/`):
+   ```bash
+   ./scripts/ssh-setup.sh
+   ```
+   This creates `agent/glitch_agent_key` and `glitch_agent_key.pub` (gitignored) and writes **`agent/.env.ssh`** (gitignored) with `GLITCH_SSH_KEY_PATH` and `GLITCH_SSH_HOSTS`. The script will optionally prompt you to add one host (alias, hostname, user, port). The agent loads `.env.ssh` automatically when run.
+
+2. **Install the key on each host** (you will be prompted for the remote user's password):
+   ```bash
+   python scripts/ssh-copy-key.py user@hostname [port]
+   ```
+   Example: `python scripts/ssh-copy-key.py ubuntu@10.10.0.5`
+
+3. **Edit hosts** if needed: edit `agent/.env.ssh` and set `GLITCH_SSH_HOSTS` to a JSON array, e.g.  
+   `GLITCH_SSH_HOSTS=[{"alias":"myserver","host":"10.10.0.5","user":"ubuntu","port":22}]`  
+   Or use SSM parameter `/glitch/ssh/hosts` with the same JSON. When you run `make deploy`, `pre-deploy-configure.py` merges `GLITCH_SSH_HOSTS` from `.env.ssh` into the deploy env so the runtime gets the same host list.
+
+4. **Private key for the runtime:**
+   - **Local/dev:** `.env.ssh` already sets `GLITCH_SSH_KEY_PATH`; the agent loads it.
+   - **AWS:** Store the private key in Secrets Manager as `glitch/ssh-key` with key `private_key` (value = PEM body). Grant the AgentCore runtime role `secretsmanager:GetSecretValue` on that secret.
+
+The agent has tools: `ssh_list_hosts`, `ssh_install_key`, `ssh_run_command`, `ssh_read_file`, `ssh_write_file`, `ssh_mkdir`, `ssh_file_exists`, `ssh_list_dir`.
+
 ### `check-runtime-logs.py` - Runtime Logs Diagnostic
 
 Checks whether the runtime log group exists in CloudWatch and lists recent log streams. For agent runtime, the platform creates the log group by default; if logs are missing, the script suggests checking IAM (runtime role permissions for `/aws/bedrock-agentcore/*`) and network (VPC endpoint).

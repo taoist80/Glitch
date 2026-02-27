@@ -2,6 +2,12 @@
 #
 # Define external MCP servers that Glitch can connect to for additional tools.
 # Environment variables can be referenced using ${VAR_NAME} syntax.
+#
+# Load config from a remote host: set GLITCH_MCP_CONFIG_REMOTE=host_alias:remote_path
+# (e.g. GLITCH_MCP_CONFIG_REMOTE=bastion:~/mcp_servers.yaml).
+#
+# Run a server on a remote host: add ssh_host (alias from GLITCH_SSH_HOSTS). The command
+# is executed on that host over SSH; stdio is forwarded (e.g. ssh_host: bastion).
 
 mcp_servers:
   unifi:
@@ -27,6 +33,16 @@ mcp_servers:
   # aws-docs:
   #   enabled: false
   #   transport: stdio
+  #   command: uvx
+  #   args:
+  #     - awslabs.aws-documentation-mcp-server@latest
+  #   prefix: aws_docs
+  #
+  # Example: Run MCP server on a remote host (requires SSH key and host in GLITCH_SSH_HOSTS)
+  # remote-aws-docs:
+  #   enabled: false
+  #   transport: stdio
+  #   ssh_host: bastion
   #   command: uvx
   #   args:
   #     - awslabs.aws-documentation-mcp-server@latest

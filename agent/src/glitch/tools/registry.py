@@ -52,6 +52,7 @@ from glitch.tools.ssh_tools import (
     ssh_list_dir,
 )
 from glitch.tools.protect_tools import ALL_PROTECT_TOOLS
+from glitch.tools.tailscale_tools import run_tailscale_ensure_tls, run_tailscale_ssm_command, run_tailscale_renew_tls
 
 
 class ToolRegistry:
@@ -103,6 +104,7 @@ class ToolRegistry:
         ]
         self._groups["soul"] = [update_soul]
         self._groups["protect"] = ALL_PROTECT_TOOLS
+        self._groups["tailscale"] = [run_tailscale_ensure_tls, run_tailscale_ssm_command, run_tailscale_renew_tls]
         self._groups["ssh"] = [
             ssh_list_hosts,
             ssh_install_key,

@@ -21,6 +21,8 @@ class MCPServerConfig:
         env: Environment variables for the server process
         prefix: Prefix for tool names to avoid conflicts
         tool_filters: Filter configuration for tools
+        ssh_host: Optional SSH host alias (from GLITCH_SSH_HOSTS). When set, the stdio
+            command is run on this host over SSH instead of locally.
     """
     name: str
     enabled: bool = True
@@ -30,6 +32,7 @@ class MCPServerConfig:
     env: Dict[str, str] = field(default_factory=dict)
     prefix: Optional[str] = None
     tool_filters: Dict[str, List[str]] = field(default_factory=lambda: {"allowed": [], "rejected": []})
+    ssh_host: Optional[str] = None
     
     def __post_init__(self):
         """Validate configuration after initialization."""
