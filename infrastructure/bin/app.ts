@@ -7,14 +7,16 @@ import * as path from 'path';
 import * as yaml from 'yaml';
 import {
   GlitchFoundationStack,
+  GlitchVpnStack,
   SSM_PARAMS,
   SecretsStack,
-  TailscaleStack,
   AgentCoreStack,
   GlitchStorageStack,
   GlitchGatewayStack,
+  GlitchEdgeStack,
   GlitchUiHostingStack,
   TelegramWebhookStack,
+  GlitchSentinelStack,
 } from '../lib/stack';
 
 /**
@@ -42,18 +44,32 @@ const env = {
   region: 'us-west-2',
 };
 
-// Custom domain configuration
 const customDomain = 'glitch.awoo.agency';
 
 // ============================================================================
-// PHASE 1: FOUNDATION (VPC + IAM Roles + SSM Parameters)
-// Deploy this first: cdk deploy GlitchFoundationStack
+// PHASE 1: FOUNDATION (VPC + IAM Roles + SSM Parameters + S2S VPN)
+// Deploy first: cdk deploy GlitchFoundationStack
+// Pass on-prem IP when UDM-Pro is ready: -c onPremPublicIp=YOUR.WAN.IP.HERE
 // ============================================================================
 
 const foundationStack = new GlitchFoundationStack(app, 'GlitchFoundationStack', {
   env,
-  description: 'Foundation: VPC, IAM roles, security groups, SSM parameters',
+  description: 'Foundation: VPC (no NAT Gateway), IAM roles, S2S VPN (UDM-Pro gateway), SSM parameters',
 });
+
+// ============================================================================
+// PHASE 1b: VPN (deploy once after Phase 1, then leave alone)
+// First deploy — pass UDM-Pro WAN IP to create Customer Gateway + VPN Connection:
+//   cdk deploy GlitchVpnStack -c onPremPublicIp=YOUR.WAN.IP.HERE
+// All VPN resources have DeletionPolicy: RETAIN — safe to redeploy without context.
+// ============================================================================
+
+const vpnStack = new GlitchVpnStack(app, 'GlitchVpnStack', {
+  env,
+  vpc: foundationStack.vpc,
+  description: 'Site-to-Site VPN: VGW, Customer Gateway, VPN Connection (UDM-Pro ↔ AWS)',
+});
+vpnStack.addDependency(foundationStack);
 
 // ============================================================================
 // PHASE 2: AGENT (run after Phase 1)
@@ -61,8 +77,6 @@ const foundationStack = new GlitchFoundationStack(app, 'GlitchFoundationStack', 
 // This creates the AgentCore runtime and writes the ARN to .bedrock_agentcore.yaml
 // ============================================================================
 
-// Read runtime ARN from config (set by agentcore deploy in Phase 2)
-// Use placeholder during Phase 1 so synth succeeds
 const agentCoreRuntimeArn =
   app.node.tryGetContext('glitchAgentCoreRuntimeArn') ??
   getAgentCoreRuntimeArn() ??
@@ -87,7 +101,7 @@ const gatewayStack = new GlitchGatewayStack(app, 'GlitchGatewayStack', {
   env,
   configTable: storageStack.configTable,
   agentCoreRuntimeArn,
-  description: 'Gateway Lambda (invocations, /api/*, keepalive)',
+  description: 'Gateway Lambda (IAM-auth Function URL, /api/*, keepalive)',
 });
 gatewayStack.addDependency(storageStack);
 
@@ -102,9 +116,6 @@ telegramWebhookStack.addDependency(storageStack);
 telegramWebhookStack.addDependency(secretsStack);
 
 // Write the webhook URL to SSM in a separate stack to avoid a CFN circular dependency.
-// TelegramWebhookStack cannot write its own FunctionUrl as an SSM param because:
-//   FunctionUrl → Function → ServiceRole → Policy → (anything) → FunctionUrl creates a cycle.
-// Putting the SSM write in a child stack that depends on TelegramWebhookStack breaks the cycle.
 const telegramSsmStack = new cdk.Stack(app, 'GlitchTelegramSsmStack', {
   env,
   description: 'SSM parameter: Telegram webhook URL (written separately to avoid CFN circular dep)',
@@ -116,46 +127,53 @@ new ssm.StringParameter(telegramSsmStack, 'SsmTelegramWebhookUrl', {
 });
 telegramSsmStack.addDependency(telegramWebhookStack);
 
-// Extract hostname from Lambda Function URL (for Tailscale nginx proxy config)
-const gatewayUrlHostname = cdk.Fn.select(2, cdk.Fn.split('/', gatewayStack.functionUrl));
+// Edge stack (us-east-1): WAF WebACL for CloudFront IP allowlisting.
+// IPv4 is auto-discovered from Porkbun DDNS at every deploy — no manual IP passing needed.
+// To override (e.g. add a second IP): -c allowedIpAddresses=1.2.3.4/32,5.6.7.8/32
+const allowedIpAddresses = ((app.node.tryGetContext('allowedIpAddresses') as string) ?? '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
+// crossRegionReferences: true allows CDK to pass GlitchEdgeStack (us-east-1) outputs
+// to GlitchUiHostingStack (us-west-2) via SSM custom resources at synth time.
+const edgeStack = new GlitchEdgeStack(app, 'GlitchEdgeStack', {
+  env: { account: env.account, region: 'us-east-1' },
+  crossRegionReferences: true,
+  allowedIpAddresses,
+  description: 'Edge resources (us-east-1): WAF WebACL with IP allowlist for CloudFront',
+});
 
 const uiHostingStack = new GlitchUiHostingStack(app, 'GlitchUiHostingStack', {
   env,
-  description: 'S3 bucket for UI static assets (served via Tailscale EC2 nginx)',
-});
-
-// Tailscale EC2 connector and nginx proxy
-const tailscaleStack = new TailscaleStack(app, 'GlitchTailscaleStack', {
-  env,
-  vpc: foundationStack.vpc,
-  tailscaleAuthKeySecret: secretsStack.tailscaleAuthKeySecret,
-  agentCoreSecurityGroup: foundationStack.agentCoreSecurityGroup,
-  agentCoreRuntimeArn,
-  instanceBootstrapVersion: '12',
+  crossRegionReferences: true,
+  gatewayFunction: gatewayStack.gatewayFunction,
   gatewayFunctionUrl: gatewayStack.functionUrl,
-  gatewayHostname: gatewayUrlHostname,
-  uiBucketName: uiHostingStack.uiBucket.bucketName,
   customDomain,
-  porkbunApiSecret: secretsStack.porkbunApiSecret,
-  certbotEmail: 'admin@awoo.agency',
-  description: 'Tailscale EC2 connector and nginx proxy',
+  webAclArn: edgeStack.webAclArn,
+  certificateArn: app.node.tryGetContext('cloudfrontCertArn') as string | undefined,
+  description: 'UI hosting: S3 (OAC) + CloudFront + WAF + Lambda FURL (IAM+OAC)',
 });
-tailscaleStack.addDependency(foundationStack);
-tailscaleStack.addDependency(secretsStack);
-tailscaleStack.addDependency(gatewayStack);
-tailscaleStack.addDependency(uiHostingStack);
+uiHostingStack.addDependency(gatewayStack);
+uiHostingStack.addDependency(edgeStack);
 
 // AgentCore policies stack (attaches policies to runtime role)
 const agentCoreStack = new AgentCoreStack(app, 'GlitchAgentCoreStack', {
   env,
-  vpc: foundationStack.vpc,
-  agentCoreSecurityGroup: foundationStack.agentCoreSecurityGroup,
   runtimeRole: foundationStack.runtimeRole,
-  tailscaleInstance: tailscaleStack.instance,
-  description: 'AgentCore runtime policies',
+  description: 'AgentCore runtime policies (Glitch agent, PUBLIC mode)',
 });
 agentCoreStack.addDependency(foundationStack);
-agentCoreStack.addDependency(tailscaleStack);
+
+// Sentinel agent policies stack
+const sentinelStack = new GlitchSentinelStack(app, 'GlitchSentinelStack', {
+  env,
+  runtimeRole: foundationStack.runtimeRole,
+  glitchRuntimeArn: agentCoreRuntimeArn,
+  description: 'Sentinel operations agent runtime policies',
+});
+sentinelStack.addDependency(foundationStack);
+sentinelStack.addDependency(agentCoreStack);
 
 cdk.Tags.of(app).add('Project', 'AgentCore-Glitch');
 cdk.Tags.of(app).add('ManagedBy', 'CDK');
