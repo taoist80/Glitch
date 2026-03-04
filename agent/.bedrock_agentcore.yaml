@@ -20,12 +20,8 @@ agents:
       s3_path: null
       s3_auto_create: false
       network_configuration:
-        network_mode: VPC
-        network_mode_config:
-          security_groups:
-          - sg-07676d5bc70f6c385
-          subnets:
-          - subnet-03b623395065bfb5a
+        network_mode: PUBLIC
+        network_mode_config: null
       protocol_configuration:
         server_protocol: HTTP
       observability:

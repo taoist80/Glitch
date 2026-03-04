@@ -1,0 +1,19 @@
+{
+  "id": "incident-response",
+  "version": "1.0.0",
+  "description": "Structured incident response workflow: detect, triage, remediate, or escalate. Covers cross-domain correlation (logs + network + DNS + cameras), automated remediation via Glitch agent delegation, GitHub PR creation for code fixes, and Telegram notification.",
+  "triggers": [
+    "incident", "something is wrong", "fix the issue", "remediate", "resolve",
+    "alert", "outage", "down", "not working", "broken", "failed", "issue detected",
+    "auto fix", "automatic remediation", "cross domain", "correlate", "investigate"
+  ],
+  "tags": ["incident-response", "remediation", "alerting", "automation"],
+  "priority": 85,
+  "model_allowlist": null,
+  "model_denylist": null,
+  "required_tools": [
+    "scan_log_groups_for_errors", "send_telegram_alert", "send_telegram_resolved",
+    "invoke_glitch_agent", "github_create_pr"
+  ],
+  "author": "Sentinel"
+}

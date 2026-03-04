@@ -1,0 +1,21 @@
+{
+  "id": "unifi-operations",
+  "version": "1.0.0",
+  "description": "Monitor and manage UniFi Protect surveillance (cameras, events, entity tracking) and UniFi Network (APs, switches, clients, VPN, WiFi, firewall). Correlate network anomalies with camera events for security response.",
+  "triggers": [
+    "unifi", "camera", "cameras", "network", "wifi", "access point", "ap",
+    "switch", "client", "block client", "firewall", "vpn", "topology",
+    "surveillance", "motion", "person detected", "vehicle", "security event",
+    "network health", "device offline", "rogue ap", "new device", "unknown device",
+    "network topology", "protect", "ubiquiti"
+  ],
+  "tags": ["unifi", "network", "surveillance", "security", "protect"],
+  "priority": 80,
+  "model_allowlist": null,
+  "model_denylist": null,
+  "required_tools": [
+    "protect_get_cameras", "protect_get_events", "unifi_list_clients",
+    "unifi_get_network_health", "unifi_get_alerts_events"
+  ],
+  "author": "Sentinel"
+}

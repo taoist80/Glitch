@@ -29,17 +29,6 @@ from glitch.tools.telemetry_tools import (
     create_cloudwatch_metric,
     query_persistent_telemetry,
 )
-from glitch.tools.network_tools import (
-    query_pihole_stats,
-    check_unifi_network,
-    query_protect_cameras,
-)
-from glitch.tools.pihole_tools import (
-    pihole_list_dns_records,
-    pihole_add_dns_record,
-    pihole_delete_dns_record,
-    pihole_update_dns_record,
-)
 from glitch.tools.soul_tools import update_soul
 from glitch.tools.ssh_tools import (
     ssh_list_hosts,
@@ -51,8 +40,15 @@ from glitch.tools.ssh_tools import (
     ssh_file_exists,
     ssh_list_dir,
 )
-from glitch.tools.protect_tools import ALL_PROTECT_TOOLS
-from glitch.tools.tailscale_tools import run_tailscale_ensure_tls, run_tailscale_ssm_command, run_tailscale_renew_tls
+from glitch.tools.sentinel_tools import invoke_sentinel
+from glitch.tools.secrets_tools import store_secret, list_secrets
+from glitch.tools.deploy_tools import (
+    get_deployed_arns,
+    update_glitch_arn_in_ssm,
+    update_sentinel_arn_in_ssm,
+    update_both_arns_in_ssm,
+    check_codebuild_deploy_status,
+)
 
 
 class ToolRegistry:
@@ -91,20 +87,7 @@ class ToolRegistry:
             create_cloudwatch_metric,
             query_persistent_telemetry,
         ]
-        self._groups["network"] = [
-            query_pihole_stats,
-            check_unifi_network,
-            query_protect_cameras,
-        ]
-        self._groups["pihole_dns"] = [
-            pihole_list_dns_records,
-            pihole_add_dns_record,
-            pihole_delete_dns_record,
-            pihole_update_dns_record,
-        ]
         self._groups["soul"] = [update_soul]
-        self._groups["protect"] = ALL_PROTECT_TOOLS
-        self._groups["tailscale"] = [run_tailscale_ensure_tls, run_tailscale_ssm_command, run_tailscale_renew_tls]
         self._groups["ssh"] = [
             ssh_list_hosts,
             ssh_install_key,
@@ -114,6 +97,15 @@ class ToolRegistry:
             ssh_mkdir,
             ssh_file_exists,
             ssh_list_dir,
+        ]
+        self._groups["sentinel"] = [invoke_sentinel]
+        self._groups["secrets"] = [store_secret, list_secrets]
+        self._groups["deploy"] = [
+            get_deployed_arns,
+            update_glitch_arn_in_ssm,
+            update_sentinel_arn_in_ssm,
+            update_both_arns_in_ssm,
+            check_codebuild_deploy_status,
         ]
 
     def register_group(self, name: str, tools: List[Callable]) -> None:

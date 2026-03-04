@@ -1,10 +1,11 @@
-"""Ollama integration tools for local model execution via Tailscale.
+"""Ollama integration tools for local model execution via on-prem hosts.
 
 Dataflow:
     Tool Call -> httpx.AsyncClient -> Ollama API -> Response String
 
-These tools connect to on-premises Ollama instances via Tailscale mesh VPN,
-enabling local model execution for cost savings and privacy.
+These tools connect to on-premises Ollama instances (via GLITCH_OLLAMA_PROXY_HOST
+when set, or direct IP when reachable), enabling local model execution for cost
+savings and privacy.
 """
 
 import json
@@ -37,18 +38,18 @@ def _ollama_timeout() -> float:
 
 
 def _ollama_proxy_host() -> Optional[str]:
-    """When set, runtime must use Tailscale EC2 proxy; on-prem IPs are not routable from VPC."""
+    """When set, route Ollama requests through this proxy to reach on-prem hosts."""
     v = os.environ.get("GLITCH_OLLAMA_PROXY_HOST", "").strip()
     return v or None
 
 
 def _ollama_chat_host() -> str:
-    """Chat endpoint: proxy host (port 11434) or direct 10.10.110.202 when on-prem."""
+    """Chat endpoint: proxy host (port 11434) or direct 10.10.110.202."""
     return _ollama_proxy_host() or "10.10.110.202"
 
 
 def _ollama_vision_host() -> str:
-    """Vision endpoint: proxy host (port 8080) or direct 10.10.110.137 when on-prem."""
+    """Vision endpoint: proxy host (port 8080) or direct 10.10.110.137."""
     return _ollama_proxy_host() or "10.10.110.137"
 
 
@@ -56,9 +57,9 @@ def _ollama_vision_host() -> str:
 class OllamaConfig:
     """Configuration for Ollama / local model endpoints.
 
-    When GLITCH_OLLAMA_PROXY_HOST is set (e.g. in AgentCore in VPC), chat_host and vision_host
-    both use the proxy; nginx on the proxy listens on 11434 (Mistral) and 8080 (LLaVA).
-    When unset (e.g. local dev on same network as Ollama), use direct on-prem IPs.
+    When GLITCH_OLLAMA_PROXY_HOST is set, chat_host and vision_host both use the proxy;
+    the proxy listens on 11434 (Mistral) and 8080 (LLaVA).
+    When unset, direct on-prem IPs are used (requires network reachability).
     """
     chat_host: str = "10.10.110.202"
     vision_host: str = "10.10.110.137"
@@ -153,7 +154,7 @@ async def vision_agent(
     prompt: str,
     model: str = "llava",
 ) -> str:
-    """Process an image with the local LLaVA vision model via Tailscale.
+    """Process an image with the local LLaVA vision model.
     
     Dataflow:
         (image_url, prompt) -> Ollama Vision Host -> Response String
@@ -201,7 +202,7 @@ async def local_chat(
     system_prompt: Optional[str] = None,
     temperature: float = 0.7,
 ) -> str:
-    """Execute a chat completion with a local Ollama model via Tailscale.
+    """Execute a chat completion with a local Ollama model.
     
     Use this for lightweight tasks, tool execution, or when local processing is preferred.
     
@@ -265,13 +266,10 @@ def _debug_ollama_log(message: str, data: dict, hypothesis_id: str = "") -> None
     ts_ms = int(payload["timestamp"] * 1000)
     msg = json.dumps(payload)
     try:
-        client = None
         try:
-            import boto3
-            client = boto3.client("logs")
+            from glitch.aws_utils import get_client
+            client = get_client("logs")
         except Exception:
-            pass
-        if not client:
             return
         kwargs = {
             "logGroupName": _OLLAMA_CW_LOG_GROUP,
@@ -400,7 +398,7 @@ async def check_ollama_health() -> str:
     lines = [r.to_string() for r in results]
     if not all(r.healthy for r in results):
         lines.append(
-            "Note: These hosts are only reachable when the runtime is on your Tailscale/on-prem network. "
-            "When running in AWS or off-network, unreachable is expected; Mistral and LLaVA sub-agents are still registered but cannot reach the hosts until the runtime has network access."
+            "Note: These hosts are only reachable when the runtime has network access to the on-prem network. "
+            "Set GLITCH_OLLAMA_PROXY_HOST to a proxy that can reach on-prem IPs, or ensure direct connectivity."
         )
     return "\n".join(lines)

@@ -60,6 +60,8 @@ importers:
         specifier: 'catalog:'
         version: 5.9.3
 
+  monitoring-agent: {}
+
   ui:
     dependencies:
       lucide-react:

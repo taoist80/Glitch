@@ -8,8 +8,87 @@ export type Tab =
   | 'mcp'
   | 'skills'
   | 'unifi'
+  | 'protect'
   | 'pihole'
   | 'settings';
+
+// --- UniFi Protect / Surveillance (entities, events, alerts, behaviours) ---
+export interface ProtectEntity {
+  entity_id: string;
+  type: string;
+  label?: string;
+  trust_level: string;
+  role?: string;
+  first_seen?: string;
+  last_seen?: string;
+  sightings_count?: number;
+  plate_text?: string;
+  vehicle_color?: string;
+  vehicle_make_model?: string;
+}
+
+export interface ProtectEvent {
+  event_id: string;
+  camera_id: string;
+  timestamp: string;
+  entity_type?: string;
+  score?: number;
+  anomaly_score?: number;
+  snapshot_url?: string;
+  video_clip_url?: string;
+  processed?: boolean;
+}
+
+export interface ProtectAlert {
+  alert_id: string;
+  event_id?: string;
+  entity_id?: string;
+  camera_id?: string;
+  timestamp: string;
+  priority: string;
+  title: string;
+  body?: string;
+  delivered?: boolean;
+  user_response?: string;
+}
+
+export interface ProtectPattern {
+  pattern_id: string;
+  camera_id: string;
+  entity_id?: string;
+  entity_type?: string;
+  pattern_type: string;
+  frequency?: number;
+  last_seen?: string;
+  confidence?: number;
+}
+
+export interface ProtectSummary {
+  entities_total: number;
+  events_24h: number;
+  alerts_unack: number;
+  cameras_online: number;
+}
+
+export interface ProtectEntitiesResponse {
+  entities: ProtectEntity[];
+  total: number;
+}
+
+export interface ProtectEventsResponse {
+  events: ProtectEvent[];
+  total: number;
+}
+
+export interface ProtectAlertsResponse {
+  alerts: ProtectAlert[];
+  total: number;
+}
+
+export interface ProtectPatternsResponse {
+  patterns: ProtectPattern[];
+  total: number;
+}
 
 export interface AgentInfo {
   id: string;

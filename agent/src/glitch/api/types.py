@@ -206,3 +206,92 @@ class ModeInfo(BaseModel):
 class ModesResponse(BaseModel):
     """Response from GET /api/modes."""
     modes: List[ModeInfo]
+
+
+# --- UniFi Protect API (entities, events, alerts, patterns) ---
+
+
+class ProtectEntityModel(BaseModel):
+    """Single entity (person/vehicle) from Protect DB."""
+    entity_id: str = ""
+    type: str = ""
+    label: Optional[str] = None
+    trust_level: str = "unknown"
+    role: Optional[str] = None
+    first_seen: Optional[str] = None
+    last_seen: Optional[str] = None
+    sightings_count: int = 0
+    plate_text: Optional[str] = None
+    vehicle_color: Optional[str] = None
+    vehicle_make_model: Optional[str] = None
+
+
+class ProtectEventModel(BaseModel):
+    """Single event from Protect DB."""
+    event_id: str = ""
+    camera_id: str = ""
+    timestamp: str = ""
+    entity_type: Optional[str] = None
+    score: Optional[float] = None
+    anomaly_score: float = 0.0
+    snapshot_url: Optional[str] = None
+    video_clip_url: Optional[str] = None
+    processed: bool = False
+
+
+class ProtectAlertModel(BaseModel):
+    """Single alert from Protect DB."""
+    alert_id: str = ""
+    event_id: Optional[str] = None
+    entity_id: Optional[str] = None
+    camera_id: Optional[str] = None
+    timestamp: str = ""
+    priority: str = "medium"
+    title: str = ""
+    body: Optional[str] = None
+    delivered: bool = False
+    user_response: Optional[str] = None
+
+
+class ProtectPatternModel(BaseModel):
+    """Single pattern from Protect DB."""
+    pattern_id: str = ""
+    camera_id: str = ""
+    entity_id: Optional[str] = None
+    entity_type: Optional[str] = None
+    pattern_type: str = "entity_visit"
+    frequency: float = 1.0
+    last_seen: Optional[str] = None
+    confidence: float = 0.1
+
+
+class ProtectSummaryResponse(BaseModel):
+    """Response from GET /api/protect/summary."""
+    entities_total: int = 0
+    events_24h: int = 0
+    alerts_unack: int = 0
+    cameras_online: int = 0
+
+
+class ProtectEntitiesResponse(BaseModel):
+    """Response from GET /api/protect/entities."""
+    entities: List[ProtectEntityModel] = []
+    total: int = 0
+
+
+class ProtectEventsResponse(BaseModel):
+    """Response from GET /api/protect/events."""
+    events: List[ProtectEventModel] = []
+    total: int = 0
+
+
+class ProtectAlertsResponse(BaseModel):
+    """Response from GET /api/protect/alerts."""
+    alerts: List[ProtectAlertModel] = []
+    total: int = 0
+
+
+class ProtectPatternsResponse(BaseModel):
+    """Response from GET /api/protect/patterns."""
+    patterns: List[ProtectPatternModel] = []
+    total: int = 0

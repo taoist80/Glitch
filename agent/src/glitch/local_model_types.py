@@ -8,14 +8,11 @@ Port: 8080 for OpenAI-compatible server; 11434 for native Ollama.
 import os
 from typing import Any, Dict, List, Optional, TypedDict, Union
 
-# Host mapping (on-prem via EC2 Tailscale HTTP proxy)
-# AgentCore cannot use Tailscale routes directly (not a Tailscale node)
-# AgentCore → EC2 nginx proxy (VPC private IP) → Tailscale mesh → on-prem
-# Set GLITCH_OLLAMA_PROXY_HOST to the EC2 VPC private IP (GlitchTailscaleStack output PrivateIp).
-# After any redeploy that replaces the EC2 instance, the IP changes — run "make deploy" to refresh.
-_DEFAULT_PROXY_IP = "10.0.0.82"  # Fallback only if env not set; prefer make deploy to set from stack
-MISTRAL_HOST = os.environ.get("GLITCH_OLLAMA_PROXY_HOST", _DEFAULT_PROXY_IP)
-LLAVA_HOST = os.environ.get("GLITCH_OLLAMA_PROXY_HOST", _DEFAULT_PROXY_IP)
+# Host mapping (on-prem via proxy)
+# AgentCore runs in PUBLIC network mode; on-prem IPs are not directly routable.
+# Set GLITCH_OLLAMA_PROXY_HOST to a proxy that can reach the on-prem Ollama hosts.
+MISTRAL_HOST = os.environ.get("GLITCH_OLLAMA_PROXY_HOST", "10.10.110.202")
+LLAVA_HOST = os.environ.get("GLITCH_OLLAMA_PROXY_HOST", "10.10.110.137")
 DEFAULT_OPENAI_PORT = 8080   # Nginx proxy port for LLaVA
 OLLAMA_NATIVE_PORT = 11434   # Nginx proxy port for Mistral
 

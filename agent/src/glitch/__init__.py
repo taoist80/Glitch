@@ -5,7 +5,7 @@ This package provides the Glitch agent, a hybrid AI orchestrator that:
 - Manages conversation memory via AgentCore Memory API
 - Selects and injects skills based on task analysis
 - Tracks metrics via OpenTelemetry
-- Integrates with on-premises services via Tailscale
+- Integrates with on-premises services via Site-to-Site VPN
 
 Dataflow Overview:
     InvocationRequest -> TaskPlanner -> TaskSpec

@@ -9,6 +9,7 @@ import { TelemetryTab } from './tabs/TelemetryTab';
 import { MCPTab } from './tabs/MCPTab';
 import { SkillsTab } from './tabs/SkillsTab';
 import { UnifiTab } from './tabs/UnifiTab';
+import { ProtectTab } from './tabs/ProtectTab';
 import { PiholeTab } from './tabs/PiholeTab';
 import { SettingsTab } from './tabs/SettingsTab';
 import { useAppStore } from './store/useAppStore';
@@ -46,6 +47,8 @@ function App() {
         return <SkillsTab />;
       case 'unifi':
         return <UnifiTab />;
+      case 'protect':
+        return <ProtectTab />;
       case 'pihole':
         return <PiholeTab />;
       case 'settings':

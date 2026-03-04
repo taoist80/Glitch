@@ -31,10 +31,10 @@ def get_code_interpreter_tool():
     try:
         from strands_tools.code_interpreter import AgentCoreCodeInterpreter
         
-        region = os.getenv("AWS_REGION", "us-west-2")
-        interpreter = AgentCoreCodeInterpreter(region=region)
+        from glitch.aws_utils import REGION
+        interpreter = AgentCoreCodeInterpreter(region=REGION)
         _code_interpreter_tool = interpreter.code_interpreter
-        logger.info(f"Initialized AgentCore Code Interpreter for region {region}")
+        logger.info(f"Initialized AgentCore Code Interpreter for region {REGION}")
         return _code_interpreter_tool
         
     except ImportError:

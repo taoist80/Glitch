@@ -2,6 +2,7 @@ packages:
   - 'infrastructure'
   - 'agent'
   - 'ui'
+  - 'monitoring-agent'
 
 catalog:
   # CDK Dependencies

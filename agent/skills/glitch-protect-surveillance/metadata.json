@@ -1,7 +1,7 @@
 {
   "id": "glitch-protect-surveillance",
-  "version": "1.0.0",
-  "description": "UniFi Protect surveillance integration: entity detection, identification, anomaly detection, threat assessment, cross-camera tracking, and adaptive alerting. Use when user mentions Protect, cameras, surveillance, vehicles, license plates, alerts, security, motion, or UniFi.",
+  "version": "2.0.0",
+  "description": "UniFi Protect surveillance and network security. Delegate to Sentinel via invoke_sentinel for all surveillance operations: cameras, motion events, entity tracking, network anomalies, DNS threats, and security alerts. Use when user mentions Protect, cameras, surveillance, vehicles, license plates, alerts, security, motion, UniFi, or network.",
   "triggers": [
     "protect",
     "camera",
@@ -32,7 +32,12 @@
     "front door",
     "driveway",
     "backyard",
-    "unifi"
+    "unifi",
+    "network",
+    "wifi",
+    "dns",
+    "pihole",
+    "pi-hole"
   ],
   "tags": [
     "security",
@@ -42,23 +47,12 @@
     "vision",
     "entity-tracking",
     "anomaly-detection",
-    "alerting"
+    "alerting",
+    "sentinel"
   ],
   "priority": 90,
   "model_allowlist": null,
   "model_denylist": null,
-  "required_tools": [
-    "protect_get_cameras",
-    "protect_get_events",
-    "protect_get_snapshot",
-    "protect_classify_snapshot",
-    "protect_db_store_observation",
-    "protect_db_get_baseline",
-    "protect_should_alert",
-    "protect_send_telegram_alert",
-    "protect_register_entity",
-    "protect_search_entities",
-    "vision_agent"
-  ],
+  "required_tools": ["invoke_sentinel"],
   "author": "Glitch Team"
 }

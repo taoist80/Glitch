@@ -18,6 +18,7 @@ import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
+import * as cr from 'aws-cdk-lib/custom-resources';
 import { Construct } from 'constructs';
 import * as path from 'path';
 
@@ -248,6 +249,9 @@ export interface GlitchVpnStackProps extends cdk.StackProps {
  * Deploy once after GlitchFoundationStack, then leave alone.
  * All VPN resources have DeletionPolicy: RETAIN.
  *
+ * Static routes 10.10.100.0/24 and 10.10.110.0/24 send traffic to on-prem (Protect DB at 10.10.100.230, models on 10.10.110.x).
+ * On-prem must route 10.0.0.0/16 (AWS VPC) via the tunnel. See infrastructure/docs/IPSEC-ONPREM-PROTECT-DB.md.
+ *
  * First deploy (creates Customer Gateway + VPN Connection):
  *   cdk deploy GlitchVpnStack -c onPremPublicIp=<UDM-Pro WAN IP>
  *
@@ -267,9 +271,10 @@ export class GlitchVpnStack extends cdk.Stack {
     // ========== VPN Gateway (no CfnVPCGatewayAttachment — avoids "already exists in GlitchFoundationStack") ==========
     // We attach the VGW to the VPC via a Lambda so CloudFormation never creates a resource with
     // physical ID "VGW|vpc-xxx". That phantom ID was blocking us. Foundation stack stays untouched.
+    // amazonSideAsn 64513: use 64513 so CloudFormation replaces VGW if the previous one was deleted (Ref pointed to non-existent vgw-xxx).
     const vpnGateway = new ec2.CfnVPNGateway(this, 'VpnGateway', {
       type: 'ipsec.1',
-      amazonSideAsn: 64512,
+      amazonSideAsn: 64513,
       tags: [{ key: 'Name', value: 'glitch-vpn-gateway' }],
     });
     vpnGateway.cfnOptions.deletionPolicy = cdk.CfnDeletionPolicy.RETAIN;
@@ -288,6 +293,7 @@ export class GlitchVpnStack extends cdk.Stack {
                 'ec2:AttachVpnGateway',
                 'ec2:DetachVpnGateway',
                 'ec2:DescribeVpnGateways',
+                'ec2:DescribeRouteTables',
                 'ec2:EnableVgwRoutePropagation',
                 'ec2:DisableVgwRoutePropagation',
               ],
@@ -335,10 +341,19 @@ def ensure_attached(ec2_client, vgw_id, vpc_id):
             return
     raise RuntimeError('Timeout waiting for VGW attach')
 
+def get_main_route_table_id(ec2_client, vpc_id):
+    resp = ec2_client.describe_route_tables(Filters=[
+        {'Name': 'vpc-id', 'Values': [vpc_id]},
+        {'Name': 'association.main', 'Values': ['true']},
+    ])
+    for rt in resp.get('RouteTables', []):
+        return rt['RouteTableId']
+    return None
+
 def handler(event, context):
     props = event.get('ResourceProperties', {})
     vgw_id, vpc_id = props['VgwId'], props['VpcId']
-    route_table_ids = props.get('RouteTableIds', [])
+    route_table_ids = list(props.get('RouteTableIds', []))
     region = props.get('Region', 'us-west-2')
     ec2 = boto3.client('ec2', region_name=region)
     try:
@@ -346,6 +361,9 @@ def handler(event, context):
             send(event, context, 'SUCCESS')
             return
         ensure_attached(ec2, vgw_id, vpc_id)
+        main_rt = get_main_route_table_id(ec2, vpc_id)
+        if main_rt and main_rt not in route_table_ids:
+            route_table_ids.append(main_rt)
         for rt_id in route_table_ids:
             ec2.enable_vgw_route_propagation(GatewayId=vgw_id, RouteTableId=rt_id)
         send(event, context, 'SUCCESS', {'VgwId': vgw_id})
@@ -356,6 +374,7 @@ def handler(event, context):
       timeout: cdk.Duration.seconds(120),
     });
 
+    // PropagationVersion: bump to force custom resource to re-run (enables propagation on all route tables including main).
     const attachResource = new cdk.CustomResource(this, 'VgwAttachAndPropagate', {
       serviceToken: attachAndPropagateFn.functionArn,
       properties: {
@@ -363,37 +382,195 @@ def handler(event, context):
         VpcId: vpc.vpcId,
         RouteTableIds: allRouteTableIds,
         Region: this.region,
+        PropagationVersion: '2',
       },
     });
     attachResource.node.addDependency(vpnGateway);
 
-    // ========== Customer Gateway + VPN Connection ==========
-    // Only created when onPremPublicIp is provided (first deploy). Depend on attach so VGW is ready.
+    // ========== Customer Gateway (get or create) + VPN Connection ==========
+    // Only created when onPremPublicIp is provided. Use a custom resource to look up an existing
+    // Customer Gateway by IP (and BGP ASN) so we don't fail with "already exists" when the CGW
+    // was created by a previous deploy or retained after a failed delete.
     if (onPremPublicIp) {
-      const customerGateway = new ec2.CfnCustomerGateway(this, 'CustomerGateway', {
-        type: 'ipsec.1',
-        bgpAsn: onPremBgpAsn,
-        ipAddress: onPremPublicIp,
-        tags: [{ key: 'Name', value: 'glitch-udmpro-customer-gateway' }],
+      const getOrCreateCgwRole = new iam.Role(this, 'GetOrCreateCgwRole', {
+        assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+        managedPolicies: [
+          iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+        ],
+        inlinePolicies: {
+          Ec2: new iam.PolicyDocument({
+            statements: [
+              new iam.PolicyStatement({
+                actions: ['ec2:DescribeCustomerGateways', 'ec2:CreateCustomerGateway', 'ec2:CreateTags'],
+                resources: ['*'],
+              }),
+            ],
+          }),
+        },
       });
-      customerGateway.node.addDependency(attachResource);
-      customerGateway.cfnOptions.deletionPolicy = cdk.CfnDeletionPolicy.DELETE;
 
-      const vpnConnection = new ec2.CfnVPNConnection(this, 'VpnConnection', {
-        type: 'ipsec.1',
-        customerGatewayId: customerGateway.ref,
-        vpnGatewayId: vpnGateway.ref,
-        staticRoutesOnly: false,
-        tags: [{ key: 'Name', value: 'glitch-udmpro-vpn' }],
+      const getOrCreateCgwFn = new lambda.Function(this, 'GetOrCreateCgwFn', {
+        runtime: lambda.Runtime.PYTHON_3_12,
+        handler: 'index.handler',
+        role: getOrCreateCgwRole,
+        timeout: cdk.Duration.seconds(30),
+        code: lambda.Code.fromInline(`
+import json, urllib.request, boto3
+
+def send(event, context, status, data=None, reason=''):
+    rid = (data.get('CgwId') if data else None) or event.get('PhysicalResourceId') or context.log_stream_name
+    body = json.dumps({'Status': status, 'Reason': reason or '', 'PhysicalResourceId': rid, 'StackId': event['StackId'],
+        'RequestId': event['RequestId'], 'LogicalResourceId': event['LogicalResourceId'], 'Data': data or {}}).encode()
+    req = urllib.request.Request(event['ResponseURL'], data=body, headers={'Content-Type': 'application/json'}, method='PUT')
+    urllib.request.urlopen(req, timeout=10)
+
+def handler(event, context):
+    props = event.get('ResourceProperties', {})
+    ip, asn = props.get('OnPremPublicIp'), int(props.get('OnPremBgpAsn', 65000))
+    region = props.get('Region', 'us-west-2')
+    ec2 = boto3.client('ec2', region_name=region)
+    try:
+        if event['RequestType'] == 'Delete':
+            send(event, context, 'SUCCESS', {})
+            return
+        resp = ec2.describe_customer_gateways(Filters=[
+            {'Name': 'state', 'Values': ['available']},
+            {'Name': 'type', 'Values': ['ipsec.1']},
+            {'Name': 'ip-address', 'Values': [ip]},
+        ])
+        gateways = resp.get('CustomerGateways', [])
+        for gw in gateways:
+            if str(gw.get('BgpAsn')) == str(asn):
+                cgw_id = gw['CustomerGatewayId']
+                send(event, context, 'SUCCESS', {'CgwId': cgw_id})
+                return
+        create = ec2.create_customer_gateway(Type='ipsec.1', BgpAsn=asn, PublicIp=ip,
+            TagSpecifications=[{'ResourceType': 'customer-gateway', 'Tags': [{'Key': 'Name', 'Value': 'glitch-udmpro-customer-gateway'}]}])
+        cgw_id = create['CustomerGateway']['CustomerGatewayId']
+        send(event, context, 'SUCCESS', {'CgwId': cgw_id})
+    except Exception as e:
+        send(event, context, 'FAILED', reason=str(e))
+`),
       });
-      vpnConnection.cfnOptions.deletionPolicy = cdk.CfnDeletionPolicy.RETAIN;
+
+      const getOrCreateCgw = new cdk.CustomResource(this, 'GetOrCreateCustomerGateway', {
+        serviceToken: getOrCreateCgwFn.functionArn,
+        properties: {
+          OnPremPublicIp: onPremPublicIp,
+          OnPremBgpAsn: onPremBgpAsn,
+          Region: this.region,
+        },
+        resourceType: 'Custom::GetOrCreateCustomerGateway',
+      });
+      getOrCreateCgw.node.addDependency(attachResource);
+
+      // Use the CGW ID from the custom resource (existing or newly created).
+      const customerGatewayId = getOrCreateCgw.getAttString('CgwId');
+
+      // Get-or-create VPN Connection (same "already exists" issue: reuse existing CGW+VGW connection).
+      const getOrCreateVpnRole = new iam.Role(this, 'GetOrCreateVpnRole', {
+        assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+        managedPolicies: [
+          iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+        ],
+        inlinePolicies: {
+          Ec2: new iam.PolicyDocument({
+            statements: [
+              new iam.PolicyStatement({
+                actions: [
+                  'ec2:DescribeVpnConnections',
+                  'ec2:CreateVpnConnection',
+                  'ec2:CreateVpnConnectionRoute',
+                  'ec2:CreateTags',
+                ],
+                resources: ['*'],
+              }),
+            ],
+          }),
+        },
+      });
+
+      const getOrCreateVpnFn = new lambda.Function(this, 'GetOrCreateVpnFn', {
+        runtime: lambda.Runtime.PYTHON_3_12,
+        handler: 'index.handler',
+        role: getOrCreateVpnRole,
+        timeout: cdk.Duration.seconds(60),
+        code: lambda.Code.fromInline(`
+import json, urllib.request, boto3
+
+def send(event, context, status, data=None, reason=''):
+    rid = (data.get('VpnConnectionId') if data else None) or event.get('PhysicalResourceId') or context.log_stream_name
+    body = json.dumps({'Status': status, 'Reason': reason or '', 'PhysicalResourceId': rid, 'StackId': event['StackId'],
+        'RequestId': event['RequestId'], 'LogicalResourceId': event['LogicalResourceId'], 'Data': data or {}}).encode()
+    req = urllib.request.Request(event['ResponseURL'], data=body, headers={'Content-Type': 'application/json'}, method='PUT')
+    urllib.request.urlopen(req, timeout=10)
+
+ROUTES = ['10.10.100.0/24', '10.10.110.0/24']
+
+def ensure_routes(ec2, vpn_id):
+    for cidr in ROUTES:
+        try:
+            ec2.create_vpn_connection_route(VpnConnectionId=vpn_id, DestinationCidrBlock=cidr)
+        except Exception as e:
+            if 'RouteAlreadyExists' not in str(e) and 'DuplicateRoute' not in str(e):
+                raise
+
+def handler(event, context):
+    props = event.get('ResourceProperties', {})
+    cgw_id, vgw_id = props.get('CgwId'), props.get('VgwId')
+    region = props.get('Region', 'us-west-2')
+    ec2 = boto3.client('ec2', region_name=region)
+    try:
+        if event['RequestType'] == 'Delete':
+            send(event, context, 'SUCCESS', {})
+            return
+        resp = ec2.describe_vpn_connections(Filters=[
+            {'Name': 'customer-gateway-id', 'Values': [cgw_id]},
+            {'Name': 'vpn-gateway-id', 'Values': [vgw_id]},
+            {'Name': 'state', 'Values': ['available', 'pending']},
+        ])
+        conns = resp.get('VpnConnections', [])
+        # Prefer an existing static VPN so we don't create duplicates when both BGP and static exist.
+        for c in conns:
+            if (c.get('Options') or {}).get('StaticRoutesOnly'):
+                vpn_id = c['VpnConnectionId']
+                ensure_routes(ec2, vpn_id)
+                send(event, context, 'SUCCESS', {'VpnConnectionId': vpn_id})
+                return
+        # No static VPN found (only BGP or none). create_vpn_connection_route() only works with static.
+        # Create a new static VPN; the old BGP VPN remains (user can delete it in the console after cutover).
+        create = ec2.create_vpn_connection(Type='ipsec.1', CustomerGatewayId=cgw_id, VpnGatewayId=vgw_id,
+            Options={'StaticRoutesOnly': True},
+            TagSpecifications=[{'ResourceType': 'vpn-connection', 'Tags': [{'Key': 'Name', 'Value': 'glitch-udmpro-vpn'}]}])
+        vpn_id = create['VpnConnection']['VpnConnectionId']
+        ensure_routes(ec2, vpn_id)
+        send(event, context, 'SUCCESS', {'VpnConnectionId': vpn_id})
+    except Exception as e:
+        send(event, context, 'FAILED', reason=str(e))
+`),
+      });
+
+      // StaticRoutesOnlyVersion: bump to force re-run so we create/use a static VPN (cannot convert BGP→static in place).
+      const getOrCreateVpn = new cdk.CustomResource(this, 'GetOrCreateVpnConnection', {
+        serviceToken: getOrCreateVpnFn.functionArn,
+        properties: {
+          CgwId: customerGatewayId,
+          VgwId: vpnGateway.ref,
+          Region: this.region,
+          StaticRoutesOnlyVersion: '2',
+        },
+        resourceType: 'Custom::GetOrCreateVpnConnection',
+      });
+      getOrCreateVpn.node.addDependency(getOrCreateCgw);
+
+      const vpnConnectionId = getOrCreateVpn.getAttString('VpnConnectionId');
 
       new cdk.CfnOutput(this, 'CustomerGatewayId', {
-        value: customerGateway.ref,
+        value: customerGatewayId,
         description: 'Customer Gateway ID — configure matching entry on UDM-Pro (VPN > Site-to-Site)',
       });
       new cdk.CfnOutput(this, 'VpnConnectionId', {
-        value: vpnConnection.ref,
+        value: vpnConnectionId,
         description: 'VPN Connection ID — download tunnel config from AWS Console for UDM-Pro',
       });
     }
@@ -554,6 +731,35 @@ export class GlitchGatewayStack extends cdk.Stack {
 
     const { agentCoreRuntimeArn, configTable } = props;
 
+    // protect-query Lambda: direct Postgres reader for UI Protect tab (bypasses LLM)
+    const protectDbSecret = secretsmanager.Secret.fromSecretNameV2(
+      this,
+      'ProtectDbSecret',
+      'glitch/protect-db',
+    );
+
+    const protectQueryFn = new lambda.Function(this, 'ProtectQueryFunction', {
+      functionName: 'glitch-protect-query',
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/protect-query'), {
+        bundling: {
+          image: lambda.Runtime.PYTHON_3_12.bundlingImage,
+          command: [
+            'bash', '-c',
+            'pip install -r requirements.txt -t /asset-output && cp -au . /asset-output',
+          ],
+        },
+      }),
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 256,
+      environment: {
+        PROTECT_DB_SECRET_NAME: 'glitch/protect-db',
+      },
+    });
+
+    protectDbSecret.grantRead(protectQueryFn);
+
     this.gatewayFunction = new lambda.Function(this, 'GatewayFunction', {
       functionName: 'glitch-gateway',
       runtime: lambda.Runtime.PYTHON_3_12,
@@ -564,8 +770,11 @@ export class GlitchGatewayStack extends cdk.Stack {
       environment: {
         CONFIG_TABLE_NAME: configTable.tableName,
         AGENTCORE_RUNTIME_ARN: agentCoreRuntimeArn,
+        PROTECT_QUERY_FUNCTION_NAME: protectQueryFn.functionName,
       },
     });
+
+    protectQueryFn.grantInvoke(this.gatewayFunction);
 
     configTable.grantReadWriteData(this.gatewayFunction);
 
@@ -1158,6 +1367,18 @@ export class AgentCoreStack extends cdk.Stack {
               `arn:aws:secretsmanager:${this.region}:${this.account}:secret:${SECRET_NAMES.API_KEYS}*`,
               `arn:aws:secretsmanager:${this.region}:${this.account}:secret:${SECRET_NAMES.TELEGRAM_BOT_TOKEN}*`,
               `arn:aws:secretsmanager:${this.region}:${this.account}:secret:${SECRET_NAMES.SSH_KEY}*`,
+              `arn:aws:secretsmanager:${this.region}:${this.account}:secret:${SECRET_NAMES.UNIFI_CONTROLLER}*`,
+              `arn:aws:secretsmanager:${this.region}:${this.account}:secret:${SECRET_NAMES.PIHOLE_API}*`,
+              `arn:aws:secretsmanager:${this.region}:${this.account}:secret:glitch/protect-db*`,
+            ],
+          }),
+          new iam.PolicyStatement({
+            sid: 'SsmProtectParamsRead',
+            effect: iam.Effect.ALLOW,
+            actions: ['ssm:GetParameter', 'ssm:GetParameters'],
+            resources: [
+              `arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/protect/*`,
+              `arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/protect-db/*`,
             ],
           }),
           new iam.PolicyStatement({
@@ -1401,6 +1622,7 @@ export class GlitchSentinelStack extends cdk.Stack {
               `arn:aws:secretsmanager:${this.region}:${this.account}:secret:${SECRET_NAMES.GITHUB_TOKEN}*`,
               `arn:aws:secretsmanager:${this.region}:${this.account}:secret:${SECRET_NAMES.PIHOLE_API}*`,
               `arn:aws:secretsmanager:${this.region}:${this.account}:secret:${SECRET_NAMES.UNIFI_CONTROLLER}*`,
+              `arn:aws:secretsmanager:${this.region}:${this.account}:secret:glitch/protect-db*`,
             ],
           }),
           // DynamoDB — read Telegram config for owner chat ID
@@ -1450,11 +1672,71 @@ export class GlitchSentinelStack extends cdk.Stack {
       }),
     });
 
-    // SSM parameters for Sentinel configuration
-    new ssm.StringParameter(this, 'SentinelGlitchRuntimeArnParam', {
-      parameterName: '/glitch/sentinel/glitch-runtime-arn',
-      stringValue: glitchRuntimeArn,
-      description: 'Glitch agent runtime ARN for Sentinel A2A invocation',
+    // Scheduled Sentinel Protect evaluation (EventBridge + Lambda)
+    const protectEvalRole = new iam.Role(this, 'SentinelProtectEvalRole', {
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+      description: 'Role for glitch-sentinel-protect-eval Lambda',
+    });
+    protectEvalRole.addManagedPolicy(
+      iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole')
+    );
+    protectEvalRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'SsmSentinelArn',
+        effect: iam.Effect.ALLOW,
+        actions: ['ssm:GetParameter'],
+        resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/sentinel/runtime-arn`],
+      })
+    );
+    protectEvalRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'InvokeSentinelRuntime',
+        effect: iam.Effect.ALLOW,
+        actions: ['bedrock-agentcore:InvokeAgentRuntime'],
+        resources: [`arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`],
+        conditions: { StringLike: { 'aws:ResourceTag/Name': 'Sentinel*' } },
+      })
+    );
+    const protectEvalFn = new lambda.Function(this, 'SentinelProtectEvalFunction', {
+      functionName: 'glitch-sentinel-protect-eval',
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/sentinel-protect-eval')),
+      timeout: cdk.Duration.seconds(120),
+      memorySize: 128,
+      role: protectEvalRole,
+    });
+    new events.Rule(this, 'SentinelProtectEvalSchedule', {
+      schedule: events.Schedule.rate(cdk.Duration.minutes(15)),
+      targets: [new targets.LambdaFunction(protectEvalFn)],
+      description: 'Invoke Sentinel every 15 min for Protect camera evaluation',
+    });
+
+    // SSM parameters for Sentinel configuration.
+    // Use AwsCustomResource with PutParameter Overwrite so we never fail with "parameter already exists"
+    // (e.g. after stack re-create or param created outside the stack).
+    new cr.AwsCustomResource(this, 'SentinelGlitchRuntimeArnParam', {
+      onUpdate: {
+        service: 'SSM',
+        action: 'putParameter',
+        parameters: {
+          Name: '/glitch/sentinel/glitch-runtime-arn',
+          Value: glitchRuntimeArn,
+          Type: 'String',
+          Overwrite: true,
+          Description: 'Glitch agent runtime ARN for Sentinel A2A invocation',
+        },
+        physicalResourceId: cr.PhysicalResourceId.of('/glitch/sentinel/glitch-runtime-arn'),
+      },
+      policy: cr.AwsCustomResourcePolicy.fromStatements([
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ['ssm:PutParameter'],
+          resources: [
+            `arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/sentinel/glitch-runtime-arn`,
+          ],
+        }),
+      ]),
     });
 
     new ssm.StringParameter(this, 'SentinelMonitoredLogGroupsParam', {
@@ -1464,6 +1746,7 @@ export class GlitchSentinelStack extends cdk.Stack {
         '/aws/lambda/glitch-telegram-webhook',
         '/aws/lambda/glitch-gateway',
         '/aws/lambda/glitch-agentcore-keepalive',
+        '/aws/lambda/glitch-sentinel-protect-eval',
         '/glitch/telemetry',
       ]),
       description: 'JSON array of CloudWatch log groups for Sentinel to monitor',

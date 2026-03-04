@@ -14,6 +14,11 @@ import type {
   InvocationResponse,
   StreamingInfo,
   StreamEvent,
+  ProtectEntitiesResponse,
+  ProtectEventsResponse,
+  ProtectAlertsResponse,
+  ProtectPatternsResponse,
+  ProtectSummary,
 } from '../types';
 
 // API base URL: use environment variable for Lambda Function URL, or default to relative path
@@ -99,6 +104,36 @@ export const api = {
 
   async getTelemetry(): Promise<TelemetryData> {
     return fetchJson<TelemetryData>(`${API_BASE}/telemetry`);
+  },
+
+  async getProtectSummary(): Promise<ProtectSummary> {
+    return fetchJson<ProtectSummary>(`${API_BASE}/protect/summary`);
+  },
+
+  async getProtectEntities(params?: { limit?: number }): Promise<ProtectEntitiesResponse> {
+    const q = params?.limit != null ? `?limit=${params.limit}` : '';
+    return fetchJson<ProtectEntitiesResponse>(`${API_BASE}/protect/entities${q}`);
+  },
+
+  async getProtectEvents(params?: { hours?: number; limit?: number }): Promise<ProtectEventsResponse> {
+    const sp = new URLSearchParams();
+    if (params?.hours != null) sp.set('hours', String(params.hours));
+    if (params?.limit != null) sp.set('limit', String(params.limit));
+    const q = sp.toString() ? `?${sp}` : '';
+    return fetchJson<ProtectEventsResponse>(`${API_BASE}/protect/events${q}`);
+  },
+
+  async getProtectAlerts(params?: { limit?: number; unack_only?: boolean }): Promise<ProtectAlertsResponse> {
+    const sp = new URLSearchParams();
+    if (params?.limit != null) sp.set('limit', String(params.limit));
+    if (params?.unack_only === true) sp.set('unack_only', '1');
+    const q = sp.toString() ? `?${sp}` : '';
+    return fetchJson<ProtectAlertsResponse>(`${API_BASE}/protect/alerts${q}`);
+  },
+
+  async getProtectPatterns(params?: { limit?: number }): Promise<ProtectPatternsResponse> {
+    const q = params?.limit != null ? `?limit=${params.limit}` : '';
+    return fetchJson<ProtectPatternsResponse>(`${API_BASE}/protect/patterns${q}`);
   },
 
   async getMCPServers(): Promise<MCPServersResponse> {

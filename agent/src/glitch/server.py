@@ -89,6 +89,11 @@ async def _handle_ui_api_request(api_request: UiApiRequest) -> dict:
         get_session_mode,
         put_session_mode,
         list_modes,
+        get_protect_summary,
+        get_protect_entities,
+        get_protect_events,
+        get_protect_alerts,
+        get_protect_patterns,
     )
 
     path = (api_request.get("path") or "").rstrip("/")
@@ -96,6 +101,7 @@ async def _handle_ui_api_request(api_request: UiApiRequest) -> dict:
         path = "/" + path[5:]
     method = api_request.get("method", "GET").upper()
     body = api_request.get("body")
+    query_params = api_request.get("query_params") or {}
 
     logger.info("UI API request: %s %s", method, path)
 
@@ -187,6 +193,40 @@ async def _handle_ui_api_request(api_request: UiApiRequest) -> dict:
                     return result.model_dump()
             return {"error": f"Invalid path: {path}"}
 
+        elif path.startswith("/protect/") and method == "GET":
+            def _int(name: str, default: int) -> int:
+                v = query_params.get(name)
+                if v is None:
+                    return default
+                try:
+                    return int(v) if isinstance(v, str) else int(v)
+                except (TypeError, ValueError):
+                    return default
+
+            def _bool(name: str, default: bool) -> bool:
+                v = query_params.get(name)
+                if v is None:
+                    return default
+                if isinstance(v, bool):
+                    return v
+                if isinstance(v, str):
+                    return v.lower() in ("1", "true", "yes")
+                return bool(v)
+
+            if path == "/protect/summary":
+                result = await get_protect_summary()
+            elif path == "/protect/entities":
+                result = await get_protect_entities(limit=_int("limit", 50))
+            elif path == "/protect/events":
+                result = await get_protect_events(hours=_int("hours", 24), limit=_int("limit", 30))
+            elif path == "/protect/alerts":
+                result = await get_protect_alerts(limit=_int("limit", 20), unack_only=_bool("unack_only", False))
+            elif path == "/protect/patterns":
+                result = await get_protect_patterns(limit=_int("limit", 20))
+            else:
+                return {"error": f"Unknown protect endpoint: {path}"}
+            return result.model_dump()
+
         else:
             return {"error": f"Unknown API endpoint: {method} {path}"}
 
@@ -272,7 +312,6 @@ def _setup_ui_routes() -> None:
     
     logger.info("_setup_ui_routes: complete")
     sys.stdout.flush()
-    app.add_route("/debug/routes", debug_routes, methods=["GET"])
 
 
 @app.entrypoint

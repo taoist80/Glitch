@@ -1,7 +1,7 @@
 """SOUL.md load/save from S3 and update_soul tool for persistent personality.
 
-When GLITCH_SOUL_S3_BUCKET is set (or SSM /glitch/soul/s3-bucket when using CDK stack),
-the agent loads SOUL from S3 and can update it via the update_soul tool.
+Bucket is resolved by: GLITCH_SOUL_S3_BUCKET env, then SSM /glitch/soul/s3-bucket,
+then derived from AWS account+region (glitch-agent-state-{account}-{region}).
 """
 
 import logging
@@ -9,6 +9,8 @@ import os
 from typing import Tuple
 
 from strands import tool
+
+from glitch.aws_utils import get_client
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +34,7 @@ def _get_soul_s3_config_from_ssm() -> Tuple[str | None, str]:
     if _ssm_soul_config is not None:
         return _ssm_soul_config
     try:
-        import boto3
-        client = boto3.client("ssm")
+        client = get_client("ssm")
         resp = client.get_parameters(
             Names=[SSM_SOUL_BUCKET, SSM_SOUL_KEY],
             WithDecryption=False,
@@ -41,26 +42,53 @@ def _get_soul_s3_config_from_ssm() -> Tuple[str | None, str]:
         params = {p["Name"]: p["Value"] for p in resp.get("Parameters", []) if "Value" in p}
         bucket = (params.get(SSM_SOUL_BUCKET) or "").strip() or None
         key = (params.get(SSM_SOUL_KEY) or DEFAULT_SOUL_KEY).strip() or DEFAULT_SOUL_KEY
-        _ssm_soul_config = (bucket, key)
         if bucket:
             logger.info("SOUL S3 config from SSM: bucket=%s key=%s", bucket, key)
-        return _ssm_soul_config
+            _ssm_soul_config = (bucket, key)  # only cache when we have a real bucket
+        return (bucket, key)
     except Exception as e:
         logger.debug("Could not read SOUL S3 config from SSM: %s", e)
-        _ssm_soul_config = (None, DEFAULT_SOUL_KEY)
-        return _ssm_soul_config
+        # Don't cache a failure — allow retry and identity fallback on next call
+        return (None, DEFAULT_SOUL_KEY)
+
+
+def _get_soul_bucket_from_identity() -> str | None:
+    """Derive soul bucket name from current AWS account and region (same as GlitchStorageStack).
+
+    Allows the agent to find the bucket without env or SSM when running in the expected account.
+    """
+    try:
+        sts = get_client("sts")
+        identity = sts.get_caller_identity()
+        account = identity.get("Account")
+        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-west-2"
+        if account and region:
+            bucket = f"glitch-agent-state-{account}-{region}"
+            logger.info("SOUL S3 bucket derived from identity: %s", bucket)
+            return bucket
+    except Exception as e:
+        logger.debug("Could not derive soul bucket from identity: %s", e)
+    return None
 
 
 def get_soul_s3_config() -> Tuple[str | None, str]:
     """Return (bucket, key) for SOUL in S3, or (None, key) if not configured.
 
-    Precedence: GLITCH_SOUL_S3_BUCKET env, then SSM /glitch/soul/s3-bucket (when CDK stack is used).
+    Precedence:
+    1. GLITCH_SOUL_S3_BUCKET env (and optionally GLITCH_SOUL_S3_KEY)
+    2. SSM /glitch/soul/s3-bucket (when GlitchStorageStack is deployed)
+    3. Derived from AWS account + region: glitch-agent-state-{account}-{region}
     """
-    bucket = os.environ.get("GLITCH_SOUL_S3_BUCKET") or None
-    key = os.environ.get("GLITCH_SOUL_S3_KEY", DEFAULT_SOUL_KEY).strip() or DEFAULT_SOUL_KEY
+    bucket = (os.environ.get("GLITCH_SOUL_S3_BUCKET") or "").strip() or None
+    key = (os.environ.get("GLITCH_SOUL_S3_KEY") or DEFAULT_SOUL_KEY).strip() or DEFAULT_SOUL_KEY
     if bucket:
         return bucket, key
-    return _get_soul_s3_config_from_ssm()
+    bucket, key = _get_soul_s3_config_from_ssm()
+    if bucket:
+        return bucket, key
+    # Fallback: same naming convention as GlitchStorageStack
+    derived = _get_soul_bucket_from_identity()
+    return (derived, key) if derived else (None, key)
 
 
 def get_poet_soul_s3_config() -> Tuple[str | None, str]:
@@ -82,8 +110,7 @@ def _get_poet_soul_s3_key_from_ssm() -> str:
     if _ssm_poet_soul_key is not None:
         return _ssm_poet_soul_key
     try:
-        import boto3
-        client = boto3.client("ssm")
+        client = get_client("ssm")
         resp = client.get_parameter(Name=SSM_POET_SOUL_KEY, WithDecryption=False)
         _ssm_poet_soul_key = (resp.get("Parameter", {}).get("Value") or DEFAULT_POET_SOUL_KEY).strip() or DEFAULT_POET_SOUL_KEY
         return _ssm_poet_soul_key
@@ -98,8 +125,7 @@ def _get_story_book_s3_key_from_ssm() -> str:
     if _ssm_story_book_key is not None:
         return _ssm_story_book_key
     try:
-        import boto3
-        client = boto3.client("ssm")
+        client = get_client("ssm")
         resp = client.get_parameter(Name=SSM_STORY_BOOK_KEY, WithDecryption=False)
         _ssm_story_book_key = (resp.get("Parameter", {}).get("Value") or DEFAULT_STORY_BOOK_KEY).strip() or DEFAULT_STORY_BOOK_KEY
         return _ssm_story_book_key
@@ -127,9 +153,8 @@ def load_story_book_from_s3() -> str:
     if not bucket:
         return ""
     try:
-        import boto3
         from botocore.exceptions import ClientError
-        client = boto3.client("s3")
+        client = get_client("s3")
         resp = client.get_object(Bucket=bucket, Key=key)
         body = resp["Body"].read()
         return body.decode("utf-8")
@@ -151,9 +176,8 @@ def save_story_book_to_s3(content: str) -> Tuple[bool, str]:
         logger.warning("GLITCH_SOUL_S3_BUCKET not set, cannot save story-book to S3")
         return False, "no_bucket"
     try:
-        import boto3
         from botocore.exceptions import ClientError
-        client = boto3.client("s3")
+        client = get_client("s3")
         client.put_object(
             Bucket=bucket,
             Key=key,
@@ -181,9 +205,8 @@ def load_soul_from_s3() -> str:
     if not bucket:
         return ""
     try:
-        import boto3
         from botocore.exceptions import ClientError
-        client = boto3.client("s3")
+        client = get_client("s3")
         resp = client.get_object(Bucket=bucket, Key=key)
         body = resp["Body"].read()
         return body.decode("utf-8")
@@ -205,9 +228,8 @@ def save_soul_to_s3(content: str) -> Tuple[bool, str]:
         logger.warning("GLITCH_SOUL_S3_BUCKET not set, cannot save SOUL to S3")
         return False, "no_bucket"
     try:
-        import boto3
         from botocore.exceptions import ClientError
-        client = boto3.client("s3")
+        client = get_client("s3")
         client.put_object(
             Bucket=bucket,
             Key=key,
@@ -254,9 +276,11 @@ def update_soul(contents: str) -> str:
     bucket, _ = get_soul_s3_config()
     if not bucket:
         return (
-            "SOUL update skipped: S3 is not configured. Set GLITCH_SOUL_S3_BUCKET (and optional "
-            "GLITCH_SOUL_S3_KEY) to persist SOUL changes, or deploy the CDK TelegramWebhookStack so "
-            "the runtime can read bucket/key from SSM (/glitch/soul/s3-bucket). Until then, edits apply only to this session."
+            "SOUL update skipped: S3 is not configured. The tool checks: (1) GLITCH_SOUL_S3_BUCKET env, "
+            "(2) SSM /glitch/soul/s3-bucket (GlitchStorageStack), (3) bucket derived from AWS account+region. "
+            "None were available. Set the env var, deploy GlitchStorageStack for SSM, or ensure the runtime "
+            "role has sts:GetCallerIdentity so the fallback can find glitch-agent-state-{account}-{region}. "
+            "Until then, edits apply only to this session."
         )
     if err == "NoSuchBucket":
         return (

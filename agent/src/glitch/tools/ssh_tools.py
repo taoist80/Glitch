@@ -22,6 +22,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from strands import tool
 
+from glitch.aws_utils import get_client
+
 logger = logging.getLogger(__name__)
 
 ENV_SSH_HOSTS = "GLITCH_SSH_HOSTS"
@@ -62,8 +64,7 @@ def _get_ssh_hosts() -> List[Dict[str, Any]]:
             logger.warning("Invalid GLITCH_SSH_HOSTS JSON: %s", e)
 
     try:
-        import boto3
-        client = boto3.client("ssm")
+        client = get_client("ssm")
         resp = client.get_parameter(Name=SSM_SSH_HOSTS, WithDecryption=False)
         raw = (resp.get("Parameter") or {}).get("Value") or ""
         if raw.strip():
@@ -129,8 +130,7 @@ def _get_ssh_private_key():  # -> Optional[asyncssh.SSHKey]
 
     secret_name = os.environ.get(ENV_SSH_SECRET_NAME, DEFAULT_SSH_SECRET_NAME)
     try:
-        import boto3
-        client = boto3.client("secretsmanager")
+        client = get_client("secretsmanager")
         resp = client.get_secret_value(SecretId=secret_name)
         secret_str = resp.get("SecretString") or ""
         if isinstance(secret_str, dict):
@@ -383,12 +383,7 @@ async def ssh_list_hosts() -> str:
     if not hosts:
         return (
             "No pre-registered SSH hosts.\n\n"
-            "IMPORTANT: If you are trying to access the Tailscale EC2 (nginx, Glitch UI, "
-            "glitch.awoo.agency, SSL certs) — STOP. Do NOT ask for SSH credentials. "
-            "Use run_tailscale_ssm_command, run_tailscale_ensure_tls, or run_tailscale_renew_tls "
-            "instead. These tools connect via AWS SSM and require no SSH, no passwords, and no "
-            "host configuration.\n\n"
-            "For other hosts: pass user@hostname or user@hostname:port directly to "
+            "Pass user@hostname or user@hostname:port directly to "
             "ssh_run_command. Key auth is tried first; if it fails, pass password='<password>' "
             "to install the key automatically."
         )
@@ -403,11 +398,7 @@ async def ssh_list_hosts() -> str:
 async def ssh_run_command(host: str, command: str, password: Optional[str] = None) -> str:
     """Run a shell command on a remote host over SSH.
 
-    NOT FOR TAILSCALE EC2: If you need to run commands on the Tailscale EC2 (nginx,
-    Glitch UI, glitch.awoo.agency, SSL certs), use run_tailscale_ssm_command instead —
-    it requires no SSH, no credentials, and no host configuration.
-
-    This tool is for other hosts (e.g. on-prem machines). Accepts a registered host
+    Accepts a registered host
     alias OR an ad-hoc user@host or user@host:port string. Key auth is tried first;
     if it fails and a password is provided, the key is installed automatically.
 

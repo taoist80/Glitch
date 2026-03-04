@@ -1,64 +1,33 @@
 import * as cdk from 'aws-cdk-lib';
 import { Template, Match } from 'aws-cdk-lib/assertions';
-import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { AgentCoreStack } from '../lib/stack';
 
 describe('AgentCoreStack', () => {
   let app: cdk.App;
-  let vpcStack: cdk.Stack;
-  let vpc: ec2.Vpc;
-  let agentCoreSg: ec2.SecurityGroup;
   let runtimeRole: iam.Role;
 
   beforeEach(() => {
     app = new cdk.App();
-    vpcStack = new cdk.Stack(app, 'VpcStack', {
+    const roleStack = new cdk.Stack(app, 'RoleStack', {
       env: { account: '123456789012', region: 'us-west-2' },
     });
-    vpc = new ec2.Vpc(vpcStack, 'TestVpc', {
-      maxAzs: 2,
-      natGateways: 0,
-      subnetConfiguration: [
-        { name: 'Public', subnetType: ec2.SubnetType.PUBLIC, cidrMask: 24 },
-        { name: 'Private', subnetType: ec2.SubnetType.PRIVATE_ISOLATED, cidrMask: 24 },
-      ],
-    });
-    agentCoreSg = new ec2.SecurityGroup(vpcStack, 'AgentCoreSg', {
-      vpc,
-      description: 'AgentCore SG',
-      allowAllOutbound: false,
-    });
-    agentCoreSg.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443), 'HTTPS');
-    
-    runtimeRole = new iam.Role(vpcStack, 'RuntimeRole', {
+    runtimeRole = new iam.Role(roleStack, 'RuntimeRole', {
       assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
     });
   });
 
   function createStack() {
     return new AgentCoreStack(app, 'TestAgentCoreStack', {
-      vpc,
-      agentCoreSecurityGroup: agentCoreSg,
       runtimeRole,
       env: { account: '123456789012', region: 'us-west-2' },
     });
   }
 
-  describe('Security Group', () => {
-    test('creates exactly zero security groups (SG is passed in from FoundationStack)', () => {
-      const stack = createStack();
-      const template = Template.fromStack(stack);
-
-      template.resourceCountIs('AWS::EC2::SecurityGroup', 0);
-    });
-  });
-
   describe('IAM Role', () => {
     test('does not create a role (role is passed in from FoundationStack)', () => {
       const stack = createStack();
       const template = Template.fromStack(stack);
-
       template.resourceCountIs('AWS::IAM::Role', 0);
     });
 
@@ -132,13 +101,7 @@ describe('AgentCoreStack', () => {
               Effect: 'Allow',
               Action: Match.arrayWith([
                 'bedrock-agentcore:CreateEvent',
-                'bedrock-agentcore:GetEvent',
-                'bedrock-agentcore:ListEvents',
-                'bedrock-agentcore:ListSessions',
-                'bedrock-agentcore:CreateMemoryRecord',
-                'bedrock-agentcore:GetMemoryRecord',
                 'bedrock-agentcore:ListMemoryRecords',
-                'bedrock-agentcore:RetrieveMemoryRecords',
               ]),
             }),
           ]),
@@ -175,7 +138,7 @@ describe('AgentCoreStack', () => {
         PolicyDocument: {
           Statement: Match.arrayWith([
             Match.objectLike({
-              Sid: 'SecretsManagerAccess',
+              Sid: 'SecretsManagerRead',
               Effect: 'Allow',
               Action: 'secretsmanager:GetSecretValue',
             }),
@@ -189,22 +152,7 @@ describe('AgentCoreStack', () => {
     test('outputs agent runtime role ARN', () => {
       const stack = createStack();
       const template = Template.fromStack(stack);
-
       template.hasOutput('AgentRuntimeRoleArn', {});
-    });
-
-    test('outputs security group ID', () => {
-      const stack = createStack();
-      const template = Template.fromStack(stack);
-
-      template.hasOutput('AgentCoreSecurityGroupId', {});
-    });
-
-    test('outputs VPC config JSON', () => {
-      const stack = createStack();
-      const template = Template.fromStack(stack);
-
-      template.hasOutput('VpcConfigForAgentCore', {});
     });
   });
 });

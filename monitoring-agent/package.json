@@ -1,0 +1,7 @@
+{
+  "name": "monitoring-agent",
+  "private": true,
+  "scripts": {
+    "build": "echo 'monitoring-agent: no build step'"
+  }
+}

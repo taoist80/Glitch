@@ -33,7 +33,6 @@ if os.path.isfile(_env_ssh):
 
 import sys
 import time
-import boto3
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -71,11 +70,10 @@ def get_telegram_bot_token() -> Optional[str]:
         Bot token string if available, None otherwise
     """
     secret_name = os.getenv("GLITCH_TELEGRAM_SECRET_NAME", "glitch/telegram-bot-token")
-    region = os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "us-west-2"))
     
     try:
-        session = boto3.session.Session()
-        client = session.client(service_name="secretsmanager", region_name=region)
+        from glitch.aws_utils import get_client
+        client = get_client("secretsmanager")
         
         response = client.get_secret_value(SecretId=secret_name)
         
@@ -225,10 +223,10 @@ def get_webhook_url() -> Optional[str]:
     url = os.getenv("GLITCH_TELEGRAM_WEBHOOK_URL")
     if url:
         return url
-    region = os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "us-west-2"))
     function_name = os.getenv("GLITCH_TELEGRAM_WEBHOOK_FUNCTION_NAME", "glitch-telegram-webhook")
     try:
-        lambda_client = boto3.client("lambda", region_name=region)
+        from glitch.aws_utils import get_client
+        lambda_client = get_client("lambda")
         resp = lambda_client.get_function_url_config(FunctionName=function_name)
         return resp.get("FunctionUrl")
     except Exception as e:

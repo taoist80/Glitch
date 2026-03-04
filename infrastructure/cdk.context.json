@@ -7,5 +7,6 @@
   ],
   "acknowledged-issue-numbers": [
     34892
-  ]
+  ],
+  "ssm:account=999776382415:parameterName=/glitch/waf/allowed-ipv4:region=us-east-1": "44.203.71.171/32"
 }

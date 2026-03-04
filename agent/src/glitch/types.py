@@ -38,6 +38,7 @@ class UiApiRequest(TypedDict, total=False):
     path: str
     method: str
     body: Optional[Dict[str, Any]]
+    query_params: Optional[Dict[str, Any]]  # e.g. limit, hours, unack_only for /protect/*
 
 
 # =============================================================================
@@ -262,26 +263,6 @@ class StreamingInfo(TypedDict, total=False):
 
 
 # =============================================================================
-# Tool Registry Types
-# =============================================================================
-
-
-class ToolGroupInfo(TypedDict):
-    """Information about a tool group in the registry."""
-    name: str
-    tool_count: int
-    enabled: bool
-
-
-class ToolRegistryStatus(TypedDict):
-    """Status of the tool registry."""
-    total_tools: int
-    enabled_tools: int
-    groups: List[ToolGroupInfo]
-    disabled_groups: List[str]
-
-
-# =============================================================================
 # Enums
 # =============================================================================
 
@@ -415,3 +396,5 @@ def create_gateway_response(status: int, body: Any) -> GatewayResponse:
         body=body if isinstance(body, str) else json.dumps(body),
         headers={"Content-Type": "application/json"},
     )
+
+

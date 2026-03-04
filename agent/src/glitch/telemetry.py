@@ -126,9 +126,8 @@ def _get_usage(metrics: Optional[InvocationMetrics], key: str) -> int:
 def _get_logs_client():
     """Lazy-init boto3 CloudWatch Logs client (region required in AgentCore)."""
     try:
-        import boto3
-        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-west-2"
-        return boto3.client("logs", region_name=region)
+        from glitch.aws_utils import get_client
+        return get_client("logs")
     except Exception as e:
         logger.debug("Failed to create CloudWatch Logs client: %s", e)
         return None
@@ -275,8 +274,8 @@ def query_cloudwatch_telemetry(
     delta = _PERIOD_SECONDS.get(period)
     if not delta:
         return []
-    end_ms = int(time.time() * 1000)
-    start_ms = end_ms - (delta * 1000)
+    end_sec = int(time.time())
+    start_sec = end_sec - delta
     query = """
     fields @timestamp, @message
     | filter @message like /"event_type":\\s*"invocation_metrics"/
@@ -286,8 +285,8 @@ def query_cloudwatch_telemetry(
     try:
         resp = client.start_query(
             logGroupName=log_group,
-            startTime=start_ms,
-            endTime=end_ms,
+            startTime=start_sec,
+            endTime=end_sec,
             queryString=query.strip(),
         )
         query_id = resp.get("queryId")
@@ -310,7 +309,18 @@ def query_cloudwatch_telemetry(
                     if msg and ts:
                         try:
                             data = json.loads(msg)
-                            ts_float = int(ts) / 1000.0 if len(ts) == 13 else float(ts)
+                            # CloudWatch Logs Insights returns @timestamp as an ISO-8601 string
+                            # like "2026-02-28 12:34:56.789" (UTC, space-separated, optional ms).
+                            # Fall back to treating as a numeric string for any other format.
+                            try:
+                                ts_float = datetime.strptime(ts.strip(), "%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=timezone.utc).timestamp()
+                            except ValueError:
+                                try:
+                                    ts_float = datetime.strptime(ts.strip(), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp()
+                                except ValueError:
+                                    # Numeric fallback: milliseconds if 13 digits, else seconds
+                                    ts_numeric = float(ts)
+                                    ts_float = ts_numeric / 1000.0 if ts_numeric > 1e12 else ts_numeric
                             token_usage = data.get("token_usage") or {}
                             metrics: InvocationMetrics = {
                                 "duration_seconds": data.get("duration_seconds", 0),
@@ -371,7 +381,7 @@ def get_telemetry_for_period(
     cutoff = now - delta
     entries = [e for e in _telemetry_history if (e.get("timestamp") or 0) >= cutoff]
     if include_cloudwatch:
-        cw = query_cloudwatch_telemetry(period, None)
+        cw = query_cloudwatch_telemetry(period, os.environ.get("GLITCH_TELEMETRY_LOG_GROUP"))
         seen_ts: Dict[float, bool] = {}
         for e in cw:
             ts = e.get("timestamp") or 0

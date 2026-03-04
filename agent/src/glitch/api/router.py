@@ -3,6 +3,7 @@
 Provides endpoints for the dashboard UI to query agent state and configuration.
 """
 
+import json
 import logging
 import os
 from typing import Optional, TYPE_CHECKING
@@ -33,6 +34,11 @@ from glitch.api.types import (
     SessionModeUpdate,
     ModesResponse,
     ModeInfo,
+    ProtectSummaryResponse,
+    ProtectEntitiesResponse,
+    ProtectEventsResponse,
+    ProtectAlertsResponse,
+    ProtectPatternsResponse,
 )
 
 if TYPE_CHECKING:
@@ -651,7 +657,7 @@ async def get_skills() -> SkillsResponse:
         reg = getattr(agent, "skill_registry", None)
         if reg is None:
             return SkillsResponse(skills=[], total=0)
-        items = getattr(reg, "_skills", {}) or {}
+        items = getattr(reg, "skills_by_id", {}) or {}
         for skill_id, skill in items.items():
             metadata = getattr(skill, "metadata", None)
             if not metadata:
@@ -679,7 +685,7 @@ async def toggle_skill(skill_id: str, request: SkillToggleRequest) -> SkillToggl
     global _disabled_skills
     agent = _get_agent()
     
-    if skill_id not in agent.skill_registry._skills:
+    if skill_id not in agent.skill_registry.skills_by_id:
         raise HTTPException(status_code=404, detail=f"Skill '{skill_id}' not found")
     
     if request.enabled:
@@ -778,6 +784,67 @@ async def list_modes() -> ModesResponse:
             ModeInfo(id=MODE_POET, name="Poet"),
         ]
     )
+
+
+def _invoke_protect_query(path: str, query_params: dict) -> dict:
+    """Invoke the protect-query Lambda directly, same as the gateway does."""
+    import json
+    import boto3
+    import os
+
+    fn = os.environ.get("PROTECT_QUERY_FUNCTION_NAME", "")
+    if not fn:
+        raise HTTPException(status_code=503, detail="PROTECT_QUERY_FUNCTION_NAME not configured")
+    try:
+        client = boto3.client("lambda", region_name=os.environ.get("AWS_REGION", "us-west-2"))
+        payload = json.dumps({"path": path, "queryStringParameters": query_params or {}}).encode()
+        response = client.invoke(FunctionName=fn, InvocationType="RequestResponse", Payload=payload)
+        result = json.loads(response["Payload"].read())
+        body = result.get("body", "{}")
+        data = json.loads(body) if isinstance(body, str) else body
+        if result.get("statusCode", 200) >= 400:
+            raise HTTPException(status_code=result["statusCode"], detail=data.get("error", "protect-query error"))
+        return data
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("protect-query Lambda invoke failed: %s", e)
+        raise HTTPException(status_code=503, detail=f"protect-query: {e}")
+
+
+@router.get("/protect/summary", response_model=ProtectSummaryResponse)
+async def get_protect_summary() -> ProtectSummaryResponse:
+    """Get Protect summary stats: entities, events (24h), unack alerts, cameras."""
+    data = _invoke_protect_query("/api/protect/summary", {})
+    return ProtectSummaryResponse(**data)
+
+
+@router.get("/protect/entities", response_model=ProtectEntitiesResponse)
+async def get_protect_entities(limit: int = 50) -> ProtectEntitiesResponse:
+    """Get known entities (people/vehicles) from the Protect DB."""
+    data = _invoke_protect_query("/api/protect/entities", {"limit": str(limit)})
+    return ProtectEntitiesResponse(**data)
+
+
+@router.get("/protect/events", response_model=ProtectEventsResponse)
+async def get_protect_events(hours: int = 24, limit: int = 30) -> ProtectEventsResponse:
+    """Get recent Protect events."""
+    data = _invoke_protect_query("/api/protect/events", {"hours": str(hours), "limit": str(limit)})
+    return ProtectEventsResponse(**data)
+
+
+@router.get("/protect/alerts", response_model=ProtectAlertsResponse)
+async def get_protect_alerts(limit: int = 20, unack_only: bool = False) -> ProtectAlertsResponse:
+    """Get Protect alerts."""
+    data = _invoke_protect_query("/api/protect/alerts", {"limit": str(limit), "unack_only": str(unack_only).lower()})
+    return ProtectAlertsResponse(**data)
+
+
+@router.get("/protect/patterns", response_model=ProtectPatternsResponse)
+async def get_protect_patterns(limit: int = 20) -> ProtectPatternsResponse:
+    """Get behaviour patterns from the Protect DB."""
+    data = _invoke_protect_query("/api/protect/patterns", {"limit": str(limit)})
+    return ProtectPatternsResponse(**data)
 
 
 def add_cors_middleware(app) -> None:
