@@ -1,44 +1,48 @@
-"""Custom resource Lambda: resolves the current public IP via the Porkbun ping API.
+"""Custom resource Lambda: resolves the current public IP for the WAF allowlist.
 
-CloudFormation calls this on Create/Update. It reads the Porkbun API credentials from
-Secrets Manager (secret name passed as PORKBUN_SECRET_NAME env var or resource property),
-calls POST /ping, and returns the IP as a CloudFormation attribute "IpAddress".
+Strategy (in order):
+1. If DdnsHostname is provided as a resource property, resolve it via DNS.
+   This is the preferred path: your DDNS record (e.g. home.awoo.agency) always
+   reflects your current home IP and is maintained by porkbun-ddns-update.sh.
+2. Fall back to calling the Porkbun ping API with your API keys.
+   Note: when running inside AWS Lambda the ping API returns an AWS egress IP,
+   not your home IP — only use this fallback if DDNS is not configured.
 
-The IP is also written to SSM (/glitch/waf/allowed-ipv4) so subsequent CDK synths can
-read it via valueFromLookup without calling this Lambda again.
+The resolved IP is written to SSM (/glitch/waf/allowed-ipv4) and returned as
+the CloudFormation attribute "IpCidr" so the WAF IP set stays current on every deploy.
 """
 
 import json
 import os
+import socket
 import urllib.request
 import urllib.error
 import boto3
 
-PORKBUN_PING_URL = "https://api.porkbun.com/api/json/v3/ping"
 SSM_IPV4_PARAM = "/glitch/waf/allowed-ipv4"
+PORKBUN_PING_URL = "https://api.porkbun.com/api/json/v3/ping"
+
+
+def _resolve_ddns(hostname: str) -> str:
+    """Resolve a DDNS hostname to its current IPv4 address via DNS."""
+    results = socket.getaddrinfo(hostname, None, socket.AF_INET)
+    if not results:
+        raise RuntimeError(f"DNS resolution returned no results for {hostname!r}")
+    return results[0][4][0]
 
 
 def _get_porkbun_keys(secret_name: str, region: str) -> tuple[str, str]:
-    # The secret lives in us-west-2 regardless of which region this Lambda runs in.
     secret_region = os.environ.get("PORKBUN_SECRET_REGION", region)
     client = boto3.client("secretsmanager", region_name=secret_region)
     resp = client.get_secret_value(SecretId=secret_name)
     secret = json.loads(resp["SecretString"])
     api_key = (
-        secret.get("apikey")
-        or secret.get("api_key")
-        or secret.get("apiKey")
-        or secret.get("API_KEY")
-        or secret.get("key")
-        or ""
+        secret.get("apikey") or secret.get("api_key") or secret.get("apiKey")
+        or secret.get("API_KEY") or secret.get("key") or ""
     )
     secret_key = (
-        secret.get("secretapikey")
-        or secret.get("secret_api_key")
-        or secret.get("secretApiKey")
-        or secret.get("SECRET_KEY")
-        or secret.get("secret")
-        or ""
+        secret.get("secretapikey") or secret.get("secret_api_key") or secret.get("secretApiKey")
+        or secret.get("SECRET_KEY") or secret.get("secret") or ""
     )
     if not api_key or not secret_key:
         raise ValueError(f"Porkbun API keys not found in secret {secret_name!r}")
@@ -103,15 +107,24 @@ def handler(event: dict, context) -> None:
 
     try:
         props = event.get("ResourceProperties", {})
-        secret_name = props.get("PorkbunSecretName") or os.environ.get("PORKBUN_SECRET_NAME", "glitch/porkbun-api")
         region = os.environ.get("AWS_REGION", "us-east-1")
+        ddns_hostname = props.get("DdnsHostname") or os.environ.get("DDNS_HOSTNAME", "")
 
-        api_key, secret_key = _get_porkbun_keys(secret_name, region)
-        ip = _ping_porkbun(api_key, secret_key)
+        if ddns_hostname:
+            # Preferred: resolve DDNS hostname — always reflects current home IP
+            print(f"Resolving DDNS hostname: {ddns_hostname}")
+            ip = _resolve_ddns(ddns_hostname)
+            print(f"DDNS resolved: {ddns_hostname} -> {ip}")
+        else:
+            # Fallback: Porkbun ping API (returns Lambda's AWS IP when run inside AWS)
+            print("No DDNS hostname; falling back to Porkbun ping API")
+            secret_name = props.get("PorkbunSecretName") or os.environ.get("PORKBUN_SECRET_NAME", "glitch/porkbun-api")
+            api_key, secret_key = _get_porkbun_keys(secret_name, region)
+            ip = _ping_porkbun(api_key, secret_key)
+
         ip_cidr = f"{ip}/32"
-
         _write_ssm(ip_cidr, region)
-        print(f"Resolved IP: {ip_cidr}")
+        print(f"IP written to SSM: {ip_cidr}")
 
         _send_response(event, context, "SUCCESS", {"IpAddress": ip, "IpCidr": ip_cidr})
     except Exception as exc:

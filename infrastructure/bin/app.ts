@@ -128,12 +128,16 @@ new ssm.StringParameter(telegramSsmStack, 'SsmTelegramWebhookUrl', {
 telegramSsmStack.addDependency(telegramWebhookStack);
 
 // Edge stack (us-east-1): WAF WebACL for CloudFront IP allowlisting.
-// IPv4 is auto-discovered from Porkbun DDNS at every deploy — no manual IP passing needed.
-// To override (e.g. add a second IP): -c allowedIpAddresses=1.2.3.4/32,5.6.7.8/32
+// IP is resolved at deploy time by resolving ddnsHostname via DNS (home.awoo.agency → current home IP).
+// DDNS hostname and cert ARN are baked into cdk.context.json — no manual -c flags needed.
+// To temporarily override the IP: -c allowedIpAddresses=1.2.3.4/32
 const allowedIpAddresses = ((app.node.tryGetContext('allowedIpAddresses') as string) ?? '')
   .split(',')
   .map(s => s.trim())
   .filter(Boolean);
+
+const ddnsHostname = (app.node.tryGetContext('ddnsHostname') as string | undefined) ?? 'home.awoo.agency';
+const cloudfrontCertArn = app.node.tryGetContext('cloudfrontCertArn') as string | undefined;
 
 // crossRegionReferences: true allows CDK to pass GlitchEdgeStack (us-east-1) outputs
 // to GlitchUiHostingStack (us-west-2) via SSM custom resources at synth time.
@@ -141,6 +145,7 @@ const edgeStack = new GlitchEdgeStack(app, 'GlitchEdgeStack', {
   env: { account: env.account, region: 'us-east-1' },
   crossRegionReferences: true,
   allowedIpAddresses,
+  ddnsHostname,
   description: 'Edge resources (us-east-1): WAF WebACL with IP allowlist for CloudFront',
 });
 
@@ -151,7 +156,7 @@ const uiHostingStack = new GlitchUiHostingStack(app, 'GlitchUiHostingStack', {
   gatewayFunctionUrl: gatewayStack.functionUrl,
   customDomain,
   webAclArn: edgeStack.webAclArn,
-  certificateArn: app.node.tryGetContext('cloudfrontCertArn') as string | undefined,
+  certificateArn: cloudfrontCertArn,
   description: 'UI hosting: S3 (OAC) + CloudFront + WAF + Lambda FURL (IAM+OAC)',
 });
 uiHostingStack.addDependency(gatewayStack);

@@ -957,10 +957,16 @@ const PORKBUN_SECRET_NAME = 'glitch/porkbun-api';
 
 export interface GlitchEdgeStackProps extends cdk.StackProps {
   /**
-   * IPv4 CIDRs to allow. When provided, these override Porkbun DDNS lookup.
+   * IPv4 CIDRs to allow. When provided, these override the DDNS lookup.
    * Pass via CDK context: -c allowedIpAddresses=1.2.3.4/32,5.6.7.8/32
    */
   readonly allowedIpAddresses?: string[];
+  /**
+   * DDNS hostname whose A record resolves to the current home IP (e.g. home.awoo.agency).
+   * The IP lookup Lambda resolves this at deploy time via DNS — no manual IP entry needed.
+   * Baked into cdk.context.json as "ddnsHostname".
+   */
+  readonly ddnsHostname?: string;
 }
 
 export class GlitchEdgeStack extends cdk.Stack {
@@ -1009,7 +1015,7 @@ export class GlitchEdgeStack extends cdk.Stack {
       code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/porkbun-ip-lookup')),
       role: porkbunLookupRole,
       timeout: cdk.Duration.seconds(30),
-      description: 'Custom resource: resolves current public IP via Porkbun ping API for WAF allowlist',
+      description: 'Custom resource: resolves home IP via DDNS hostname DNS lookup for WAF allowlist',
       environment: {
         // Secret lives in us-west-2; this Lambda runs in us-east-1.
         PORKBUN_SECRET_REGION: 'us-west-2',
@@ -1020,6 +1026,9 @@ export class GlitchEdgeStack extends cdk.Stack {
       serviceToken: porkbunLookupFn.functionArn,
       properties: {
         PorkbunSecretName: PORKBUN_SECRET_NAME,
+        // DdnsHostname: Lambda resolves this via DNS to get current home IP.
+        // Preferred over ping API (which returns Lambda's AWS egress IP, not home IP).
+        DdnsHostname: props.ddnsHostname ?? '',
         // Changing this timestamp forces re-execution on every deploy so the IP stays current.
         DeployTime: new Date().toISOString(),
       },
