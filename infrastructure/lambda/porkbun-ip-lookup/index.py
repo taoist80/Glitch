@@ -31,6 +31,16 @@ def _resolve_ddns(hostname: str) -> str:
     return results[0][4][0]
 
 
+def _read_ssm(region: str) -> str | None:
+    """Read the existing allowed-ipv4 SSM parameter (fallback when DNS fails)."""
+    try:
+        client = boto3.client("ssm", region_name=region)
+        resp = client.get_parameter(Name=SSM_IPV4_PARAM)
+        return resp["Parameter"]["Value"]
+    except Exception:
+        return None
+
+
 def _get_porkbun_keys(secret_name: str, region: str) -> tuple[str, str]:
     secret_region = os.environ.get("PORKBUN_SECRET_REGION", region)
     client = boto3.client("secretsmanager", region_name=secret_region)
@@ -113,8 +123,21 @@ def handler(event: dict, context) -> None:
         if ddns_hostname:
             # Preferred: resolve DDNS hostname — always reflects current home IP
             print(f"Resolving DDNS hostname: {ddns_hostname}")
-            ip = _resolve_ddns(ddns_hostname)
-            print(f"DDNS resolved: {ddns_hostname} -> {ip}")
+            try:
+                ip = _resolve_ddns(ddns_hostname)
+                print(f"DDNS resolved: {ddns_hostname} -> {ip}")
+            except Exception as dns_exc:
+                print(f"DNS resolution failed for {ddns_hostname!r}: {dns_exc}; trying existing SSM value")
+                existing = _read_ssm(region)
+                if existing:
+                    # Strip /32 suffix to get bare IP
+                    ip = existing.split("/")[0]
+                    print(f"Using existing SSM value: {existing}")
+                else:
+                    raise RuntimeError(
+                        f"DNS resolution failed ({dns_exc}) and no existing SSM value found. "
+                        "Ensure home.awoo.agency A record exists (run porkbun-ddns-update.sh first)."
+                    )
         else:
             # Fallback: Porkbun ping API (returns Lambda's AWS IP when run inside AWS)
             print("No DDNS hostname; falling back to Porkbun ping API")
