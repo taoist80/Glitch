@@ -136,7 +136,6 @@ const allowedIpAddresses = ((app.node.tryGetContext('allowedIpAddresses') as str
   .map(s => s.trim())
   .filter(Boolean);
 
-const ddnsHostname = (app.node.tryGetContext('ddnsHostname') as string | undefined) ?? 'home.awoo.agency';
 const cloudfrontCertArn = app.node.tryGetContext('cloudfrontCertArn') as string | undefined;
 
 // crossRegionReferences: true allows CDK to pass GlitchEdgeStack (us-east-1) outputs
@@ -145,8 +144,7 @@ const edgeStack = new GlitchEdgeStack(app, 'GlitchEdgeStack', {
   env: { account: env.account, region: 'us-east-1' },
   crossRegionReferences: true,
   allowedIpAddresses,
-  ddnsHostname,
-  description: 'Edge resources (us-east-1): WAF WebACL with IP allowlist for CloudFront',
+  description: 'Edge resources (us-east-1): WAF WebACL + DDNS updater webhook (us-east-1)',
 });
 
 const uiHostingStack = new GlitchUiHostingStack(app, 'GlitchUiHostingStack', {

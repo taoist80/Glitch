@@ -957,16 +957,10 @@ const PORKBUN_SECRET_NAME = 'glitch/porkbun-api';
 
 export interface GlitchEdgeStackProps extends cdk.StackProps {
   /**
-   * IPv4 CIDRs to allow. When provided, these override the DDNS lookup.
+   * IPv4 CIDRs to allow. When provided, these override the SSM/custom-resource lookup.
    * Pass via CDK context: -c allowedIpAddresses=1.2.3.4/32,5.6.7.8/32
    */
   readonly allowedIpAddresses?: string[];
-  /**
-   * DDNS hostname whose A record resolves to the current home IP (e.g. home.awoo.agency).
-   * The IP lookup Lambda resolves this at deploy time via DNS — no manual IP entry needed.
-   * Baked into cdk.context.json as "ddnsHostname".
-   */
-  readonly ddnsHostname?: string;
 }
 
 export class GlitchEdgeStack extends cdk.Stack {
@@ -989,17 +983,8 @@ export class GlitchEdgeStack extends cdk.Stack {
         PorkbunLookup: new iam.PolicyDocument({
           statements: [
             new iam.PolicyStatement({
-              sid: 'ReadPorkbunSecret',
-              actions: ['secretsmanager:GetSecretValue'],
-              // Use the exact secret ARN (with suffix) to avoid token-resolution issues
-              // across regions. The suffix is the 6-char random ID appended by Secrets Manager.
-              resources: [
-                'arn:aws:secretsmanager:us-west-2:999776382415:secret:glitch/porkbun-api-Rt5dw9',
-              ],
-            }),
-            new iam.PolicyStatement({
-              sid: 'WriteSsmIpv4',
-              actions: ['ssm:PutParameter'],
+              sid: 'ReadWriteSsmIpv4',
+              actions: ['ssm:GetParameter', 'ssm:PutParameter'],
               resources: [
                 'arn:aws:ssm:us-east-1:999776382415:parameter/glitch/waf/allowed-ipv4',
               ],
@@ -1015,21 +1000,20 @@ export class GlitchEdgeStack extends cdk.Stack {
       code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/porkbun-ip-lookup')),
       role: porkbunLookupRole,
       timeout: cdk.Duration.seconds(30),
-      description: 'Custom resource: resolves home IP via DDNS hostname DNS lookup for WAF allowlist',
-      environment: {
-        // Secret lives in us-west-2; this Lambda runs in us-east-1.
-        PORKBUN_SECRET_REGION: 'us-west-2',
-      },
+      description: 'Custom resource: reads /glitch/waf/allowed-ipv4 from SSM for WAF allowlist',
     });
+
+    // FallbackIpCidr is read from cdk.context.json (SSM lookup cached at synth time).
+    // It is only used if the ddns-updater webhook has never been called and SSM is empty.
+    const fallbackIpCidr = ssm.StringParameter.valueFromLookup(this, WAF_SSM_IPV4);
 
     const porkbunIpResource = new cdk.CustomResource(this, 'PorkbunIpLookup', {
       serviceToken: porkbunLookupFn.functionArn,
       properties: {
-        PorkbunSecretName: PORKBUN_SECRET_NAME,
-        // DdnsHostname: Lambda resolves this via DNS to get current home IP.
-        // Preferred over ping API (which returns Lambda's AWS egress IP, not home IP).
-        DdnsHostname: props.ddnsHostname ?? '',
-        // Changing this timestamp forces re-execution on every deploy so the IP stays current.
+        // FallbackIpCidr: used only when SSM is empty (first deploy before webhook is called).
+        // The ddns-updater webhook keeps SSM current at runtime; this is a bootstrap safety net.
+        FallbackIpCidr: fallbackIpCidr,
+        // Changing this timestamp forces re-execution on every deploy.
         DeployTime: new Date().toISOString(),
       },
     });
@@ -1102,6 +1086,89 @@ export class GlitchEdgeStack extends cdk.Stack {
       value: this.webAclArn,
       description: 'WAF WebACL ARN — associate with CloudFront distribution',
       exportName: 'GlitchEdgeWebAclArn',
+    });
+
+    // ── DDNS Updater webhook ───────────────────────────────────────────────────
+    // Called by the home network to update Porkbun DNS + WAF IP set + SSM whenever
+    // the home IP changes. Replaces the porkbun-ddns-update.sh shell script.
+    //
+    // After deploy: retrieve the token from Secrets Manager and configure a cron
+    // on your home device (UDM-Pro, Raspberry Pi, etc.) to call:
+    //   curl -s -X POST <DdnsUpdaterUrl> -H "Authorization: Bearer <token>"
+
+    // Bearer token for the webhook. CDK generates a random 32-char secret on first deploy.
+    const ddnsTokenSecret = new secretsmanager.Secret(this, 'DdnsTokenSecret', {
+      secretName: 'glitch/ddns-token',
+      description: 'Bearer token for the DDNS updater webhook Lambda',
+      generateSecretString: {
+        passwordLength: 32,
+        excludePunctuation: true,
+      },
+    });
+
+    const ddnsUpdaterRole = new iam.Role(this, 'DdnsUpdaterRole', {
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+      ],
+      inlinePolicies: {
+        DdnsUpdater: new iam.PolicyDocument({
+          statements: [
+            new iam.PolicyStatement({
+              sid: 'ReadSecrets',
+              actions: ['secretsmanager:GetSecretValue'],
+              resources: [
+                // Porkbun API keys (us-west-2)
+                'arn:aws:secretsmanager:us-west-2:999776382415:secret:glitch/porkbun-api-*',
+                // DDNS bearer token (us-east-1, this stack's region)
+                ddnsTokenSecret.secretArn,
+              ],
+            }),
+            new iam.PolicyStatement({
+              sid: 'UpdateWafIpSet',
+              actions: ['wafv2:GetIPSet', 'wafv2:UpdateIPSet'],
+              resources: [ipv4Set.attrArn],
+            }),
+            new iam.PolicyStatement({
+              sid: 'WriteIpSsm',
+              actions: ['ssm:PutParameter'],
+              resources: [
+                'arn:aws:ssm:us-east-1:999776382415:parameter/glitch/waf/allowed-ipv4',
+              ],
+            }),
+          ],
+        }),
+      },
+    });
+
+    const ddnsUpdaterFn = new lambda.Function(this, 'DdnsUpdaterFn', {
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/ddns-updater')),
+      role: ddnsUpdaterRole,
+      timeout: cdk.Duration.seconds(30),
+      description: 'DDNS updater webhook: reads caller IP, updates Porkbun DNS + WAF + SSM',
+      environment: {
+        DDNS_SUBDOMAIN: 'home',
+        DDNS_DOMAIN: 'awoo.agency',
+        WAF_IP_SET_ID: ipv4Set.attrId,
+        WAF_IP_SET_NAME: 'GlitchAllowedIPs',
+        SSM_PARAM: WAF_SSM_IPV4,
+        PORKBUN_SECRET_NAME: PORKBUN_SECRET_NAME,
+        PORKBUN_SECRET_REGION: 'us-west-2',
+        DDNS_TOKEN_SECRET_ARN: ddnsTokenSecret.secretArn,
+        TOKEN_SECRET_REGION: this.region,
+      },
+    });
+
+    // Public Function URL — auth is enforced by the bearer token, not IAM.
+    const ddnsUpdaterUrl = ddnsUpdaterFn.addFunctionUrl({
+      authType: lambda.FunctionUrlAuthType.NONE,
+    });
+
+    new cdk.CfnOutput(this, 'DdnsUpdaterUrl', {
+      value: ddnsUpdaterUrl.url,
+      description: 'DDNS updater webhook URL — POST with Authorization: Bearer <glitch/ddns-token>',
     });
   }
 }
