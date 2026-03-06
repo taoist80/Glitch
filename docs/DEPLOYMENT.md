@@ -33,58 +33,34 @@ make deploy
 ```
 
 This automatically:
-1. **Configures** VPC settings from CloudFormation
-2. **Deploys** the agent with `agentcore deploy`
-3. **Verifies** deployment and connectivity
+
+1. **Configures** env vars from SSM into `.env.deploy`
+2. **Deploys** the agent with `agentcore deploy --env ...`
 
 **That's it!** No manual configuration needed.
 
 ## Deployment Workflows
 
-### Option 1: Fully Automated (Recommended)
+### Option 1: Step by Step (Recommended)
 
 ```bash
-# Deploy everything
-./infrastructure/scripts/deploy-and-verify.sh
+# Deploy infrastructure
+cd infrastructure && pnpm cdk deploy --all
 
-# Or step by step
-cd infrastructure && cdk deploy --all
+# Deploy agent (configure from SSM + agentcore deploy)
 cd agent && make deploy
 ```
 
-### Option 2: Manual with Auto-Configuration
+### Option 2: New AWS Account
+
+Use the phased deploy script which ensures foundation stacks exist before deploying the agent:
 
 ```bash
-# 1. Deploy infrastructure
 cd infrastructure
-cdk deploy --all
-
-# 2. Approve Tailscale route (manual)
-# Visit admin.tailscale.com
-
-# 3. Deploy agent (auto-configures VPC)
-cd agent
-./scripts/deploy.sh
+./scripts/new-account-deploy.sh
 ```
 
-### Option 3: Fully Manual
-
-```bash
-# 1. Deploy infrastructure
-cd infrastructure
-cdk deploy --all
-
-# 2. Get CloudFormation outputs
-aws cloudformation describe-stacks --stack-name GlitchVpcStack
-aws cloudformation describe-stacks --stack-name GlitchAgentCoreStack
-
-# 3. Update agent/.bedrock_agentcore.yaml manually
-# Set network_mode_config.subnet_ids and security_group_ids
-
-# 4. Deploy agent
-cd agent
-agentcore deploy
-```
+This runs: Phase 1 (VPC + IAM stacks) → Phase 2 (agent deploy) → Phase 3 (remaining stacks).
 
 ## Testing
 
@@ -116,41 +92,37 @@ Verifies:
 
 ### Agent Deployment Verification
 
-Automatic verification runs after `make deploy`:
-- VPC configuration is complete
-- VPC endpoints are accessible
-- Security groups are properly configured
+Check runtime status after deploy:
+
+```bash
+make -C agent verify      # runs: agentcore status
+make -C agent check-logs  # inspect CloudWatch runtime logs
+```
 
 ## Scripts
 
 ### Infrastructure Scripts
 
-**`infrastructure/scripts/deploy-and-verify.sh`** - Full deployment orchestration
+**`infrastructure/scripts/new-account-deploy.sh`** - Phased deploy for a new AWS account
 ```bash
-./scripts/deploy-and-verify.sh [--skip-deploy] [--skip-tests]
+./scripts/new-account-deploy.sh [--skip-phase1] [--skip-phase2] [--dry-run]
 ```
 
-**`infrastructure/scripts/configure_agentcore_vpc.py`** - Manual VPC configuration
-```bash
-python3 scripts/configure_agentcore_vpc.py [--dry-run]
-```
+**`infrastructure/scripts/enable-https-glitch-proxy.sh`** - EC2 TLS setup (certbot + Porkbun). Run on the EC2 when setting up HTTPS for the Ollama proxy.
 
 ### Agent Scripts
 
-**`agent/scripts/deploy.sh`** - Automated deployment wrapper
+**`agent/scripts/deploy.sh`** - Automated deployment wrapper (called by `make deploy`)
 ```bash
-./scripts/deploy.sh [--skip-pre-check] [--skip-post-check]
+./scripts/deploy.sh [--skip-pre-check] [-- agentcore-args...]
 ```
 
-**`agent/scripts/pre-deploy-configure.py`** - VPC auto-configuration
+**`agent/scripts/pre-deploy-configure.py`** - Reads SSM params, writes `.env.deploy`, updates `.bedrock_agentcore.yaml`
 ```bash
 python3 scripts/pre-deploy-configure.py
 ```
 
-**`agent/scripts/post-deploy-verify.py`** - Post-deployment verification
-```bash
-python3 scripts/post-deploy-verify.py
-```
+**DDNS:** The `ddns-updater` Lambda (deployed with `GlitchEdgeStack`) handles home IP updates automatically. The UDM-Pro calls the Lambda's Function URL every 5 minutes with a bearer token. No manual script needed.
 
 ## Makefile Targets
 

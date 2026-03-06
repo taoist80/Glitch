@@ -120,11 +120,8 @@ phase2_agent() {
     run_cmd cp "$AGENT_DIR/.bedrock_agentcore.yaml.template" "$AGENT_DIR/.bedrock_agentcore.yaml"
   fi
 
-  log "Updating agent config from CloudFormation outputs (execution_role, codebuild role, VPC)..."
-  run_cmd bash -c "cd '$AGENT_DIR' && python3 scripts/pre-deploy-configure.py"
-
-  log "Deploying agent (agentcore deploy)..."
-  run_cmd bash -c "cd '$AGENT_DIR' && agentcore deploy"
+  log "Deploying agent (configure from SSM + agentcore deploy with env vars)..."
+  run_cmd bash -c "cd '$AGENT_DIR' && ./scripts/deploy.sh"
 
   log "Phase 2 complete"
 }

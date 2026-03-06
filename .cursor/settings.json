@@ -2,6 +2,9 @@
   "plugins": {
     "deploy-on-aws": {
       "enabled": true
+    },
+    "context7-plugin": {
+      "enabled": true
     }
   }
 }

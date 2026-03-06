@@ -73,31 +73,27 @@ pytest test/test_integration.py::TestAgentCoreStack -v
 python3 agent/scripts/pre-deploy-configure.py [--dry-run]
 ```
 
-### 4. Post-Deploy Verification (`agent/scripts/post-deploy-verify.py`)
+### 4. Post-Deploy Verification
 
-**Automatic verification** after deployment:
-- VPC configuration completeness
-- VPC endpoints accessibility
-- Security group rules validation
-- Network connectivity checks
+Check runtime status after deployment:
 
-**Run manually:**
 ```bash
-python3 agent/scripts/post-deploy-verify.py
+make -C agent verify      # agentcore status
+make -C agent check-logs  # CloudWatch runtime logs
 ```
 
 ### 5. Unified Deployment Script (`agent/scripts/deploy.sh`)
 
 **One-command deployment** that orchestrates:
-1. **Pre-deploy:** Auto-configure VPC from CloudFormation
-2. **Deploy:** Run `agentcore deploy`
-3. **Post-deploy:** Verify deployment and connectivity
+
+1. **Pre-deploy:** Read SSM params, write `.env.deploy`
+2. **Deploy:** Run `agentcore deploy --env ...` (env vars passed via flags, not YAML)
 
 **Usage:**
 ```bash
 cd agent
 ./scripts/deploy.sh                    # Full workflow
-./scripts/deploy.sh --skip-post-check  # Skip verification
+./scripts/deploy.sh --skip-pre-check   # Reuse existing .env.deploy
 ./scripts/deploy.sh -- --force         # Pass args to agentcore
 ```
 
@@ -105,28 +101,14 @@ cd agent
 
 **Convenience targets:**
 ```bash
-make deploy       # Full deployment workflow
-make deploy-only  # Deploy without checks
-make configure    # Configure VPC only
-make verify       # Verify deployment only
-make test         # Run agent tests
-make clean        # Clean artifacts
-```
-
-### 7. Full Orchestration Script (`infrastructure/scripts/deploy-and-verify.sh`)
-
-**Complete deployment automation:**
-- Deploys all CDK stacks
-- Runs unit tests
-- Runs integration tests
-- Configures AgentCore
-- Shows next steps
-
-**Usage:**
-```bash
-./infrastructure/scripts/deploy-and-verify.sh
-./infrastructure/scripts/deploy-and-verify.sh --skip-deploy  # Tests only
-./infrastructure/scripts/deploy-and-verify.sh --skip-tests   # Deploy only
+make deploy                # Full workflow (recommended)
+make deploy-only           # Deploy with existing .env.deploy
+make configure             # Configure from SSM only
+make verify                # agentcore status
+make check-logs            # CloudWatch runtime logs
+make telegram-troubleshoot # Telegram webhook/runtime diagnostics
+make test                  # Run agent tests
+make clean                 # Clean artifacts
 ```
 
 ### 8. Documentation
@@ -280,15 +262,9 @@ make configure
 ### Example 4: Full Infrastructure Deployment
 
 ```bash
-./infrastructure/scripts/deploy-and-verify.sh
+cd infrastructure && pnpm cdk deploy --all
+cd agent && make deploy
 ```
-
-This runs:
-1. CDK build
-2. CDK deploy (all stacks)
-3. AgentCore configuration
-4. Unit tests
-5. Integration tests
 
 ## 🔧 Customization
 
@@ -297,13 +273,6 @@ This runs:
 ```bash
 cd agent
 ./scripts/deploy.sh --skip-pre-check
-```
-
-### Skip Post-Check
-
-```bash
-cd agent
-./scripts/deploy.sh --skip-post-check
 ```
 
 ### Dry Run
@@ -320,33 +289,7 @@ AWS_REGION=us-east-1 make deploy
 
 ## 📝 Configuration File Changes
 
-The auto-configuration updates `.bedrock_agentcore.yaml`:
-
-**Before:**
-```yaml
-agents:
-  Glitch:
-    aws:
-      network_configuration:
-        network_mode: VPC
-        network_mode_config: null  # Manual input required
-```
-
-**After:**
-```yaml
-agents:
-  Glitch:
-    aws:
-      network_configuration:
-        network_mode: VPC
-        network_mode_config:
-          subnet_ids:
-            - subnet-0abc123def456
-            - subnet-0def456abc789
-          security_group_ids:
-            - sg-0123456789abcdef
-      execution_role: arn:aws:iam::999776382415:role/GlitchAgentCoreRuntimeRole
-```
+`pre-deploy-configure.py` reads SSM and updates `.bedrock_agentcore.yaml` with `execution_role` and `codebuild.execution_role`. It also writes runtime env vars to `.env.deploy` (Telegram URLs, SSH config, soul bucket, timeouts) which `deploy.sh` passes via `--env` flags to `agentcore deploy`.
 
 ## 🎉 Benefits
 
@@ -358,28 +301,31 @@ agents:
 6. **Well-Tested** - 47 unit tests + integration tests
 7. **Well-Documented** - Clear error messages and usage examples
 
-## 📚 Files Created
+## 📚 Key Files
 
 ```
 agent/
-├── Makefile                           # Convenience targets
+├── Makefile                           # Convenience targets (entry point)
 ├── scripts/
 │   ├── README.md                      # Script documentation
-│   ├── deploy.sh                      # Unified deployment wrapper
-│   ├── pre-deploy-configure.py        # VPC auto-configuration
-│   └── post-deploy-verify.py          # Post-deploy verification
+│   ├── deploy.sh                      # Deployment wrapper (--env flag passing)
+│   ├── pre-deploy-configure.py        # SSM → .env.deploy + .bedrock_agentcore.yaml
+│   ├── check-runtime-logs.py          # CloudWatch log group diagnostic
+│   ├── ssh-setup.sh                   # One-time SSH key generation
+│   └── ssh-copy-key.py               # Install SSH key on remote host
 
 infrastructure/
 ├── test/
-│   ├── vpc-stack.test.ts              # VPC unit tests (17 tests)
-│   ├── tailscale-stack.test.ts        # Tailscale unit tests (17 tests)
-│   ├── agentcore-stack.test.ts        # AgentCore unit tests (13 tests)
+│   ├── vpc-stack.test.ts              # VPC unit tests
+│   ├── tailscale-stack.test.ts        # Tailscale unit tests
+│   ├── agentcore-stack.test.ts        # AgentCore unit tests
 │   └── test_integration.py            # Integration tests
 ├── scripts/
-│   ├── deploy-and-verify.sh           # Full orchestration
-│   └── configure_agentcore_vpc.py     # Manual configuration tool
+│   ├── new-account-deploy.sh          # Phased deploy for new AWS accounts
+│   ├── enable-https-glitch-proxy.sh   # EC2 TLS setup (certbot + Porkbun)
+│   └── telegram-troubleshoot.sh       # Telegram webhook/runtime diagnostics
 ├── jest.config.js                     # Jest configuration
-└── package.json                       # Added test dependencies
+└── package.json                       # Test dependencies
 
 DEPLOYMENT.md                           # Complete deployment guide
 ```

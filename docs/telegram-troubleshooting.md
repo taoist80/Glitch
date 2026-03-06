@@ -53,7 +53,7 @@ If any step fails, the user gets no reply (or an error message if the Lambda sen
 - **Webhook not set:** If Telegram’s webhook URL is wrong or empty, Telegram never calls the Lambda, so there are no webhook log events when you send a message. Set the webhook (see “Setting the Telegram webhook manually” below) and confirm with `getWebhookInfo`.
 - **Runtime cold or timeout:** First request after idle can take a long time (VPC ENI, container start). The webhook Lambda waits up to 280s. If the runtime doesn’t respond in time, the Lambda catches the error and should send "Sorry, something went wrong." If you get nothing, the Lambda might have crashed before sending (check webhook Lambda logs).
 
-Run `./infrastructure/scripts/telegram-troubleshoot.sh` and use the output to see whether the webhook is receiving events and whether the runtime shows `GLITCH_INVOKE_ENTRY` for your message.
+Run `make -C agent telegram-troubleshoot` and use the output to see whether the webhook is receiving events and whether the runtime shows `GLITCH_INVOKE_ENTRY` for your message.
 
 ### Step 1: Confirm the webhook Lambda exists
 
@@ -105,7 +105,7 @@ If the webhook Lambda is working but you never see these, the Lambda might be us
 From the repo root (with AWS CLI configured and network access):
 
 ```bash
-./infrastructure/scripts/telegram-troubleshoot.sh
+make -C agent telegram-troubleshoot
 ```
 
 This script prints:

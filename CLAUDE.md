@@ -27,12 +27,14 @@ pnpm cdk deploy GlitchEdgeStack --region us-east-1  # Edge stack must deploy to 
 ```bash
 cd agent
 pip install -r requirements.txt
-make deploy           # Full workflow: pre-configure + agentcore deploy + verify
-make deploy-only      # Deploy without pre/post checks
-make configure        # Run pre-deploy-configure.py to sync VPC config from CloudFormation
+make deploy           # Full workflow: configure from SSM + agentcore deploy (recommended)
+make deploy-only      # Deploy with existing .env.deploy (skip configure)
+make configure        # Read SSM params and update .bedrock_agentcore.yaml
+make verify           # Check runtime status (agentcore status)
+make check-logs       # Inspect AgentCore runtime logs in CloudWatch
+make telegram-troubleshoot  # Telegram webhook/runtime diagnostics
 make test             # pytest tests/ -v
 pytest tests/test_foo.py -v   # Run a single test file
-agentcore deploy      # Deploy directly (bypasses Makefile checks)
 agentcore status      # Check runtime status
 agentcore invoke '{"prompt":"hello"}'  # Smoke test the running agent
 ```
@@ -84,7 +86,7 @@ Cross-stack references use SSM parameters (not `Fn.importValue`) to avoid circul
 All Lambda functions in `infrastructure/lambda/` use `Code.fromAsset`. They are:
 - `gateway/index.py` — proxies CloudFront requests to AgentCore Runtime (AWS_IAM auth)
 - `telegram-webhook/index.py` — receives Telegram updates, invokes AgentCore
-- `telegram-keepalive/index.py` — 10-min EventBridge keepalive to prevent cold starts
+- `telegram-keepalive/index.py` — 4-min EventBridge keepalive to keep Claude prompt cache warm
 - `ui-backend/index.py` — optional UI backend
 
 ### Glitch Tool Groups

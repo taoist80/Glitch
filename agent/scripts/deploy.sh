@@ -1,24 +1,25 @@
 #!/bin/bash
 #
-# Unified deployment wrapper for AgentCore with auto-configuration and verification.
+# Unified deployment wrapper for AgentCore with auto-configuration.
 #
 # This script:
-# 1. Auto-configures VPC settings from CloudFormation (pre-deploy)
-# 2. Runs `agentcore deploy`
-# 3. Verifies deployment and connectivity (post-deploy)
+# 1. Reads SSM params and writes env vars to .env.deploy (pre-deploy configure)
+# 2. Runs `agentcore deploy` passing --env flags from .env.deploy
+#
+# agentcore deploy rewrites .bedrock_agentcore.yaml on each run and strips
+# environment_variables, so env vars must be passed via --env flags.
 #
 # Usage:
-#   ./scripts/deploy.sh [--skip-pre-check] [--skip-post-check] [agentcore-deploy-args...]
+#   ./scripts/deploy.sh [--skip-pre-check] [-- agentcore-deploy-args...]
 #
 # Options:
-#   --skip-pre-check    Skip pre-deploy configuration check
-#   --skip-post-check   Skip post-deploy verification
+#   --skip-pre-check    Skip pre-deploy configuration (reuse existing .env.deploy)
 #   --help              Show this help message
 #
 # Examples:
-#   ./scripts/deploy.sh                        # Full workflow
-#   ./scripts/deploy.sh --skip-post-check      # Skip verification
-#   ./scripts/deploy.sh -- --force             # Pass --force to agentcore deploy
+#   ./scripts/deploy.sh                     # Full workflow (recommended)
+#   ./scripts/deploy.sh --skip-pre-check    # Deploy with existing .env.deploy
+#   ./scripts/deploy.sh -- --force          # Pass --force to agentcore deploy
 #
 
 set -e
@@ -27,7 +28,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AGENT_DIR="$(dirname "$SCRIPT_DIR")"
 
 SKIP_PRE_CHECK=false
-SKIP_POST_CHECK=false
 AGENTCORE_ARGS=()
 
 # Parse arguments
@@ -35,10 +35,6 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --skip-pre-check)
             SKIP_PRE_CHECK=true
-            shift
-            ;;
-        --skip-post-check)
-            SKIP_POST_CHECK=true
             shift
             ;;
         --help)
@@ -133,29 +129,6 @@ else
     DEPLOY_EXIT=$?
     log_error "AgentCore deployment failed with exit code $DEPLOY_EXIT"
     exit $DEPLOY_EXIT
-fi
-
-# Step 3: Post-deploy verification
-if [ "$SKIP_POST_CHECK" = false ]; then
-    log ""
-    log "=== Step 3: Post-deploy Verification ==="
-    
-    if [ -f "$SCRIPT_DIR/post-deploy-verify.py" ]; then
-        python3 "$SCRIPT_DIR/post-deploy-verify.py"
-        POST_CHECK_EXIT=$?
-        
-        if [ $POST_CHECK_EXIT -eq 1 ]; then
-            log_error "Post-deploy verification failed"
-            log_error "Deployment completed but issues detected"
-            exit 1
-        elif [ $POST_CHECK_EXIT -eq 2 ]; then
-            log "Post-deploy verification completed with warnings"
-        fi
-    else
-        log "Warning: post-deploy-verify.py not found. Skipping post-check."
-    fi
-else
-    log "Skipping post-deploy verification (--skip-post-check)"
 fi
 
 log ""
