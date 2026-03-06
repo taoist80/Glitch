@@ -916,9 +916,9 @@ export class TelegramWebhookStack extends cdk.Stack {
       })
     );
     new events.Rule(this, 'AgentCoreKeepaliveSchedule', {
-      schedule: events.Schedule.rate(cdk.Duration.minutes(10)),
+      schedule: events.Schedule.rate(cdk.Duration.minutes(4)),
       targets: [new targets.LambdaFunction(keepaliveFunction)],
-      description: 'Invoke AgentCore runtime keepalive every 10 min to avoid session termination',
+      description: 'Invoke AgentCore runtime keepalive every 4 min to keep Claude prompt cache warm (5-min TTL)',
     });
 
     // SsmTelegramConfigTable: safe to write here (no circular dep — table name is not a FunctionUrl token).

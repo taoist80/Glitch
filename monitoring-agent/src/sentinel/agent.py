@@ -10,6 +10,7 @@ from typing import List, Callable
 
 from strands import Agent
 from strands.models import BedrockModel
+from strands.types.content import SystemContentBlock, CachePoint
 
 logger = logging.getLogger(__name__)
 
@@ -206,8 +207,21 @@ class SentinelAgent:
             "SENTINEL_MODEL_ID",
             "us.anthropic.claude-sonnet-4-5-20251101-v1:0",
         )
-        model = BedrockModel(model_id=model_id, region_name=os.environ.get("AWS_REGION", "us-west-2"))
-        system_prompt = _build_system_prompt()
+        # cache_tools caches the 91 tool schemas on every request — the largest
+        # cacheable token block (~2000 tokens at $0.30/M vs $3.00/M = 90% savings).
+        model = BedrockModel(
+            model_id=model_id,
+            region_name=os.environ.get("AWS_REGION", "us-west-2"),
+            cache_tools="default",
+        )
+        system_prompt_str = _build_system_prompt()
+        # Sentinel's system prompt is entirely static — wrap it with a cache point
+        # so the full prompt (soul + tool descriptions + guidelines + skills) is
+        # cached and reused across every invocation.
+        system_blocks: list[SystemContentBlock] = [
+            SystemContentBlock(text=system_prompt_str),
+            SystemContentBlock(cachePoint=CachePoint(type="default")),
+        ]
         tools = _get_all_tools()
 
         self._agent = Agent(
@@ -220,7 +234,7 @@ class SentinelAgent:
                 "and alerts via Telegram when human attention is needed."
             ),
             model=model,
-            system_prompt=system_prompt,
+            system_prompt=system_blocks,
             tools=tools,
             callback_handler=None,
         )

@@ -32,6 +32,8 @@ from pathlib import Path
 from typing import Optional, Dict, Any, AsyncIterator
 from strands import Agent
 from strands.agent.conversation_manager import SlidingWindowConversationManager
+from strands.models import BedrockModel
+from strands.types.content import SystemContentBlock, CachePoint
 
 from glitch.tools.soul_tools import load_soul_from_s3
 from glitch.tools.memory_tools import set_memory_manager
@@ -221,7 +223,16 @@ class GlitchAgent:
         
         primary_model = self.model_router.get_primary_model("chat")
         self._current_model_name = primary_model.name
-        
+
+        # Wrap in BedrockModel with cache_tools to cache tool schemas on every request.
+        # Tool definitions are static (same 44 tools every call) — caching them saves
+        # ~800-1200 tokens at $0.30/M vs $3.00/M (90% reduction on that portion).
+        bedrock_model = BedrockModel(
+            model_id=primary_model.model_id,
+            region_name=self.region,
+            cache_tools="default",
+        )
+
         # Build tools list from registry, then Code Interpreter and MCP
         tools_list = get_all_tools()
         code_interpreter = get_code_interpreter_tool()
@@ -229,12 +240,19 @@ class GlitchAgent:
             tools_list.append(code_interpreter)
             logger.info("Code Interpreter tool enabled")
         tools_list.extend(self.mcp_manager.get_tool_providers())
-        
+
+        # Initial system prompt: base (static) + cache point.
+        # Per-request, skills are appended as a third block in _select_and_inject_skills.
+        initial_system: list[SystemContentBlock] = [
+            SystemContentBlock(text=self._base_prompt),
+            SystemContentBlock(cachePoint=CachePoint(type="default")),
+        ]
+
         # Strands Agent API: name, system_prompt, model, tools, conversation_manager, trace_attributes
         self.agent = Agent(
             name="glitch",
-            system_prompt=self._base_prompt,
-            model=primary_model.model_id,
+            system_prompt=initial_system,
+            model=bedrock_model,
             tools=tools_list,
             conversation_manager=SlidingWindowConversationManager(
                 window_size=config.window_size
@@ -288,22 +306,29 @@ class GlitchAgent:
         self.skill_selector = SkillSelector(self.skill_registry)
         self.task_planner = TaskPlanner()
     
-    def _select_and_inject_skills(self, user_message: str, model_name: str) -> str:
-        """Select skills for the message and build prompt with injected skills.
-        
+    def _select_and_inject_skills(self, user_message: str, model_name: str) -> list[SystemContentBlock]:
+        """Select skills and return a cache-aware system prompt block list.
+
+        Returns a list of SystemContentBlock:
+          [base_prompt_block, cache_point, skill_block (if any skills selected)]
+
+        The cache point after the static base prompt lets Bedrock reuse the cached
+        base across requests. Skills are appended after it so only the (small, variable)
+        skill section is re-processed on each invocation.
+
         Args:
             user_message: The user's input message
             model_name: Name of the model that will execute
-            
+
         Returns:
-            System prompt with skills injected
+            List of SystemContentBlock for agent.system_prompt assignment
         """
         # Plan the task
         task_spec = self.task_planner.plan(user_message)
-        
+
         # Select skills
         self.last_skill_selection = self.skill_selector.select(task_spec, model_name)
-        
+
         # Log skill selection
         if self.last_skill_selection.selected:
             logger.info(
@@ -316,12 +341,22 @@ class GlitchAgent:
                     f"  {selected.skill_id}: score={selected.match_score:.2f}, "
                     f"reasons={reasons}"
                 )
-        
-        # Build prompt with skills
-        return build_prompt_with_skills(
+
+        # Build the full prompt string to extract the skills suffix
+        full_prompt = build_prompt_with_skills(
             self._base_prompt,
             self.last_skill_selection.selected,
         )
+        # Skill content is everything appended after the static base prompt
+        skill_suffix = full_prompt[len(self._base_prompt):]
+
+        blocks: list[SystemContentBlock] = [
+            SystemContentBlock(text=self._base_prompt),
+            SystemContentBlock(cachePoint=CachePoint(type="default")),
+        ]
+        if skill_suffix.strip():
+            blocks.append(SystemContentBlock(text=skill_suffix))
+        return blocks
     
     async def process_message(self, user_message: str, **kwargs: Any) -> InvocationResponse:
         """Process a user message through the Glitch orchestrator.
@@ -365,7 +400,11 @@ class GlitchAgent:
             
             step = "get_memory_context"
             memory_context = self.memory_manager.get_summary_for_context()
-            enriched_message = f"{user_message}\n\n[Structured Memory:\n{memory_context}]"
+            _empty = ("No structured memory yet.", "", None)
+            if memory_context and memory_context not in _empty:
+                enriched_message = f"{user_message}\n\n[Structured Memory:\n{memory_context}]"
+            else:
+                enriched_message = user_message
             
             step = "invoke_agent"
             max_turns = int(os.getenv("GLITCH_MAX_TURNS", "3"))
@@ -447,7 +486,11 @@ class GlitchAgent:
             self.agent.system_prompt = prompt_with_skills
 
             memory_context = self.memory_manager.get_summary_for_context()
-            enriched_message = f"{user_message}\n\n[Structured Memory:\n{memory_context}]"
+            _empty = ("No structured memory yet.", "", None)
+            if memory_context and memory_context not in _empty:
+                enriched_message = f"{user_message}\n\n[Structured Memory:\n{memory_context}]"
+            else:
+                enriched_message = user_message
 
             max_turns = int(os.getenv("GLITCH_MAX_TURNS", "3"))
             invocation_state = {} if max_turns <= 0 else {"max_turns": max_turns}
