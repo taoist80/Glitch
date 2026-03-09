@@ -923,27 +923,26 @@ export class TelegramWebhookStack extends Stack {
 
     const { configTable, telegramBotTokenSecret, agentCoreRuntimeArn } = props;
 
-    this.webhookFunction = new LambdaFunction(this, 'TelegramWebhookFunction', {
-      functionName: 'glitch-telegram-webhook',
+    // Processor Lambda: handles agent invocation and Telegram reply asynchronously.
+    // Invoked with InvocationType=Event by the webhook, so the webhook can return 200
+    // to Telegram immediately (preventing Telegram's 60s timeout retry storm).
+    const processorFunction = new LambdaFunction(this, 'TelegramProcessorFunction', {
+      functionName: 'glitch-telegram-processor',
       runtime: Runtime.PYTHON_3_12,
       handler: 'index.handler',
-      code: Code.fromAsset(path.join(__dirname, '../lambda/telegram-webhook')),
+      code: Code.fromAsset(path.join(__dirname, '../lambda/telegram-processor')),
       timeout: Duration.seconds(300),
       memorySize: 256,
       environment: {
-        CONFIG_TABLE_NAME: configTable.tableName,
         TELEGRAM_SECRET_NAME: SECRET_NAMES.TELEGRAM_BOT_TOKEN,
         AGENTCORE_RUNTIME_ARN: agentCoreRuntimeArn,
-        // WEBHOOK_FUNCTION_URL is added below after the Function URL is created
       },
     });
 
-    configTable.grantReadWriteData(this.webhookFunction);
-    telegramBotTokenSecret.grantRead(this.webhookFunction);
-
-    this.webhookFunction.addToRolePolicy(
+    telegramBotTokenSecret.grantRead(processorFunction);
+    processorFunction.addToRolePolicy(
       new PolicyStatement({
-        sid: 'InvokeAgentCoreRuntime',
+        sid: 'ProcessorInvokeAgentCoreRuntime',
         effect: Effect.ALLOW,
         actions: [
           'bedrock-agentcore:InvokeAgentRuntime',
@@ -958,6 +957,26 @@ export class TelegramWebhookStack extends Stack {
         ],
       })
     );
+
+    this.webhookFunction = new LambdaFunction(this, 'TelegramWebhookFunction', {
+      functionName: 'glitch-telegram-webhook',
+      runtime: Runtime.PYTHON_3_12,
+      handler: 'index.handler',
+      code: Code.fromAsset(path.join(__dirname, '../lambda/telegram-webhook')),
+      timeout: Duration.seconds(30),  // Only needs to validate + dedup + async dispatch
+      memorySize: 256,
+      environment: {
+        CONFIG_TABLE_NAME: configTable.tableName,
+        TELEGRAM_SECRET_NAME: SECRET_NAMES.TELEGRAM_BOT_TOKEN,
+        PROCESSOR_FUNCTION_NAME: processorFunction.functionName,
+      },
+    });
+
+    configTable.grantReadWriteData(this.webhookFunction);
+    telegramBotTokenSecret.grantRead(this.webhookFunction);
+
+    // Webhook invokes processor asynchronously (InvocationType=Event)
+    processorFunction.grantInvoke(this.webhookFunction);
 
     // Read own Function URL from SSM on cold start for Telegram webhook self-registration.
     // The URL is written by GlitchTelegramSsmStack (a separate stack) to avoid a CFN circular dep.

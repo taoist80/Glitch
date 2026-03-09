@@ -3,41 +3,20 @@ import json
 import os
 import logging
 import boto3
-from botocore.auth import SigV4Auth
-from botocore.awsrequest import AWSRequest
 from datetime import datetime, timedelta
-from urllib.parse import quote
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 dynamodb = boto3.resource('dynamodb')
 secrets_client = boto3.client('secretsmanager')
-session = boto3.Session()
+lambda_client = boto3.client('lambda')
 
 CONFIG_TABLE_NAME = os.environ['CONFIG_TABLE_NAME']
 TELEGRAM_SECRET_NAME = os.environ['TELEGRAM_SECRET_NAME']
-AGENTCORE_RUNTIME_ARN = os.environ.get('AGENTCORE_RUNTIME_ARN', '')
+PROCESSOR_FUNCTION_NAME = os.environ.get('PROCESSOR_FUNCTION_NAME', '')
 
 table = dynamodb.Table(CONFIG_TABLE_NAME)
-
-
-def get_data_plane_endpoint(region: str) -> str:
-    return f"https://bedrock-agentcore.{region}.amazonaws.com"
-
-
-def parse_runtime_arn(runtime_arn: str) -> dict:
-    parts = runtime_arn.split(':')
-    if len(parts) != 6:
-        raise ValueError(f"Invalid runtime ARN: {runtime_arn}")
-    resource = parts[5]
-    if not resource.startswith('runtime/'):
-        raise ValueError(f"Invalid runtime ARN resource: {resource}")
-    return {
-        'region': parts[3],
-        'account_id': parts[4],
-        'runtime_id': resource.split('/', 1)[1],
-    }
 
 
 def get_bot_token():
@@ -271,7 +250,7 @@ def ensure_webhook_registered(bot_token: str, webhook_url: str, webhook_secret: 
         'url': webhook_url,
         'secret_token': webhook_secret,
         'allowed_updates': ['message', 'edited_message', 'callback_query'],
-        'drop_pending_updates': False,
+        'drop_pending_updates': True,
     }
     data = json.dumps(payload).encode()
     req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
@@ -323,38 +302,29 @@ def _cold_start_register_webhook():
 _cold_start_register_webhook()
 
 
-def invoke_agent(prompt: str, session_id: str):
-    if not AGENTCORE_RUNTIME_ARN:
-        logger.warning("AGENTCORE_RUNTIME_ARN not set")
-        return "Agent runtime not configured."
-    logger.info("Invoking agent: prompt_len=%d session_id=%s runtime_arn=%s", len(prompt or ""), session_id, AGENTCORE_RUNTIME_ARN[:60])
-    import urllib.request
+def claim_update(update_id) -> bool:
+    """Atomically mark an update_id as processing. Returns True if this invocation owns it.
+
+    Telegram retries the webhook if no 200 is received within 60s, but invoke_agent()
+    can take up to 280s. Without deduplication the same message gets processed 5+ times.
+    Uses a conditional DynamoDB put: if the item already exists the put fails and we
+    drop the duplicate silently.
+    """
+    import time
+    ttl = int(time.time()) + 86400  # 24h TTL
     try:
-        arn_parts = parse_runtime_arn(AGENTCORE_RUNTIME_ARN)
-        region = arn_parts['region']
-        endpoint = get_data_plane_endpoint(region)
-        encoded_arn = quote(AGENTCORE_RUNTIME_ARN, safe='')
-        url = f"{endpoint}/runtimes/{encoded_arn}/invocations"
-        logger.info("Invoke URL: %s", url)
-        # agent_id=glitch routes to the Glitch brainstem (Claude Sonnet 4.5 via Strands).
-        payload = {"prompt": prompt, "session_id": session_id, "agent_id": "glitch"}
-        body = json.dumps(payload).encode('utf-8')
-        headers = {
-            'Content-Type': 'application/json',
-            'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id': session_id,
-        }
-        aws_request = AWSRequest(method='POST', url=url, data=body, headers=headers)
-        credentials = session.get_credentials()
-        if credentials:
-            SigV4Auth(credentials, 'bedrock-agentcore', region).add_auth(aws_request)
-        req = urllib.request.Request(url, data=body, headers=dict(aws_request.headers), method='POST')
-        with urllib.request.urlopen(req, timeout=280) as response:
-            result = json.loads(response.read().decode())
-            logger.info("Invoke agent success: has_message=%s", bool(isinstance(result, dict) and result.get('message')))
-            return result if isinstance(result, dict) else str(result)
+        table.put_item(
+            Item={'pk': 'UPDATE', 'sk': str(update_id), 'ttl': ttl},
+            ConditionExpression='attribute_not_exists(pk)',
+        )
+        return True
+    except dynamodb.meta.client.exceptions.ConditionalCheckFailedException:
+        logger.info("Telegram webhook: duplicate update_id=%s — skipping", update_id)
+        return False
     except Exception as e:
-        logger.error(f"Failed to invoke agent: {e}", exc_info=True)
-        return f"Error: {e}"
+        # On any other DynamoDB error, allow processing (fail open)
+        logger.warning("Telegram webhook: claim_update error update_id=%s: %s", update_id, e)
+        return True
 
 
 def _headers_get(headers: dict, key: str, default=None):
@@ -468,27 +438,25 @@ def handler(event, context):
             logger.info("Telegram webhook: user_id=%s not allowed to DM, ack update_id=%s", user_id, update_id)
             send_telegram_message(chat_id, "You are not authorized to DM this bot.", bot_token)
             return {'statusCode': 200, 'body': 'OK'}
+    if not claim_update(update_id):
+        return {'statusCode': 200, 'body': 'OK'}
+    base_session = f"telegram:dm:{chat_id}" if is_private_chat(chat) else f"telegram:group:{chat_id}"
+    session_id = base_session.ljust(33, '0')
+    if not PROCESSOR_FUNCTION_NAME:
+        logger.error("Telegram webhook: PROCESSOR_FUNCTION_NAME not set update_id=%s", update_id)
+        return {'statusCode': 200, 'body': 'OK'}
     try:
-        base_session = f"telegram:dm:{chat_id}" if is_private_chat(chat) else f"telegram:group:{chat_id}"
-        session_id = base_session.ljust(33, '0')
-        logger.info("Telegram webhook: invoking agent update_id=%s session_id=%s text_len=%s", update_id, session_id, len(text))
-        result = invoke_agent(text, session_id)
-        if isinstance(result, dict):
-            error = result.get('error')
-            if error:
-                logger.warning("Telegram webhook: agent returned error: %s update_id=%s", error, update_id)
-                send_telegram_message(chat_id, "Sorry, I couldn't process that request. Please try again.", bot_token)
-            else:
-                message_text = result.get('message') or result.get('response') or str(result)
-                send_telegram_message(chat_id, message_text, bot_token)
-                logger.info("Telegram webhook: agent replied, sent to chat_id=%s update_id=%s", chat_id, update_id)
-        else:
-            send_telegram_message(chat_id, str(result), bot_token)
-            logger.info("Telegram webhook: agent replied (str), sent to chat_id=%s update_id=%s", chat_id, update_id)
+        lambda_client.invoke(
+            FunctionName=PROCESSOR_FUNCTION_NAME,
+            InvocationType='Event',  # async — returns immediately, processor runs independently
+            Payload=json.dumps({
+                'chat_id': chat_id,
+                'text': text,
+                'session_id': session_id,
+                'update_id': update_id,
+            }).encode(),
+        )
+        logger.info("Telegram webhook: dispatched to processor update_id=%s session_id=%s", update_id, session_id)
     except Exception as e:
-        logger.error("Telegram webhook: error processing message: %s", e, exc_info=True)
-        try:
-            send_telegram_message(chat_id, "Sorry, something went wrong. Please try again.", bot_token)
-        except Exception:
-            pass
+        logger.error("Telegram webhook: failed to dispatch to processor update_id=%s: %s", update_id, e)
     return {'statusCode': 200, 'body': 'OK'}

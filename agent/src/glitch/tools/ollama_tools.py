@@ -261,6 +261,49 @@ async def local_chat(
         return f"Chat processing failed: {str(e)}"
 
 
+@tool
+def test_ollama_model(
+    model: str = "mistral-nemo:12b",
+    prompt: str = "Reply with exactly one word: hello",
+    endpoint: str = "chat",
+) -> str:
+    """Send a test prompt to a local Ollama model and measure end-to-end inference latency.
+
+    Unlike check_ollama_health (which only checks reachability and model lists), this
+    actually sends a prompt and validates the model produces a response.
+
+    Args:
+        model: Model name to test (e.g. "mistral-nemo:12b", "llava")
+        prompt: Test prompt — keep short for speed
+        endpoint: "chat" uses port 11434 (Ollama native); "vision" uses port 18080 (OpenAI-compat)
+    """
+    import time
+    import urllib.request
+    config = _get_config()
+
+    if endpoint == "vision":
+        url = f"http://{config.vision_host}:{config.vision_port}/api/generate"
+    else:
+        url = f"http://{config.chat_host}:{config.port}/api/generate"
+
+    payload = json.dumps({"model": model, "prompt": prompt, "stream": False}).encode()
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    t0 = time.monotonic()
+    try:
+        with urllib.request.urlopen(req, timeout=config.timeout) as resp:
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            data = json.loads(resp.read().decode())
+            response_text = (data.get("response") or "").strip()
+            return (
+                f"✓ {model} ({endpoint}) responded in {latency_ms}ms\n"
+                f"Prompt:   {prompt}\n"
+                f"Response: {response_text}"
+            )
+    except Exception as e:
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        return f"✗ {model} ({endpoint}) failed after {latency_ms}ms: {e}"
+
+
 def _debug_ollama_log(message: str, data: dict, hypothesis_id: str = "") -> None:
     """Write ollama health debug payload to CloudWatch Logs and to logger (stdout)."""
     # #region agent log

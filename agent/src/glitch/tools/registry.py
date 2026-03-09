@@ -2,7 +2,8 @@
 
 from typing import Callable, Dict, List, Set
 
-from glitch.tools.ollama_tools import vision_agent, local_chat, check_ollama_health
+from glitch.tools.ollama_tools import vision_agent, local_chat, check_ollama_health, test_ollama_model
+from glitch.tools.network_tools import run_packet_capture, ping_host, traceroute_host
 from glitch.tools.memory_tools import (
     set_session_goal,
     add_fact,
@@ -60,7 +61,8 @@ class ToolRegistry:
         self._register_default_groups()
 
     def _register_default_groups(self) -> None:
-        self._groups["ollama"] = [vision_agent, local_chat, check_ollama_health]
+        self._groups["ollama"] = [vision_agent, local_chat, check_ollama_health, test_ollama_model]
+        self._groups["network"] = [run_packet_capture, ping_host, traceroute_host]
         self._groups["memory"] = [
             set_session_goal,
             add_fact,
