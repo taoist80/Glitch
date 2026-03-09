@@ -73,7 +73,7 @@ def log(message: str, level: str = 'INFO'):
 def get_ssm_parameter(ssm_client, name: str) -> str | None:
     """Get a parameter value from SSM Parameter Store."""
     try:
-        response = ssm_client.get_parameter(Name=name)
+        response = ssm_client.get_parameter(Name=name, WithDecryption=True)
         return response['Parameter']['Value']
     except ClientError as e:
         if e.response['Error']['Code'] == 'ParameterNotFound':

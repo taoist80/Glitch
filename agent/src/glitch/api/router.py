@@ -440,8 +440,8 @@ async def update_telegram_config(update: TelegramConfigUpdate) -> TelegramConfig
 async def get_ollama_health() -> OllamaHealthResponse:
     """Get Ollama hosts health status."""
     try:
-        from glitch.tools.ollama_tools import _check_single_host, DEFAULT_CONFIG
-        config = DEFAULT_CONFIG
+        from glitch.tools.ollama_tools import _check_single_host, _get_config
+        config = _get_config()
         hosts = []
         # Chat: Ollama 11434 /api/tags. Vision: OpenAI-compatible 8080 /v1/models.
         for name, host, port_override, use_openai in [
