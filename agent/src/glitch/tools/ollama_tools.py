@@ -12,7 +12,7 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, TypedDict, cast
 
@@ -49,7 +49,7 @@ def _ollama_chat_host() -> str:
 
 
 def _ollama_vision_host() -> str:
-    """Vision endpoint: proxy host (port 8080) or direct 10.10.110.137."""
+    """Vision endpoint: proxy host (port 18080) or direct 10.10.110.137."""
     return _ollama_proxy_host() or "10.10.110.137"
 
 
@@ -58,21 +58,23 @@ class OllamaConfig:
     """Configuration for Ollama / local model endpoints.
 
     When GLITCH_OLLAMA_PROXY_HOST is set, chat_host and vision_host both use the proxy;
-    the proxy listens on 11434 (Mistral) and 8080 (LLaVA).
+    the proxy listens on 11434 (Mistral/Chat) and 18080 (LLaVA/Vision, WAN-safe port).
     When unset, direct on-prem IPs are used (requires network reachability).
     """
     chat_host: str = "10.10.110.202"
     vision_host: str = "10.10.110.137"
     port: int = 11434
-    vision_port: int = 8080
+    vision_port: int = 18080
     timeout: float = 180.0
 
 
-DEFAULT_CONFIG = OllamaConfig(
-    chat_host=_ollama_chat_host(),
-    vision_host=_ollama_vision_host(),
-    timeout=_ollama_timeout(),
-)
+def _get_config() -> OllamaConfig:
+    """Build OllamaConfig at call time so env var changes after import are respected."""
+    return OllamaConfig(
+        chat_host=_ollama_chat_host(),
+        vision_host=_ollama_vision_host(),
+        timeout=_ollama_timeout(),
+    )
 
 
 class OllamaGeneratePayload(TypedDict, total=False):
@@ -127,25 +129,34 @@ class OpenAIModelsResponse(TypedDict, total=False):
 @dataclass
 class HealthCheckResult:
     """Result of an Ollama health check.
-    
+
     Attributes:
         name: Endpoint name (Chat, Vision)
         host: IP address
         healthy: Whether endpoint is reachable
         models: List of available models (if healthy)
+        missing_models: Expected models not found in the model list
+        latency_ms: Round-trip latency in milliseconds (None if check failed)
         error: Error message (if unhealthy)
     """
     name: str
     host: str
     healthy: bool
     models: List[str]
+    missing_models: List[str] = field(default_factory=list)
+    latency_ms: Optional[float] = None
     error: Optional[str] = None
-    
+
     def to_string(self) -> str:
         """Format as human-readable string."""
-        if self.healthy:
-            return f"{self.name} ({self.host}): ✓ Available models: {', '.join(self.models)}"
-        return f"{self.name} ({self.host}): ✗ {self.error}"
+        if not self.healthy:
+            return f"{self.name} ({self.host}): ✗ {self.error}"
+        latency = f" [{self.latency_ms:.0f}ms]" if self.latency_ms is not None else ""
+        models_str = ", ".join(self.models) if self.models else "(none)"
+        base = f"{self.name} ({self.host}){latency}: ✓ Available models: {models_str}"
+        if self.missing_models:
+            base += f" | WARNING: expected model(s) not found: {', '.join(self.missing_models)}"
+        return base
 
 
 @tool
@@ -167,7 +178,7 @@ async def vision_agent(
     Returns:
         Model's analysis or response about the image
     """
-    config = DEFAULT_CONFIG
+    config = _get_config()
     
     try:
         endpoint = f"http://{config.vision_host}:{config.port}/api/generate"
@@ -218,7 +229,7 @@ async def local_chat(
     Returns:
         Model's response to the prompt
     """
-    config = DEFAULT_CONFIG
+    config = _get_config()
     
     try:
         endpoint = f"http://{config.chat_host}:{config.port}/api/generate"
@@ -321,6 +332,7 @@ async def _check_single_host(
     *,
     port_override: Optional[int] = None,
     use_openai_format: bool = False,
+    expected_models: Optional[List[str]] = None,
 ) -> HealthCheckResult:
     """Check health of a single host (Ollama native or OpenAI-compatible).
 
@@ -330,47 +342,59 @@ async def _check_single_host(
         config: OllamaConfig with port, vision_port, timeout
         port_override: If set, use this port instead of config.port
         use_openai_format: If True, GET /v1/models (port 8080); else GET /api/tags (port 11434)
+        expected_models: Model names that must be present for the check to be fully healthy
 
     Returns:
-        HealthCheckResult with status
+        HealthCheckResult with status, latency, and any missing expected models
     """
     port = port_override if port_override is not None else config.port
     path = "/v1/models" if use_openai_format else "/api/tags"
     _debug_ollama_log("check_single_host entry", {"name": name, "host": host, "port": port, "path": path}, "A")
+    t0 = time.monotonic()
     try:
         endpoint = f"http://{host}:{port}{path}"
         async with httpx.AsyncClient(timeout=3.0) as client:
             response = await client.get(endpoint)
+            latency_ms = (time.monotonic() - t0) * 1000
             if response.status_code == 200:
                 raw = response.json()
                 if use_openai_format:
                     models = _parse_openai_models(cast(OpenAIModelsResponse, raw))
                 else:
                     models = _parse_ollama_models(cast(OllamaTagsResponse, raw))
-                _debug_ollama_log("check_single_host success", {"name": name, "host": host, "healthy": True, "models_count": len(models), "models": models}, "D")
+                missing = [m for m in (expected_models or []) if m not in models]
+                _debug_ollama_log("check_single_host success", {"name": name, "host": host, "healthy": True, "latency_ms": latency_ms, "models_count": len(models), "models": models, "missing_models": missing}, "D")
                 return HealthCheckResult(
                     name=name,
                     host=host,
                     healthy=True,
                     models=models,
+                    missing_models=missing,
+                    latency_ms=latency_ms,
                 )
-            _debug_ollama_log("check_single_host non-200", {"name": name, "host": host, "status_code": response.status_code}, "C")
+            _debug_ollama_log("check_single_host non-200", {"name": name, "host": host, "status_code": response.status_code, "latency_ms": latency_ms}, "C")
             return HealthCheckResult(
                 name=name,
                 host=host,
                 healthy=False,
                 models=[],
+                latency_ms=latency_ms,
                 error=f"HTTP {response.status_code}",
             )
+    except httpx.TimeoutException:
+        latency_ms = (time.monotonic() - t0) * 1000
+        error = "timed out after 3s (host unreachable or overloaded)"
+        _debug_ollama_log("check_single_host timeout", {"name": name, "host": host, "latency_ms": latency_ms}, "B")
+        return HealthCheckResult(name=name, host=host, healthy=False, models=[], latency_ms=latency_ms, error=error)
+    except httpx.ConnectError:
+        latency_ms = (time.monotonic() - t0) * 1000
+        error = "connection refused (host down or port not open)"
+        _debug_ollama_log("check_single_host connect_error", {"name": name, "host": host, "latency_ms": latency_ms}, "B")
+        return HealthCheckResult(name=name, host=host, healthy=False, models=[], latency_ms=latency_ms, error=error)
     except Exception as e:
-        _debug_ollama_log("check_single_host exception", {"name": name, "host": host, "error": str(e), "error_type": type(e).__name__}, "B")
-        return HealthCheckResult(
-            name=name,
-            host=host,
-            healthy=False,
-            models=[],
-            error=str(e),
-        )
+        latency_ms = (time.monotonic() - t0) * 1000
+        _debug_ollama_log("check_single_host exception", {"name": name, "host": host, "error": str(e), "error_type": type(e).__name__, "latency_ms": latency_ms}, "B")
+        return HealthCheckResult(name=name, host=host, healthy=False, models=[], latency_ms=latency_ms, error=str(e))
 
 
 @tool
@@ -387,12 +411,13 @@ async def check_ollama_health() -> str:
     """
     import asyncio
     
-    config = DEFAULT_CONFIG
+    config = _get_config()
     
     # Chat: Ollama native (11434, /api/tags). Vision: OpenAI-compatible (8080, /v1/models).
+    # Expected models match the defaults used by local_chat and vision_agent respectively.
     tasks = [
-        _check_single_host("Chat", config.chat_host, config),
-        _check_single_host("Vision", config.vision_host, config, port_override=config.vision_port, use_openai_format=True),
+        _check_single_host("Chat", config.chat_host, config, expected_models=["mistral-nemo:12b"]),
+        _check_single_host("Vision", config.vision_host, config, port_override=config.vision_port, use_openai_format=True, expected_models=["llava"]),
     ]
     results = await asyncio.gather(*tasks)
     lines = [r.to_string() for r in results]

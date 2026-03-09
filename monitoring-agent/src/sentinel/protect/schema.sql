@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS entities (
     plate_state         TEXT,
     vehicle_color       TEXT,
     vehicle_make_model  TEXT,
-    vehicle_embedding   vector(2048),
+    vehicle_embedding   vector(2000),
     -- Person/face fields
     face_embedding      vector(512),
     -- Alert tuning

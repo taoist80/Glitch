@@ -8,7 +8,7 @@ import * as yaml from 'yaml';
 import { execSync } from 'child_process';
 import {
   GlitchFoundationStack,
-  GlitchVpnStack,
+  GlitchProtectDbStack,
   SSM_PARAMS,
   SecretsStack,
   AgentCoreStack,
@@ -78,22 +78,12 @@ const customDomain = 'glitch.awoo.agency';
 
 const foundationStack = new GlitchFoundationStack(app, 'GlitchFoundationStack', {
   env,
-  description: 'Foundation: VPC (no NAT Gateway), IAM roles, S2S VPN (UDM-Pro gateway), SSM parameters',
+  description: 'Foundation: VPC, IAM roles, SSM parameters',
 });
 
-// ============================================================================
-// PHASE 1b: VPN (deploy once after Phase 1, then leave alone)
-// First deploy — pass UDM-Pro WAN IP to create Customer Gateway + VPN Connection:
-//   cdk deploy GlitchVpnStack -c onPremPublicIp=YOUR.WAN.IP.HERE
-// All VPN resources have DeletionPolicy: RETAIN — safe to redeploy without context.
-// ============================================================================
-
-const vpnStack = new GlitchVpnStack(app, 'GlitchVpnStack', {
-  env,
-  vpc: foundationStack.vpc,
-  description: 'Site-to-Site VPN: VGW, Customer Gateway, VPN Connection (UDM-Pro ↔ AWS)',
-});
-vpnStack.addDependency(foundationStack);
+// GlitchVpnStack decommissioned — VPN resources have DeletionPolicy:RETAIN and must
+// be manually deleted in the AWS console (VPN Connection + Customer Gateway + VGW)
+// to stop the ~$36.50/month charge.
 
 // ============================================================================
 // PHASE 2: AGENT (run after Phase 1)
@@ -121,13 +111,23 @@ const storageStack = new GlitchStorageStack(app, 'GlitchStorageStack', {
   description: 'DynamoDB, S3, and telemetry log group',
 });
 
+const protectDbStack = new GlitchProtectDbStack(app, 'GlitchProtectDbStack', {
+  env,
+  vpc: foundationStack.vpc,
+  description: 'RDS Postgres (t4g.micro) for Protect tab — IAM auth, single-AZ',
+});
+protectDbStack.addDependency(foundationStack);
+
 const gatewayStack = new GlitchGatewayStack(app, 'GlitchGatewayStack', {
   env,
   configTable: storageStack.configTable,
   agentCoreRuntimeArn,
+  vpc: foundationStack.vpc,
+  protectDb: protectDbStack.db,
   description: 'Gateway Lambda (IAM-auth Function URL, /api/*, keepalive)',
 });
 gatewayStack.addDependency(storageStack);
+gatewayStack.addDependency(protectDbStack);
 
 const telegramWebhookStack = new TelegramWebhookStack(app, 'GlitchTelegramWebhookStack', {
   env,

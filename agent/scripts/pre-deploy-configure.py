@@ -52,6 +52,7 @@ SSM_TELEGRAM_WEBHOOK_URL = '/glitch/telegram/webhook-url'
 SSM_TELEGRAM_CONFIG_TABLE = '/glitch/telegram/config-table'
 SSM_SSH_HOSTS = '/glitch/ssh/hosts'
 SSM_SOUL_S3_BUCKET = '/glitch/soul/s3-bucket'
+SSM_OLLAMA_PROXY_HOST = '/glitch/ollama/proxy-host'
 
 AGENT_DIR = Path(__file__).parent.parent
 CONFIG_FILE = AGENT_DIR / '.bedrock_agentcore.yaml'
@@ -149,6 +150,15 @@ def main():
         if 'environment_variables' not in agent_config['aws']:
             agent_config['aws']['environment_variables'] = {}
         env_vars = agent_config['aws']['environment_variables']
+
+        # Ollama proxy host — DDNS hostname that forwards to on-prem model servers.
+        # Port-forwards required on UDM-Pro: WAN:11434→10.10.110.202:11434 (Chat), WAN:18080→10.10.110.137:8080 (Vision).
+        ollama_proxy_host = get_ssm_parameter(ssm_client, SSM_OLLAMA_PROXY_HOST)
+        if ollama_proxy_host:
+            env_vars['GLITCH_OLLAMA_PROXY_HOST'] = ollama_proxy_host
+            log(f"Ollama proxy host set to {ollama_proxy_host} (from SSM)", 'SUCCESS')
+        else:
+            log("SSM /glitch/ollama/proxy-host not found; deploy GlitchFoundationStack first", 'WARN')
 
         # Set default timeouts for Ollama requests
         if 'GLITCH_OLLAMA_TIMEOUT' not in env_vars:

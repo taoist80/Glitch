@@ -10,12 +10,9 @@ Routes:
     GET /api/protect/alerts    → ?limit=N&unack_only=true  (default 20)
     GET /api/protect/patterns  → ?limit=N  (default 20)
 
-Credentials: Secrets Manager secret 'glitch/protect-db'
-  JSON format: {"host": "...", "port": 5432, "dbname": "...", "username": "...", "password": "..."}
-  OR AWS RDS-style: {"host": "...", "port": "...", "dbname": "...", "username": "...", "password": "..."}
-
-Connection: pg8000 (pure Python, no compiled extensions).
-Credentials are cached in Lambda global scope across warm invocations.
+Connection: RDS IAM authentication via boto3 generate_db_auth_token.
+The IAM token is generated locally (no network call) and used as the Postgres password.
+SSL is required for RDS IAM auth.
 """
 
 import json
@@ -29,21 +26,14 @@ import boto3
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-PROTECT_DB_SECRET_NAME = os.environ.get("PROTECT_DB_SECRET_NAME", "glitch/protect-db")
-PROTECT_DB_SSL = os.environ.get("PROTECT_DB_SSL", "false").lower() in ("1", "true", "yes")
+_REGION = os.environ.get('AWS_REGION', 'us-west-2')
+PROTECT_DB_HOST = os.environ['PROTECT_DB_HOST']
+PROTECT_DB_PORT = int(os.environ.get('PROTECT_DB_PORT', '5432'))
+PROTECT_DB_NAME = os.environ.get('PROTECT_DB_NAME', 'glitch_protect')
+PROTECT_DB_USER = os.environ.get('PROTECT_DB_USER', 'glitch_iam')
 
-_sm_client = boto3.client("secretsmanager")
-_db_config: Optional[Dict[str, Any]] = None  # cached across warm invocations
+_rds_client = boto3.client('rds', region_name=_REGION)
 _conn = None  # pg8000 connection, reused on warm invocations
-
-
-def _load_db_config() -> Dict[str, Any]:
-    global _db_config
-    if _db_config is not None:
-        return _db_config
-    secret = _sm_client.get_secret_value(SecretId=PROTECT_DB_SECRET_NAME)
-    _db_config = json.loads(secret["SecretString"])
-    return _db_config
 
 
 def _get_connection():
@@ -63,14 +53,18 @@ def _get_connection():
                 pass
             _conn = None
 
-    cfg = _load_db_config()
+    token = _rds_client.generate_db_auth_token(
+        DBHostname=PROTECT_DB_HOST,
+        Port=PROTECT_DB_PORT,
+        DBUsername=PROTECT_DB_USER,
+    )
     _conn = pg.Connection(
-        user=cfg.get("username") or cfg.get("user"),
-        password=cfg["password"],
-        host=cfg["host"],
-        port=int(cfg.get("port", 5432)),
-        database=cfg.get("dbname") or cfg.get("database", "glitch_protect"),
-        ssl_context=PROTECT_DB_SSL,
+        user=PROTECT_DB_USER,
+        password=token,
+        host=PROTECT_DB_HOST,
+        port=PROTECT_DB_PORT,
+        database=PROTECT_DB_NAME,
+        ssl_context=True,
     )
     return _conn
 

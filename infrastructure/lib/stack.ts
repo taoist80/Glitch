@@ -2,23 +2,33 @@
  * All Glitch CDK stacks in a single file.
  * Order: dependency-friendly (interfaces and stacks used by others come first).
  */
-import * as cdk from 'aws-cdk-lib';
-import * as acm from 'aws-cdk-lib/aws-certificatemanager';
-import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
-import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
-import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
-import * as ec2 from 'aws-cdk-lib/aws-ec2';
-import * as events from 'aws-cdk-lib/aws-events';
-import * as targets from 'aws-cdk-lib/aws-events-targets';
-import * as iam from 'aws-cdk-lib/aws-iam';
-import * as lambda from 'aws-cdk-lib/aws-lambda';
-import * as logs from 'aws-cdk-lib/aws-logs';
-import * as s3 from 'aws-cdk-lib/aws-s3';
-import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
-import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
-import * as ssm from 'aws-cdk-lib/aws-ssm';
-import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
-import * as cr from 'aws-cdk-lib/custom-resources';
+import { CfnDeletionPolicy, CfnOutput, CustomResource, Duration, Fn, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import type { StackProps } from 'aws-cdk-lib';
+import { Certificate } from 'aws-cdk-lib/aws-certificatemanager';
+import { AllowedMethods, CachePolicy, CfnDistribution, CfnOriginAccessControl, Distribution, OriginProtocolPolicy, OriginRequestPolicy, ViewerProtocolPolicy } from 'aws-cdk-lib/aws-cloudfront';
+import { HttpOrigin, S3BucketOrigin } from 'aws-cdk-lib/aws-cloudfront-origins';
+import { Table } from 'aws-cdk-lib/aws-dynamodb';
+import type { ITable } from 'aws-cdk-lib/aws-dynamodb';
+import { CfnVPNGateway, InterfaceVpcEndpoint, InterfaceVpcEndpointAwsService, InstanceType as Ec2InstanceType, IpAddresses, Peer, Port, PrivateSubnet, PublicSubnet, SecurityGroup, SubnetType, Vpc } from 'aws-cdk-lib/aws-ec2';
+import type { ISubnet, IVpc } from 'aws-cdk-lib/aws-ec2';
+import { Rule, RuleTargetInput, Schedule } from 'aws-cdk-lib/aws-events';
+import { LambdaFunction as LambdaFunctionTarget } from 'aws-cdk-lib/aws-events-targets';
+import { Effect, ManagedPolicy, PolicyDocument, PolicyStatement, Role, ServicePrincipal } from 'aws-cdk-lib/aws-iam';
+import type { IRole } from 'aws-cdk-lib/aws-iam';
+import { Code, Function as LambdaFunction, FunctionUrlAuthType, HttpMethod, Runtime } from 'aws-cdk-lib/aws-lambda';
+import type { IFunction } from 'aws-cdk-lib/aws-lambda';
+import { LogGroup } from 'aws-cdk-lib/aws-logs';
+import type { ILogGroup } from 'aws-cdk-lib/aws-logs';
+import { BlockPublicAccess, Bucket, BucketEncryption } from 'aws-cdk-lib/aws-s3';
+import type { IBucket } from 'aws-cdk-lib/aws-s3';
+import { BucketDeployment, CacheControl, Source } from 'aws-cdk-lib/aws-s3-deployment';
+import { Secret } from 'aws-cdk-lib/aws-secretsmanager';
+import type { ISecret } from 'aws-cdk-lib/aws-secretsmanager';
+import { StringParameter } from 'aws-cdk-lib/aws-ssm';
+import { DatabaseInstance, DatabaseInstanceEngine, PostgresEngineVersion, StorageType, Credentials } from 'aws-cdk-lib/aws-rds';
+import type { IDatabaseInstance } from 'aws-cdk-lib/aws-rds';
+import { CfnIPSet, CfnWebACL } from 'aws-cdk-lib/aws-wafv2';
+import { AwsCustomResource, AwsCustomResourcePolicy, PhysicalResourceId } from 'aws-cdk-lib/custom-resources';
 import { Construct } from 'constructs';
 import * as path from 'path';
 
@@ -61,6 +71,7 @@ export const SSM_PARAMS = {
   CODEBUILD_ROLE_ARN: '/glitch/iam/codebuild-role-arn',
   TELEGRAM_WEBHOOK_URL: '/glitch/telegram/webhook-url',
   TELEGRAM_CONFIG_TABLE: '/glitch/telegram/config-table',
+  OLLAMA_PROXY_HOST: '/glitch/ollama/proxy-host',
 } as const;
 
 // --- GlitchFoundationStack ---
@@ -68,29 +79,29 @@ export const SSM_PARAMS = {
 // AgentCore runtimes run in PUBLIC network mode -- no VPC ENIs, no VPC endpoints needed.
 // The VPC exists for the Site-to-Site VPN (on-prem LLM access via UDM-Pro gateway).
 
-export interface GlitchFoundationStackProps extends cdk.StackProps {
+export interface GlitchFoundationStackProps extends StackProps {
   readonly vpcCidr?: string;
 }
 
-export class GlitchFoundationStack extends cdk.Stack {
-  public readonly vpc: ec2.Vpc;
-  public readonly privateSubnets: ec2.ISubnet[];
-  public readonly publicSubnets: ec2.ISubnet[];
-  public readonly runtimeRole: iam.Role;
-  public readonly codeBuildRole: iam.Role;
+export class GlitchFoundationStack extends Stack {
+  public readonly vpc: Vpc;
+  public readonly privateSubnets: ISubnet[];
+  public readonly publicSubnets: ISubnet[];
+  public readonly runtimeRole: Role;
+  public readonly codeBuildRole: Role;
 
   constructor(scope: Construct, id: string, props?: GlitchFoundationStackProps) {
     super(scope, id, props);
 
     // ========== VPC ==========
     // No NAT Gateway; agents use PUBLIC mode. Private subnets exist for VPN route propagation only (no internet egress).
-    this.vpc = new ec2.Vpc(this, 'Vpc', {
+    this.vpc = new Vpc(this, 'Vpc', {
       maxAzs: 2,
       natGateways: 0,
-      ipAddresses: ec2.IpAddresses.cidr(props?.vpcCidr || '10.0.0.0/16'),
+      ipAddresses: IpAddresses.cidr(props?.vpcCidr || '10.0.0.0/16'),
       subnetConfiguration: [
-        { name: 'Public', subnetType: ec2.SubnetType.PUBLIC, cidrMask: 24 },
-        { name: 'Private', subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS, cidrMask: 24 },
+        { name: 'Public', subnetType: SubnetType.PUBLIC, cidrMask: 24 },
+        { name: 'Private', subnetType: SubnetType.PRIVATE_WITH_EGRESS, cidrMask: 24 },
       ],
       enableDnsHostnames: true,
       enableDnsSupport: true,
@@ -101,33 +112,33 @@ export class GlitchFoundationStack extends cdk.Stack {
 
     // ========== IAM Roles (NO hardcoded names) ==========
 
-    this.runtimeRole = new iam.Role(this, 'RuntimeRole', {
-      assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
+    this.runtimeRole = new Role(this, 'RuntimeRole', {
+      assumedBy: new ServicePrincipal('bedrock-agentcore.amazonaws.com'),
       description: 'IAM role for AgentCore Runtime (Glitch + Sentinel)',
     });
 
     // CloudWatch Logs — minimum set for AgentCore runtime startup.
     // Broader log permissions are added per-agent in AgentCoreStack / GlitchSentinelStack.
-    this.runtimeRole.addToPolicy(new iam.PolicyStatement({
+    this.runtimeRole.addToPolicy(new PolicyStatement({
       sid: 'CloudWatchLogsDescribeGroups',
-      effect: iam.Effect.ALLOW,
+      effect: Effect.ALLOW,
       actions: ['logs:DescribeLogGroups'],
       resources: [`arn:aws:logs:${this.region}:${this.account}:log-group:*`],
     }));
 
     // X-Ray: OTEL ADOT traces exporter.
-    this.runtimeRole.addToPolicy(new iam.PolicyStatement({
+    this.runtimeRole.addToPolicy(new PolicyStatement({
       sid: 'XRayTracing',
-      effect: iam.Effect.ALLOW,
+      effect: Effect.ALLOW,
       actions: ['xray:PutTraceSegments', 'xray:PutTelemetryRecords', 'xray:GetSamplingRules', 'xray:GetSamplingTargets'],
       resources: ['*'],
     }));
 
     // CloudWatch metrics: OTEL ADOT metrics exporter.
     // Scoped to known namespaces to prevent metric pollution.
-    this.runtimeRole.addToPolicy(new iam.PolicyStatement({
+    this.runtimeRole.addToPolicy(new PolicyStatement({
       sid: 'CloudWatchMetrics',
-      effect: iam.Effect.ALLOW,
+      effect: Effect.ALLOW,
       actions: ['cloudwatch:PutMetricData'],
       resources: ['*'],
       conditions: {
@@ -138,19 +149,19 @@ export class GlitchFoundationStack extends cdk.Stack {
     }));
 
     // CodeBuild role for container builds
-    this.codeBuildRole = new iam.Role(this, 'CodeBuildRole', {
-      assumedBy: new iam.ServicePrincipal('codebuild.amazonaws.com'),
+    this.codeBuildRole = new Role(this, 'CodeBuildRole', {
+      assumedBy: new ServicePrincipal('codebuild.amazonaws.com'),
       description: 'IAM role for AgentCore CodeBuild container builds',
     });
 
-    this.codeBuildRole.addToPolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
+    this.codeBuildRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
       actions: ['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents'],
       resources: [`arn:aws:logs:${this.region}:${this.account}:log-group:/aws/codebuild/*`],
     }));
 
-    this.codeBuildRole.addToPolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
+    this.codeBuildRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
       actions: ['s3:GetObject', 's3:GetObjectVersion', 's3:PutObject'],
       resources: [
         `arn:aws:s3:::bedrock-agentcore-codebuild-sources-${this.account}-${this.region}`,
@@ -158,20 +169,20 @@ export class GlitchFoundationStack extends cdk.Stack {
       ],
     }));
 
-    this.codeBuildRole.addToPolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
+    this.codeBuildRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
       actions: ['s3:GetBucketAcl', 's3:GetBucketLocation'],
       resources: [`arn:aws:s3:::bedrock-agentcore-codebuild-sources-${this.account}-${this.region}`],
     }));
 
-    this.codeBuildRole.addToPolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
+    this.codeBuildRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
       actions: ['ecr:GetAuthorizationToken'],
       resources: ['*'],
     }));
 
-    this.codeBuildRole.addToPolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
+    this.codeBuildRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
       actions: [
         'ecr:BatchCheckLayerAvailability',
         'ecr:GetDownloadUrlForLayer',
@@ -185,47 +196,53 @@ export class GlitchFoundationStack extends cdk.Stack {
     }));
 
     // ========== SSM Parameters (for cross-stack references) ==========
-    new ssm.StringParameter(this, 'SsmVpcId', {
+    new StringParameter(this, 'SsmVpcId', {
       parameterName: SSM_PARAMS.VPC_ID,
       stringValue: this.vpc.vpcId,
       description: 'Glitch VPC ID',
     });
 
-    new ssm.StringParameter(this, 'SsmPrivateSubnets', {
+    new StringParameter(this, 'SsmPrivateSubnets', {
       parameterName: SSM_PARAMS.PRIVATE_SUBNET_IDS,
       stringValue: this.privateSubnets.map(s => s.subnetId).join(','),
       description: 'Glitch private subnet IDs (comma-separated)',
     });
 
-    new ssm.StringParameter(this, 'SsmPublicSubnets', {
+    new StringParameter(this, 'SsmPublicSubnets', {
       parameterName: SSM_PARAMS.PUBLIC_SUBNET_IDS,
       stringValue: this.publicSubnets.map(s => s.subnetId).join(','),
       description: 'Glitch public subnet IDs (comma-separated)',
     });
 
-    new ssm.StringParameter(this, 'SsmRuntimeRoleArn', {
+    new StringParameter(this, 'SsmRuntimeRoleArn', {
       parameterName: SSM_PARAMS.RUNTIME_ROLE_ARN,
       stringValue: this.runtimeRole.roleArn,
       description: 'AgentCore runtime role ARN',
     });
 
-    new ssm.StringParameter(this, 'SsmCodeBuildRoleArn', {
+    new StringParameter(this, 'SsmCodeBuildRoleArn', {
       parameterName: SSM_PARAMS.CODEBUILD_ROLE_ARN,
       stringValue: this.codeBuildRole.roleArn,
       description: 'CodeBuild role ARN for agentcore deploy',
     });
 
+    new StringParameter(this, 'SsmOllamaProxyHost', {
+      parameterName: SSM_PARAMS.OLLAMA_PROXY_HOST,
+      stringValue: 'home.awoo.agency',
+      description: 'DDNS hostname for on-prem Ollama proxy (Chat:11434, Vision:18080)',
+    });
+
     // ========== Outputs ==========
-    new cdk.CfnOutput(this, 'VpcId', { value: this.vpc.vpcId, description: 'VPC ID' });
-    new cdk.CfnOutput(this, 'PrivateSubnetIds', {
+    new CfnOutput(this, 'VpcId', { value: this.vpc.vpcId, description: 'VPC ID' });
+    new CfnOutput(this, 'PrivateSubnetIds', {
       value: this.privateSubnets.map(s => s.subnetId).join(','),
       description: 'Private subnet IDs',
     });
-    new cdk.CfnOutput(this, 'RuntimeRoleArn', {
+    new CfnOutput(this, 'RuntimeRoleArn', {
       value: this.runtimeRole.roleArn,
       description: 'Runtime role ARN (use with agentcore configure --execution-role)',
     });
-    new cdk.CfnOutput(this, 'CodeBuildRoleArn', {
+    new CfnOutput(this, 'CodeBuildRoleArn', {
       value: this.codeBuildRole.roleArn,
       description: 'CodeBuild role ARN (set in agent/.bedrock_agentcore.yaml codebuild.execution_role)',
     });
@@ -234,13 +251,13 @@ export class GlitchFoundationStack extends cdk.Stack {
 
 // --- GlitchVpnStack ---
 
-export interface GlitchVpnStackProps extends cdk.StackProps {
+export interface GlitchVpnStackProps extends StackProps {
   /** UDM-Pro public IP for the Customer Gateway. Pass on first deploy via context: -c onPremPublicIp=x.x.x.x */
   readonly onPremPublicIp?: string;
   /** BGP ASN for the on-prem Customer Gateway. UDM-Pro default is 65000. */
   readonly onPremBgpAsn?: number;
   /** VPC from GlitchFoundationStack. */
-  readonly vpc: ec2.IVpc;
+  readonly vpc: IVpc;
 }
 
 /**
@@ -258,7 +275,7 @@ export interface GlitchVpnStackProps extends cdk.StackProps {
  * Subsequent deploys (no context needed):
  *   cdk deploy GlitchVpnStack
  */
-export class GlitchVpnStack extends cdk.Stack {
+export class GlitchVpnStack extends Stack {
   public readonly vpnGatewayId: string;
 
   constructor(scope: Construct, id: string, props: GlitchVpnStackProps) {
@@ -272,23 +289,23 @@ export class GlitchVpnStack extends cdk.Stack {
     // We attach the VGW to the VPC via a Lambda so CloudFormation never creates a resource with
     // physical ID "VGW|vpc-xxx". That phantom ID was blocking us. Foundation stack stays untouched.
     // amazonSideAsn 64513: use 64513 so CloudFormation replaces VGW if the previous one was deleted (Ref pointed to non-existent vgw-xxx).
-    const vpnGateway = new ec2.CfnVPNGateway(this, 'VpnGateway', {
+    const vpnGateway = new CfnVPNGateway(this, 'VpnGateway', {
       type: 'ipsec.1',
       amazonSideAsn: 64513,
       tags: [{ key: 'Name', value: 'glitch-vpn-gateway' }],
     });
-    vpnGateway.cfnOptions.deletionPolicy = cdk.CfnDeletionPolicy.RETAIN;
+    vpnGateway.cfnOptions.deletionPolicy = CfnDeletionPolicy.RETAIN;
     this.vpnGatewayId = vpnGateway.ref;
 
-    const attachAndPropagateRole = new iam.Role(this, 'VgwAttachRole', {
-      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+    const attachAndPropagateRole = new Role(this, 'VgwAttachRole', {
+      assumedBy: new ServicePrincipal('lambda.amazonaws.com'),
       managedPolicies: [
-        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+        ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
       ],
       inlinePolicies: {
-        Ec2: new iam.PolicyDocument({
+        Ec2: new PolicyDocument({
           statements: [
-            new iam.PolicyStatement({
+            new PolicyStatement({
               actions: [
                 'ec2:AttachVpnGateway',
                 'ec2:DetachVpnGateway',
@@ -305,14 +322,14 @@ export class GlitchVpnStack extends cdk.Stack {
     });
 
     const allRouteTableIds = [
-      ...vpc.privateSubnets.map(s => (s as ec2.PrivateSubnet).routeTable.routeTableId),
-      ...vpc.publicSubnets.map(s => (s as ec2.PublicSubnet).routeTable.routeTableId),
+      ...vpc.privateSubnets.map(s => (s as PrivateSubnet).routeTable.routeTableId),
+      ...vpc.publicSubnets.map(s => (s as PublicSubnet).routeTable.routeTableId),
     ];
 
-    const attachAndPropagateFn = new lambda.Function(this, 'VgwAttachFn', {
-      runtime: lambda.Runtime.PYTHON_3_12,
+    const attachAndPropagateFn = new LambdaFunction(this, 'VgwAttachFn', {
+      runtime: Runtime.PYTHON_3_12,
       handler: 'index.handler',
-      code: lambda.Code.fromInline(`
+      code: Code.fromInline(`
 import json, time, boto3, urllib.request
 
 def send(event, context, status, data=None, reason=''):
@@ -371,11 +388,11 @@ def handler(event, context):
         send(event, context, 'FAILED', reason=str(e))
 `),
       role: attachAndPropagateRole,
-      timeout: cdk.Duration.seconds(120),
+      timeout: Duration.seconds(120),
     });
 
     // PropagationVersion: bump to force custom resource to re-run (enables propagation on all route tables including main).
-    const attachResource = new cdk.CustomResource(this, 'VgwAttachAndPropagate', {
+    const attachResource = new CustomResource(this, 'VgwAttachAndPropagate', {
       serviceToken: attachAndPropagateFn.functionArn,
       properties: {
         VgwId: vpnGateway.ref,
@@ -392,15 +409,15 @@ def handler(event, context):
     // Customer Gateway by IP (and BGP ASN) so we don't fail with "already exists" when the CGW
     // was created by a previous deploy or retained after a failed delete.
     if (onPremPublicIp) {
-      const getOrCreateCgwRole = new iam.Role(this, 'GetOrCreateCgwRole', {
-        assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+      const getOrCreateCgwRole = new Role(this, 'GetOrCreateCgwRole', {
+        assumedBy: new ServicePrincipal('lambda.amazonaws.com'),
         managedPolicies: [
-          iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+          ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
         ],
         inlinePolicies: {
-          Ec2: new iam.PolicyDocument({
+          Ec2: new PolicyDocument({
             statements: [
-              new iam.PolicyStatement({
+              new PolicyStatement({
                 actions: ['ec2:DescribeCustomerGateways', 'ec2:CreateCustomerGateway', 'ec2:CreateTags'],
                 resources: ['*'],
               }),
@@ -409,12 +426,12 @@ def handler(event, context):
         },
       });
 
-      const getOrCreateCgwFn = new lambda.Function(this, 'GetOrCreateCgwFn', {
-        runtime: lambda.Runtime.PYTHON_3_12,
+      const getOrCreateCgwFn = new LambdaFunction(this, 'GetOrCreateCgwFn', {
+        runtime: Runtime.PYTHON_3_12,
         handler: 'index.handler',
         role: getOrCreateCgwRole,
-        timeout: cdk.Duration.seconds(30),
-        code: lambda.Code.fromInline(`
+        timeout: Duration.seconds(30),
+        code: Code.fromInline(`
 import json, urllib.request, boto3
 
 def send(event, context, status, data=None, reason=''):
@@ -453,7 +470,7 @@ def handler(event, context):
 `),
       });
 
-      const getOrCreateCgw = new cdk.CustomResource(this, 'GetOrCreateCustomerGateway', {
+      const getOrCreateCgw = new CustomResource(this, 'GetOrCreateCustomerGateway', {
         serviceToken: getOrCreateCgwFn.functionArn,
         properties: {
           OnPremPublicIp: onPremPublicIp,
@@ -468,15 +485,15 @@ def handler(event, context):
       const customerGatewayId = getOrCreateCgw.getAttString('CgwId');
 
       // Get-or-create VPN Connection (same "already exists" issue: reuse existing CGW+VGW connection).
-      const getOrCreateVpnRole = new iam.Role(this, 'GetOrCreateVpnRole', {
-        assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+      const getOrCreateVpnRole = new Role(this, 'GetOrCreateVpnRole', {
+        assumedBy: new ServicePrincipal('lambda.amazonaws.com'),
         managedPolicies: [
-          iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+          ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
         ],
         inlinePolicies: {
-          Ec2: new iam.PolicyDocument({
+          Ec2: new PolicyDocument({
             statements: [
-              new iam.PolicyStatement({
+              new PolicyStatement({
                 actions: [
                   'ec2:DescribeVpnConnections',
                   'ec2:CreateVpnConnection',
@@ -490,12 +507,12 @@ def handler(event, context):
         },
       });
 
-      const getOrCreateVpnFn = new lambda.Function(this, 'GetOrCreateVpnFn', {
-        runtime: lambda.Runtime.PYTHON_3_12,
+      const getOrCreateVpnFn = new LambdaFunction(this, 'GetOrCreateVpnFn', {
+        runtime: Runtime.PYTHON_3_12,
         handler: 'index.handler',
         role: getOrCreateVpnRole,
-        timeout: cdk.Duration.seconds(60),
-        code: lambda.Code.fromInline(`
+        timeout: Duration.seconds(60),
+        code: Code.fromInline(`
 import json, urllib.request, boto3
 
 def send(event, context, status, data=None, reason=''):
@@ -551,7 +568,7 @@ def handler(event, context):
       });
 
       // StaticRoutesOnlyVersion: bump to force re-run so we create/use a static VPN (cannot convert BGP→static in place).
-      const getOrCreateVpn = new cdk.CustomResource(this, 'GetOrCreateVpnConnection', {
+      const getOrCreateVpn = new CustomResource(this, 'GetOrCreateVpnConnection', {
         serviceToken: getOrCreateVpnFn.functionArn,
         properties: {
           CgwId: customerGatewayId,
@@ -565,76 +582,128 @@ def handler(event, context):
 
       const vpnConnectionId = getOrCreateVpn.getAttString('VpnConnectionId');
 
-      new cdk.CfnOutput(this, 'CustomerGatewayId', {
+      new CfnOutput(this, 'CustomerGatewayId', {
         value: customerGatewayId,
         description: 'Customer Gateway ID — configure matching entry on UDM-Pro (VPN > Site-to-Site)',
       });
-      new cdk.CfnOutput(this, 'VpnConnectionId', {
+      new CfnOutput(this, 'VpnConnectionId', {
         value: vpnConnectionId,
         description: 'VPN Connection ID — download tunnel config from AWS Console for UDM-Pro',
       });
     }
 
-    new cdk.CfnOutput(this, 'VpnGatewayId', {
+    new CfnOutput(this, 'VpnGatewayId', {
       value: vpnGateway.ref,
       description: 'VPN Gateway ID',
     });
   }
 }
 
+// --- GlitchProtectDbStack ---
+
+export interface GlitchProtectDbStackProps extends StackProps {
+  readonly vpc: IVpc;
+}
+
+/**
+ * RDS Postgres (db.t4g.micro, single-AZ) for the Protect tab.
+ * IAM authentication enabled — no password secret needed at runtime.
+ * Master credentials stored in glitch/protect-db-master (for initial DB setup only).
+ */
+export class GlitchProtectDbStack extends Stack {
+  public readonly db: DatabaseInstance;
+
+  constructor(scope: Construct, id: string, props: GlitchProtectDbStackProps) {
+    super(scope, id, props);
+    const { vpc } = props;
+
+    const dbSg = new SecurityGroup(this, 'ProtectDbSg', {
+      vpc,
+      description: 'protect-db RDS: inbound Postgres from VPC',
+      allowAllOutbound: false,
+    });
+    dbSg.addIngressRule(Peer.ipv4(vpc.vpcCidrBlock), Port.tcp(5432), 'VPC Postgres access');
+
+    this.db = new DatabaseInstance(this, 'ProtectDb', {
+      engine: DatabaseInstanceEngine.postgres({ version: PostgresEngineVersion.VER_16 }),
+      instanceType: new Ec2InstanceType('t4g.micro'),
+      vpc,
+      vpcSubnets: { subnetType: SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [dbSg],
+      multiAz: false,
+      allocatedStorage: 20,
+      storageType: StorageType.GP3,
+      databaseName: 'glitch_protect',
+      iamAuthentication: true,
+      credentials: Credentials.fromGeneratedSecret('glitch', {
+        secretName: 'glitch/protect-db-master',
+      }),
+      deletionProtection: true,
+      backupRetention: Duration.days(7),
+      storageEncrypted: true,
+      publiclyAccessible: false,
+    });
+
+    new CfnOutput(this, 'ProtectDbEndpoint', {
+      value: this.db.dbInstanceEndpointAddress,
+      description: 'Protect DB RDS endpoint hostname',
+    });
+  }
+}
+
 // --- SecretsStack ---
 
-export interface SecretsStackProps extends cdk.StackProps {
+export interface SecretsStackProps extends StackProps {
   // No IAM role props: secret read access for the AgentCore runtime role is granted
   // in AgentCoreStack (SecretsManagerAccess policy) to avoid deploy-order and 404 issues.
 }
 
-export class SecretsStack extends cdk.Stack {
-  public readonly apiKeysSecret: secretsmanager.ISecret;
-  public readonly telegramBotTokenSecret: secretsmanager.ISecret;
-  public readonly porkbunApiSecret: secretsmanager.ISecret;
-  public readonly piholeApiSecret: secretsmanager.ISecret;
+export class SecretsStack extends Stack {
+  public readonly apiKeysSecret: ISecret;
+  public readonly telegramBotTokenSecret: ISecret;
+  public readonly porkbunApiSecret: ISecret;
+  public readonly piholeApiSecret: ISecret;
 
   constructor(scope: Construct, id: string, props?: SecretsStackProps) {
     super(scope, id, props);
 
-    this.apiKeysSecret = secretsmanager.Secret.fromSecretNameV2(
+    this.apiKeysSecret = Secret.fromSecretNameV2(
       this,
       'ApiKeys',
       'glitch/api-keys'
     );
 
-    this.telegramBotTokenSecret = secretsmanager.Secret.fromSecretNameV2(
+    this.telegramBotTokenSecret = Secret.fromSecretNameV2(
       this,
       'TelegramBotToken',
       'glitch/telegram-bot-token'
     );
 
-    this.porkbunApiSecret = secretsmanager.Secret.fromSecretNameV2(
+    this.porkbunApiSecret = Secret.fromSecretNameV2(
       this,
       'PorkbunApi',
       'glitch/porkbun-api'
     );
 
-    this.piholeApiSecret = secretsmanager.Secret.fromSecretNameV2(
+    this.piholeApiSecret = Secret.fromSecretNameV2(
       this,
       'PiholeApi',
       'glitch/pihole-api'
     );
 
-    new cdk.CfnOutput(this, 'ApiKeysSecretArn', {
+    new CfnOutput(this, 'ApiKeysSecretArn', {
       value: this.apiKeysSecret.secretArn,
       description: 'ARN of API keys secret',
       exportName: 'GlitchApiKeysArn',
     });
 
-    new cdk.CfnOutput(this, 'TelegramBotTokenSecretArn', {
+    new CfnOutput(this, 'TelegramBotTokenSecretArn', {
       value: this.telegramBotTokenSecret.secretArn,
       description: 'ARN of Telegram bot token secret',
       exportName: 'GlitchTelegramBotTokenArn',
     });
 
-    new cdk.CfnOutput(this, 'PiholeApiSecretArn', {
+    new CfnOutput(this, 'PiholeApiSecretArn', {
       value: this.piholeApiSecret.secretArn,
       description: 'ARN of Pi-hole API credentials secret',
       exportName: 'GlitchPiholeApiArn',
@@ -662,49 +731,49 @@ const SOUL_SSM = {
  * The bucket (glitch-agent-state-{account}-{region}) and log group (/glitch/telemetry) are
  * pre-existing resources; this stack manages the SSM parameters that point to them.
  */
-export class GlitchStorageStack extends cdk.Stack {
-  public readonly configTable: dynamodb.ITable;
-  public readonly soulBucket: s3.IBucket;
-  public readonly telemetryLogGroup: logs.ILogGroup;
+export class GlitchStorageStack extends Stack {
+  public readonly configTable: ITable;
+  public readonly soulBucket: IBucket;
+  public readonly telemetryLogGroup: ILogGroup;
 
-  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
+  constructor(scope: Construct, id: string, props?: StackProps) {
     super(scope, id, props);
 
     const tableName = TABLE_NAMES.TELEGRAM_CONFIG;
     const bucketName = soulBucketName(this.account, this.region);
     const logGroupName = '/glitch/telemetry';
 
-    this.configTable = dynamodb.Table.fromTableName(this, 'ConfigTable', tableName);
-    this.soulBucket = s3.Bucket.fromBucketName(this, 'GlitchSoulBucket', bucketName);
-    this.telemetryLogGroup = logs.LogGroup.fromLogGroupName(this, 'GlitchTelemetryLogGroup', logGroupName);
+    this.configTable = Table.fromTableName(this, 'ConfigTable', tableName);
+    this.soulBucket = Bucket.fromBucketName(this, 'GlitchSoulBucket', bucketName);
+    this.telemetryLogGroup = LogGroup.fromLogGroupName(this, 'GlitchTelemetryLogGroup', logGroupName);
 
-    new ssm.StringParameter(this, 'SoulS3Bucket', {
+    new StringParameter(this, 'SoulS3Bucket', {
       parameterName: SOUL_SSM.S3_BUCKET,
       stringValue: this.soulBucket.bucketName,
       description: 'S3 bucket for Glitch SOUL.md and poet-soul (runtime discovery)',
     });
-    new ssm.StringParameter(this, 'SoulS3Key', {
+    new StringParameter(this, 'SoulS3Key', {
       parameterName: SOUL_SSM.S3_KEY,
       stringValue: 'soul.md',
       description: 'S3 key for SOUL.md',
     });
-    new ssm.StringParameter(this, 'SoulPoetSoulKey', {
+    new StringParameter(this, 'SoulPoetSoulKey', {
       parameterName: SOUL_SSM.POET_SOUL_KEY,
       stringValue: 'poet-soul.md',
       description: 'S3 key for poet-soul.md',
     });
-    new ssm.StringParameter(this, 'SoulStoryBookKey', {
+    new StringParameter(this, 'SoulStoryBookKey', {
       parameterName: SOUL_SSM.STORY_BOOK_KEY,
       stringValue: 'story-book.md',
       description: 'S3 key for story-book.md',
     });
 
-    new cdk.CfnOutput(this, 'GlitchSoulBucketName', {
+    new CfnOutput(this, 'GlitchSoulBucketName', {
       value: this.soulBucket.bucketName,
       description: 'S3 bucket for Glitch SOUL.md',
       exportName: 'GlitchSoulBucketName',
     });
-    new cdk.CfnOutput(this, 'GlitchTelemetryLogGroupName', {
+    new CfnOutput(this, 'GlitchTelemetryLogGroupName', {
       value: this.telemetryLogGroup.logGroupName,
       description: 'CloudWatch Logs group for telemetry',
       exportName: 'GlitchTelemetryLogGroupName',
@@ -714,58 +783,70 @@ export class GlitchStorageStack extends cdk.Stack {
 
 // --- GlitchGatewayStack ---
 
-export interface GlitchGatewayStackProps extends cdk.StackProps {
+export interface GlitchGatewayStackProps extends StackProps {
   readonly agentCoreRuntimeArn: string;
-  readonly configTable: dynamodb.ITable;
+  readonly configTable: ITable;
+  readonly vpc: IVpc;
+  /** RDS Postgres instance from GlitchProtectDbStack — Lambda connects via IAM auth. */
+  readonly protectDb: IDatabaseInstance;
 }
 
 /**
  * Glitch Gateway stack: Lambda Function URL for UI invocations, /api/* proxy, and keepalive.
  */
-export class GlitchGatewayStack extends cdk.Stack {
-  public readonly gatewayFunction: lambda.Function;
+export class GlitchGatewayStack extends Stack {
+  public readonly gatewayFunction: LambdaFunction;
   public readonly functionUrl: string;
 
   constructor(scope: Construct, id: string, props: GlitchGatewayStackProps) {
     super(scope, id, props);
 
-    const { agentCoreRuntimeArn, configTable } = props;
+    const { agentCoreRuntimeArn, configTable, vpc, protectDb } = props;
 
     // protect-query Lambda: direct Postgres reader for UI Protect tab (bypasses LLM)
-    const protectDbSecret = secretsmanager.Secret.fromSecretNameV2(
-      this,
-      'ProtectDbSecret',
-      'glitch/protect-db',
-    );
+    // Security group: outbound TCP 5432 to VPC CIDR only (reaches RDS in private subnets).
+    const protectQuerySg = new SecurityGroup(this, 'ProtectQuerySg', {
+      vpc,
+      description: 'protect-query Lambda: outbound Postgres to RDS in VPC',
+      allowAllOutbound: false,
+    });
+    protectQuerySg.addEgressRule(Peer.ipv4(vpc.vpcCidrBlock), Port.tcp(5432), 'RDS Postgres in VPC');
 
-    const protectQueryFn = new lambda.Function(this, 'ProtectQueryFunction', {
+    const protectQueryFn = new LambdaFunction(this, 'ProtectQueryFunction', {
       functionName: 'glitch-protect-query',
-      runtime: lambda.Runtime.PYTHON_3_12,
+      runtime: Runtime.PYTHON_3_12,
       handler: 'index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/protect-query'), {
+      code: Code.fromAsset(path.join(__dirname, '../lambda/protect-query'), {
         bundling: {
-          image: lambda.Runtime.PYTHON_3_12.bundlingImage,
+          image: Runtime.PYTHON_3_12.bundlingImage,
           command: [
             'bash', '-c',
             'pip install -r requirements.txt -t /asset-output && cp -au . /asset-output',
           ],
         },
       }),
-      timeout: cdk.Duration.seconds(30),
+      timeout: Duration.seconds(30),
       memorySize: 256,
+      vpc,
+      vpcSubnets: { subnetType: SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [protectQuerySg],
       environment: {
-        PROTECT_DB_SECRET_NAME: 'glitch/protect-db',
+        PROTECT_DB_HOST: protectDb.dbInstanceEndpointAddress,
+        PROTECT_DB_PORT: '5432',
+        PROTECT_DB_NAME: 'glitch_protect',
+        PROTECT_DB_USER: 'glitch_iam',
       },
     });
 
-    protectDbSecret.grantRead(protectQueryFn);
+    // IAM authentication: Lambda role gets rds-db:connect on the glitch_iam DB user.
+    protectDb.grantConnect(protectQueryFn, 'glitch_iam');
 
-    this.gatewayFunction = new lambda.Function(this, 'GatewayFunction', {
+    this.gatewayFunction = new LambdaFunction(this, 'GatewayFunction', {
       functionName: 'glitch-gateway',
-      runtime: lambda.Runtime.PYTHON_3_12,
+      runtime: Runtime.PYTHON_3_12,
       handler: 'index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/gateway')),
-      timeout: cdk.Duration.seconds(300),
+      code: Code.fromAsset(path.join(__dirname, '../lambda/gateway')),
+      timeout: Duration.seconds(300),
       memorySize: 512,
       environment: {
         CONFIG_TABLE_NAME: configTable.tableName,
@@ -779,9 +860,9 @@ export class GlitchGatewayStack extends cdk.Stack {
     configTable.grantReadWriteData(this.gatewayFunction);
 
     this.gatewayFunction.addToRolePolicy(
-      new iam.PolicyStatement({
+      new PolicyStatement({
         sid: 'BedrockAgentCoreAccess',
-        effect: iam.Effect.ALLOW,
+        effect: Effect.ALLOW,
         actions: [
           'bedrock-agentcore:InvokeAgentRuntime',
           'bedrock-agentcore:CreateAgentRuntimeSession',
@@ -800,20 +881,20 @@ export class GlitchGatewayStack extends cdk.Stack {
     // causes "signature does not match" on chat/agents/telegram API. The Function URL is
     // only used as the CloudFront origin; access is protected by WAF IP allowlist on the distribution.
     const fnUrl = this.gatewayFunction.addFunctionUrl({
-      authType: lambda.FunctionUrlAuthType.NONE,
+      authType: FunctionUrlAuthType.NONE,
     });
 
     this.functionUrl = fnUrl.url;
 
-    const keepaliveRule = new events.Rule(this, 'GatewayKeepaliveRule', {
-      schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
+    const keepaliveRule = new Rule(this, 'GatewayKeepaliveRule', {
+      schedule: Schedule.rate(Duration.minutes(5)),
       description: 'Keep gateway Lambda warm to reduce cold starts',
     });
-    keepaliveRule.addTarget(new targets.LambdaFunction(this.gatewayFunction, {
-      event: events.RuleTargetInput.fromObject({ path: '/health', method: 'GET' }),
+    keepaliveRule.addTarget(new LambdaFunctionTarget(this.gatewayFunction, {
+      event: RuleTargetInput.fromObject({ path: '/health', method: 'GET' }),
     }));
 
-    new cdk.CfnOutput(this, 'GatewayFunctionUrl', {
+    new CfnOutput(this, 'GatewayFunctionUrl', {
       value: this.functionUrl,
       description: 'Gateway Lambda Function URL',
       exportName: 'GlitchGatewayUrl',
@@ -824,17 +905,17 @@ export class GlitchGatewayStack extends cdk.Stack {
 
 // --- TelegramWebhookStack ---
 
-export interface TelegramWebhookStackProps extends cdk.StackProps {
-  readonly configTable: dynamodb.ITable;
-  readonly telegramBotTokenSecret: secretsmanager.ISecret;
+export interface TelegramWebhookStackProps extends StackProps {
+  readonly configTable: ITable;
+  readonly telegramBotTokenSecret: ISecret;
   readonly agentCoreRuntimeArn: string;
 }
 
 /**
  * Telegram webhook stack: Lambda that receives Telegram updates and invokes AgentCore runtime.
  */
-export class TelegramWebhookStack extends cdk.Stack {
-  public readonly webhookFunction: lambda.Function;
+export class TelegramWebhookStack extends Stack {
+  public readonly webhookFunction: LambdaFunction;
   public readonly webhookUrl: string;
 
   constructor(scope: Construct, id: string, props: TelegramWebhookStackProps) {
@@ -842,12 +923,12 @@ export class TelegramWebhookStack extends cdk.Stack {
 
     const { configTable, telegramBotTokenSecret, agentCoreRuntimeArn } = props;
 
-    this.webhookFunction = new lambda.Function(this, 'TelegramWebhookFunction', {
+    this.webhookFunction = new LambdaFunction(this, 'TelegramWebhookFunction', {
       functionName: 'glitch-telegram-webhook',
-      runtime: lambda.Runtime.PYTHON_3_12,
+      runtime: Runtime.PYTHON_3_12,
       handler: 'index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/telegram-webhook')),
-      timeout: cdk.Duration.seconds(300),
+      code: Code.fromAsset(path.join(__dirname, '../lambda/telegram-webhook')),
+      timeout: Duration.seconds(300),
       memorySize: 256,
       environment: {
         CONFIG_TABLE_NAME: configTable.tableName,
@@ -861,9 +942,9 @@ export class TelegramWebhookStack extends cdk.Stack {
     telegramBotTokenSecret.grantRead(this.webhookFunction);
 
     this.webhookFunction.addToRolePolicy(
-      new iam.PolicyStatement({
+      new PolicyStatement({
         sid: 'InvokeAgentCoreRuntime',
-        effect: iam.Effect.ALLOW,
+        effect: Effect.ALLOW,
         actions: [
           'bedrock-agentcore:InvokeAgentRuntime',
           'bedrock-agentcore:CreateAgentRuntimeSession',
@@ -881,48 +962,48 @@ export class TelegramWebhookStack extends cdk.Stack {
     // Read own Function URL from SSM on cold start for Telegram webhook self-registration.
     // The URL is written by GlitchTelegramSsmStack (a separate stack) to avoid a CFN circular dep.
     this.webhookFunction.addToRolePolicy(
-      new iam.PolicyStatement({
+      new PolicyStatement({
         sid: 'ReadOwnWebhookUrlFromSsm',
-        effect: iam.Effect.ALLOW,
+        effect: Effect.ALLOW,
         actions: ['ssm:GetParameter'],
         resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter${SSM_PARAMS.TELEGRAM_WEBHOOK_URL}`],
       })
     );
 
     const functionUrl = this.webhookFunction.addFunctionUrl({
-      authType: lambda.FunctionUrlAuthType.NONE,
+      authType: FunctionUrlAuthType.NONE,
       cors: {
         allowedOrigins: ['*'],
-        allowedMethods: [lambda.HttpMethod.POST],
+        allowedMethods: [HttpMethod.POST],
       },
     });
 
     this.webhookUrl = functionUrl.url;
 
-    const keepaliveFunction = new lambda.Function(this, 'AgentCoreKeepaliveFunction', {
+    const keepaliveFunction = new LambdaFunction(this, 'AgentCoreKeepaliveFunction', {
       functionName: 'glitch-agentcore-keepalive',
-      runtime: lambda.Runtime.PYTHON_3_12,
+      runtime: Runtime.PYTHON_3_12,
       handler: 'index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/telegram-keepalive')),
-      timeout: cdk.Duration.seconds(30),
+      code: Code.fromAsset(path.join(__dirname, '../lambda/telegram-keepalive')),
+      timeout: Duration.seconds(30),
       memorySize: 128,
       environment: { AGENTCORE_RUNTIME_ARN: agentCoreRuntimeArn },
     });
     keepaliveFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
+      new PolicyStatement({
+        effect: Effect.ALLOW,
         actions: ['bedrock-agentcore:InvokeAgentRuntime'],
         resources: [agentCoreRuntimeArn, `${agentCoreRuntimeArn}/*`],
       })
     );
-    new events.Rule(this, 'AgentCoreKeepaliveSchedule', {
-      schedule: events.Schedule.rate(cdk.Duration.minutes(4)),
-      targets: [new targets.LambdaFunction(keepaliveFunction)],
+    new Rule(this, 'AgentCoreKeepaliveSchedule', {
+      schedule: Schedule.rate(Duration.minutes(4)),
+      targets: [new LambdaFunctionTarget(keepaliveFunction)],
       description: 'Invoke AgentCore runtime keepalive every 4 min to keep Claude prompt cache warm (5-min TTL)',
     });
 
     // SsmTelegramConfigTable: safe to write here (no circular dep — table name is not a FunctionUrl token).
-    new ssm.StringParameter(this, 'SsmTelegramConfigTable', {
+    new StringParameter(this, 'SsmTelegramConfigTable', {
       parameterName: SSM_PARAMS.TELEGRAM_CONFIG_TABLE,
       stringValue: configTable.tableName,
       description: 'DynamoDB config table name (for runtime GLITCH_CONFIG_TABLE)',
@@ -931,7 +1012,7 @@ export class TelegramWebhookStack extends cdk.Stack {
     // NOTE: SsmTelegramWebhookUrl is written in app.ts (GlitchTelegramSsmStack) to avoid a
     // CloudFormation circular dependency: FunctionUrl → Function → ServiceRole → Policy → FunctionUrl.
     // The CfnOutput below is for reference only.
-    new cdk.CfnOutput(this, 'TelegramWebhookUrl', {
+    new CfnOutput(this, 'TelegramWebhookUrl', {
       value: this.webhookUrl,
       description: 'Telegram webhook Lambda Function URL',
     });
@@ -955,7 +1036,7 @@ export class TelegramWebhookStack extends cdk.Stack {
 const WAF_SSM_IPV4 = '/glitch/waf/allowed-ipv4';
 const PORKBUN_SECRET_NAME = 'glitch/porkbun-api';
 
-export interface GlitchEdgeStackProps extends cdk.StackProps {
+export interface GlitchEdgeStackProps extends StackProps {
   /**
    * IPv4 CIDRs to allow. When provided, these override the SSM/custom-resource lookup.
    * Pass via CDK context: -c allowedIpAddresses=1.2.3.4/32,5.6.7.8/32
@@ -963,7 +1044,7 @@ export interface GlitchEdgeStackProps extends cdk.StackProps {
   readonly allowedIpAddresses?: string[];
 }
 
-export class GlitchEdgeStack extends cdk.Stack {
+export class GlitchEdgeStack extends Stack {
   public readonly webAclArn: string;
 
   constructor(scope: Construct, id: string, props: GlitchEdgeStackProps) {
@@ -974,15 +1055,15 @@ export class GlitchEdgeStack extends cdk.Stack {
     // writes to SSM /glitch/waf/allowed-ipv4 → WAF IP set uses the result.
     // The Porkbun secret lives in us-west-2; the Lambda reads it cross-region.
 
-    const porkbunLookupRole = new iam.Role(this, 'PorkbunLookupRole', {
-      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+    const porkbunLookupRole = new Role(this, 'PorkbunLookupRole', {
+      assumedBy: new ServicePrincipal('lambda.amazonaws.com'),
       managedPolicies: [
-        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+        ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
       ],
       inlinePolicies: {
-        PorkbunLookup: new iam.PolicyDocument({
+        PorkbunLookup: new PolicyDocument({
           statements: [
-            new iam.PolicyStatement({
+            new PolicyStatement({
               sid: 'ReadWriteSsmIpv4',
               actions: ['ssm:GetParameter', 'ssm:PutParameter'],
               resources: [
@@ -994,20 +1075,20 @@ export class GlitchEdgeStack extends cdk.Stack {
       },
     });
 
-    const porkbunLookupFn = new lambda.Function(this, 'PorkbunIpLookupFn', {
-      runtime: lambda.Runtime.PYTHON_3_12,
+    const porkbunLookupFn = new LambdaFunction(this, 'PorkbunIpLookupFn', {
+      runtime: Runtime.PYTHON_3_12,
       handler: 'index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/porkbun-ip-lookup')),
+      code: Code.fromAsset(path.join(__dirname, '../lambda/porkbun-ip-lookup')),
       role: porkbunLookupRole,
-      timeout: cdk.Duration.seconds(30),
+      timeout: Duration.seconds(30),
       description: 'Custom resource: reads /glitch/waf/allowed-ipv4 from SSM for WAF allowlist',
     });
 
     // FallbackIpCidr is read from cdk.context.json (SSM lookup cached at synth time).
     // It is only used if the ddns-updater webhook has never been called and SSM is empty.
-    const fallbackIpCidr = ssm.StringParameter.valueFromLookup(this, WAF_SSM_IPV4);
+    const fallbackIpCidr = StringParameter.valueFromLookup(this, WAF_SSM_IPV4);
 
-    const porkbunIpResource = new cdk.CustomResource(this, 'PorkbunIpLookup', {
+    const porkbunIpResource = new CustomResource(this, 'PorkbunIpLookup', {
       serviceToken: porkbunLookupFn.functionArn,
       properties: {
         // FallbackIpCidr: used only when SSM is empty (first deploy before webhook is called).
@@ -1038,12 +1119,12 @@ export class GlitchEdgeStack extends cdk.Stack {
       // No override: try SSM (parameter written by a previous deploy).
       // valueFromLookup returns a dummy string when the parameter doesn't exist yet;
       // parseIps treats that as empty and we fall through to the Porkbun result.
-      const ssmIpv4Raw = ssm.StringParameter.valueFromLookup(this, WAF_SSM_IPV4);
+      const ssmIpv4Raw = StringParameter.valueFromLookup(this, WAF_SSM_IPV4);
       const fromSsm = parseIps(ssmIpv4Raw);
       allowedIps = fromSsm.length ? fromSsm : [porkbunIpResource.getAttString('IpCidr')];
     }
 
-    const ipv4Set = new wafv2.CfnIPSet(this, 'AllowedIpSet', {
+    const ipv4Set = new CfnIPSet(this, 'AllowedIpSet', {
       name: 'GlitchAllowedIPs',
       scope: 'CLOUDFRONT',
       ipAddressVersion: 'IPV4',
@@ -1052,7 +1133,7 @@ export class GlitchEdgeStack extends cdk.Stack {
     });
     ipv4Set.node.addDependency(porkbunIpResource);
 
-    const rules: wafv2.CfnWebACL.RuleProperty[] = [
+    const rules: CfnWebACL.RuleProperty[] = [
       {
         name: 'AllowTrustedIPv4',
         priority: 0,
@@ -1068,7 +1149,7 @@ export class GlitchEdgeStack extends cdk.Stack {
 
     // Default action BLOCK — allow only matched IPs.
     // No login page to attack, no tokens to steal: unauthorized IPs get 403 at the edge.
-    const webAcl = new wafv2.CfnWebACL(this, 'WebAcl', {
+    const webAcl = new CfnWebACL(this, 'WebAcl', {
       name: 'GlitchDashboardWebAcl',
       scope: 'CLOUDFRONT',
       defaultAction: { block: {} },
@@ -1082,7 +1163,7 @@ export class GlitchEdgeStack extends cdk.Stack {
 
     this.webAclArn = webAcl.attrArn;
 
-    new cdk.CfnOutput(this, 'WebAclArn', {
+    new CfnOutput(this, 'WebAclArn', {
       value: this.webAclArn,
       description: 'WAF WebACL ARN — associate with CloudFront distribution',
       exportName: 'GlitchEdgeWebAclArn',
@@ -1097,7 +1178,7 @@ export class GlitchEdgeStack extends cdk.Stack {
     //   curl -s -X POST <DdnsUpdaterUrl> -H "Authorization: Bearer <token>"
 
     // Bearer token for the webhook. CDK generates a random 32-char secret on first deploy.
-    const ddnsTokenSecret = new secretsmanager.Secret(this, 'DdnsTokenSecret', {
+    const ddnsTokenSecret = new Secret(this, 'DdnsTokenSecret', {
       secretName: 'glitch/ddns-token',
       description: 'Bearer token for the DDNS updater webhook Lambda',
       generateSecretString: {
@@ -1106,15 +1187,15 @@ export class GlitchEdgeStack extends cdk.Stack {
       },
     });
 
-    const ddnsUpdaterRole = new iam.Role(this, 'DdnsUpdaterRole', {
-      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+    const ddnsUpdaterRole = new Role(this, 'DdnsUpdaterRole', {
+      assumedBy: new ServicePrincipal('lambda.amazonaws.com'),
       managedPolicies: [
-        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+        ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
       ],
       inlinePolicies: {
-        DdnsUpdater: new iam.PolicyDocument({
+        DdnsUpdater: new PolicyDocument({
           statements: [
-            new iam.PolicyStatement({
+            new PolicyStatement({
               sid: 'ReadSecrets',
               actions: ['secretsmanager:GetSecretValue'],
               resources: [
@@ -1124,12 +1205,12 @@ export class GlitchEdgeStack extends cdk.Stack {
                 ddnsTokenSecret.secretArn,
               ],
             }),
-            new iam.PolicyStatement({
+            new PolicyStatement({
               sid: 'UpdateWafIpSet',
               actions: ['wafv2:GetIPSet', 'wafv2:UpdateIPSet'],
               resources: [ipv4Set.attrArn],
             }),
-            new iam.PolicyStatement({
+            new PolicyStatement({
               sid: 'WriteIpSsm',
               actions: ['ssm:PutParameter'],
               resources: [
@@ -1141,12 +1222,12 @@ export class GlitchEdgeStack extends cdk.Stack {
       },
     });
 
-    const ddnsUpdaterFn = new lambda.Function(this, 'DdnsUpdaterFn', {
-      runtime: lambda.Runtime.PYTHON_3_12,
+    const ddnsUpdaterFn = new LambdaFunction(this, 'DdnsUpdaterFn', {
+      runtime: Runtime.PYTHON_3_12,
       handler: 'index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/ddns-updater')),
+      code: Code.fromAsset(path.join(__dirname, '../lambda/ddns-updater')),
       role: ddnsUpdaterRole,
-      timeout: cdk.Duration.seconds(30),
+      timeout: Duration.seconds(30),
       description: 'DDNS updater webhook: reads caller IP, updates Porkbun DNS + WAF + SSM',
       environment: {
         DDNS_SUBDOMAIN: 'home',
@@ -1163,10 +1244,10 @@ export class GlitchEdgeStack extends cdk.Stack {
 
     // Public Function URL — auth is enforced by the bearer token, not IAM.
     const ddnsUpdaterUrl = ddnsUpdaterFn.addFunctionUrl({
-      authType: lambda.FunctionUrlAuthType.NONE,
+      authType: FunctionUrlAuthType.NONE,
     });
 
-    new cdk.CfnOutput(this, 'DdnsUpdaterUrl', {
+    new CfnOutput(this, 'DdnsUpdaterUrl', {
       value: ddnsUpdaterUrl.url,
       description: 'DDNS updater webhook URL — POST with Authorization: Bearer <glitch/ddns-token>',
     });
@@ -1177,8 +1258,8 @@ export class GlitchEdgeStack extends cdk.Stack {
 // CloudFront + S3 (OAC) + Lambda Function URL (OAC/IAM) + WAF association.
 // CloudFront-based UI hosting with WAF IP allowlist and Lambda origin.
 
-export interface GlitchUiHostingStackProps extends cdk.StackProps {
-  readonly gatewayFunction: lambda.IFunction;
+export interface GlitchUiHostingStackProps extends StackProps {
+  readonly gatewayFunction: IFunction;
   readonly gatewayFunctionUrl: string;
   readonly customDomain: string;
   /**
@@ -1197,9 +1278,9 @@ export interface GlitchUiHostingStackProps extends cdk.StackProps {
   readonly certificateArn?: string;
 }
 
-export class GlitchUiHostingStack extends cdk.Stack {
-  public readonly uiBucket: s3.Bucket;
-  public readonly distribution: cloudfront.Distribution;
+export class GlitchUiHostingStack extends Stack {
+  public readonly uiBucket: Bucket;
+  public readonly distribution: Distribution;
 
   constructor(scope: Construct, id: string, props: GlitchUiHostingStackProps) {
     super(scope, id, props);
@@ -1207,17 +1288,17 @@ export class GlitchUiHostingStack extends cdk.Stack {
     const { gatewayFunction, gatewayFunctionUrl, customDomain, webAclArn, certificateArn } = props;
 
     // ========== S3 Bucket (fully private; only CloudFront OAC can read) ==========
-    this.uiBucket = new s3.Bucket(this, 'UiBucket', {
+    this.uiBucket = new Bucket(this, 'UiBucket', {
       bucketName: `glitch-ui-${this.account}-${this.region}`,
-      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-      encryption: s3.BucketEncryption.S3_MANAGED,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      blockPublicAccess: BlockPublicAccess.BLOCK_ALL,
+      encryption: BucketEncryption.S3_MANAGED,
+      removalPolicy: RemovalPolicy.DESTROY,
       autoDeleteObjects: true,
     });
 
     // ========== CloudFront OAC for Lambda Function URL ==========
     // Signs every origin request with SigV4 so the IAM-auth FURL is only reachable via CF.
-    const lambdaOac = new cloudfront.CfnOriginAccessControl(this, 'LambdaOac', {
+    const lambdaOac = new CfnOriginAccessControl(this, 'LambdaOac', {
       originAccessControlConfig: {
         name: 'GlitchLambdaFunctionUrlOac',
         description: 'SigV4 OAC for Glitch Gateway Lambda Function URL',
@@ -1229,33 +1310,33 @@ export class GlitchUiHostingStack extends cdk.Stack {
 
     // Allow CloudFront service principal to invoke the Lambda FURL.
     gatewayFunction.addPermission('CloudFrontInvoke', {
-      principal: new iam.ServicePrincipal('cloudfront.amazonaws.com'),
+      principal: new ServicePrincipal('cloudfront.amazonaws.com'),
       action: 'lambda:InvokeFunctionUrl',
       sourceArn: `arn:aws:cloudfront::${this.account}:distribution/*`,
     });
 
     // ========== ACM Certificate (optional; must be in us-east-1) ==========
     const certificate = certificateArn
-      ? acm.Certificate.fromCertificateArn(this, 'Certificate', certificateArn)
+      ? Certificate.fromCertificateArn(this, 'Certificate', certificateArn)
       : undefined;
 
     // ========== CloudFront Origins ==========
-    const lambdaUrlHostname = cdk.Fn.select(2, cdk.Fn.split('/', gatewayFunctionUrl));
+    const lambdaUrlHostname = Fn.select(2, Fn.split('/', gatewayFunctionUrl));
 
-    const s3Origin = origins.S3BucketOrigin.withOriginAccessControl(this.uiBucket);
+    const s3Origin = S3BucketOrigin.withOriginAccessControl(this.uiBucket);
 
     // Origin response timeout 60s so agent invocations (chat) don't 504; default is 30s.
-    const lambdaOrigin = new origins.HttpOrigin(lambdaUrlHostname, {
-      protocolPolicy: cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
+    const lambdaOrigin = new HttpOrigin(lambdaUrlHostname, {
+      protocolPolicy: OriginProtocolPolicy.HTTPS_ONLY,
       originId: 'GlitchGatewayLambda',
-      readTimeout: cdk.Duration.seconds(60),
+      readTimeout: Duration.seconds(60),
     });
 
     // ========== CloudFront Distribution ==========
     // /api/* and Lambda paths use CACHING_DISABLED (CloudFront rejects HeaderBehavior when TTL=0).
     // IPv6 disabled: WAF IP allowlist is IPv4-only; disabling IPv6 ensures browsers always
     // connect via IPv4 so the WAF allowlist matches correctly.
-    this.distribution = new cloudfront.Distribution(this, 'Distribution', {
+    this.distribution = new Distribution(this, 'Distribution', {
       comment: 'Glitch Agent UI',
       ...(certificate ? { certificate, domainNames: [customDomain] } : {}),
       ...(webAclArn ? { webAclId: webAclArn } : {}),
@@ -1263,32 +1344,32 @@ export class GlitchUiHostingStack extends cdk.Stack {
       defaultRootObject: 'index.html',
       defaultBehavior: {
         origin: s3Origin,
-        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-        cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
-        allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
+        viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        cachePolicy: CachePolicy.CACHING_OPTIMIZED,
+        allowedMethods: AllowedMethods.ALLOW_GET_HEAD,
         compress: true,
       },
       additionalBehaviors: {
         '/api/*': {
           origin: lambdaOrigin,
-          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
-          cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
-          allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
-          originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+          viewerProtocolPolicy: ViewerProtocolPolicy.HTTPS_ONLY,
+          cachePolicy: CachePolicy.CACHING_DISABLED,
+          allowedMethods: AllowedMethods.ALLOW_ALL,
+          originRequestPolicy: OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
         },
         '/invocations*': {
           origin: lambdaOrigin,
-          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
-          cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
-          allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
-          originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+          viewerProtocolPolicy: ViewerProtocolPolicy.HTTPS_ONLY,
+          cachePolicy: CachePolicy.CACHING_DISABLED,
+          allowedMethods: AllowedMethods.ALLOW_ALL,
+          originRequestPolicy: OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
         },
         '/health': {
           origin: lambdaOrigin,
-          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
-          cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
-          allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
-          originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+          viewerProtocolPolicy: ViewerProtocolPolicy.HTTPS_ONLY,
+          cachePolicy: CachePolicy.CACHING_DISABLED,
+          allowedMethods: AllowedMethods.ALLOW_GET_HEAD,
+          originRequestPolicy: OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
         },
       },
       // Only 404 → index.html (SPA client-side routes). Do NOT map 403 → index.html,
@@ -1301,11 +1382,11 @@ export class GlitchUiHostingStack extends cdk.Stack {
     // Explicitly allow CloudFront to GetObject on all keys (OAC). withOriginAccessControl
     // adds this; we reinforce it so /assets/* and other keys are never 403.
     this.uiBucket.addToResourcePolicy(
-      new iam.PolicyStatement({
+      new PolicyStatement({
         sid: 'AllowCloudFrontOACGetObject',
         actions: ['s3:GetObject'],
         resources: [this.uiBucket.arnForObjects('*')],
-        principals: [new iam.ServicePrincipal('cloudfront.amazonaws.com')],
+        principals: [new ServicePrincipal('cloudfront.amazonaws.com')],
         conditions: {
           StringEquals: {
             'AWS:SourceArn': `arn:aws:cloudfront::${this.account}:distribution/${this.distribution.distributionId}`,
@@ -1316,7 +1397,7 @@ export class GlitchUiHostingStack extends cdk.Stack {
 
     // Apply Lambda OAC to the CloudFront distribution via L1 escape hatch.
     // The Lambda origin is the second entry in the Origins array (index 1; S3 is index 0).
-    const cfnDistrib = this.distribution.node.defaultChild as cloudfront.CfnDistribution;
+    const cfnDistrib = this.distribution.node.defaultChild as CfnDistribution;
     cfnDistrib.addPropertyOverride(
       'DistributionConfig.Origins.1.OriginAccessControlId',
       lambdaOac.attrId
@@ -1326,41 +1407,41 @@ export class GlitchUiHostingStack extends cdk.Stack {
     // Split so index.html (and glitch.svg) use no-cache; hashed assets use long cache.
     // Prune false so the two deployments do not remove each other's files.
     const uiDist = path.join(__dirname, '../../ui/dist');
-    new s3deploy.BucketDeployment(this, 'DeployUiHtml', {
-      sources: [s3deploy.Source.asset(uiDist, { exclude: ['assets', 'assets/**'] })],
+    new BucketDeployment(this, 'DeployUiHtml', {
+      sources: [Source.asset(uiDist, { exclude: ['assets', 'assets/**'] })],
       destinationBucket: this.uiBucket,
       distribution: this.distribution,
       distributionPaths: ['/*'],
-      cacheControl: [s3deploy.CacheControl.noCache()],
+      cacheControl: [CacheControl.noCache()],
       prune: false,
     });
-    new s3deploy.BucketDeployment(this, 'DeployUiAssets', {
-      sources: [s3deploy.Source.asset(uiDist, { exclude: ['index.html', 'glitch.svg'] })],
+    new BucketDeployment(this, 'DeployUiAssets', {
+      sources: [Source.asset(uiDist, { exclude: ['index.html', 'glitch.svg'] })],
       destinationBucket: this.uiBucket,
       distribution: this.distribution,
       distributionPaths: ['/*'],
       cacheControl: [
-        s3deploy.CacheControl.maxAge(cdk.Duration.days(365)),
-        s3deploy.CacheControl.immutable(),
+        CacheControl.maxAge(Duration.days(365)),
+        CacheControl.immutable(),
       ],
       prune: false,
     });
 
-    new cdk.CfnOutput(this, 'UiBucketName', {
+    new CfnOutput(this, 'UiBucketName', {
       value: this.uiBucket.bucketName,
       description: 'S3 bucket for UI static assets (private, served via CloudFront OAC)',
       exportName: 'GlitchUiBucketName',
     });
-    new cdk.CfnOutput(this, 'CloudFrontDomainName', {
+    new CfnOutput(this, 'CloudFrontDomainName', {
       value: this.distribution.distributionDomainName,
       description: `CloudFront domain — add CNAME from ${customDomain} to this value in Porkbun DNS`,
       exportName: 'GlitchCloudFrontDomain',
     });
-    new cdk.CfnOutput(this, 'CloudFrontDistributionId', {
+    new CfnOutput(this, 'CloudFrontDistributionId', {
       value: this.distribution.distributionId,
       exportName: 'GlitchCloudFrontDistributionId',
     });
-    new cdk.CfnOutput(this, 'UiUrl', {
+    new CfnOutput(this, 'UiUrl', {
       value: certificate ? `https://${customDomain}` : `https://${this.distribution.distributionDomainName}`,
       description: 'Glitch UI URL',
       exportName: 'GlitchUiUrl',
@@ -1370,9 +1451,9 @@ export class GlitchUiHostingStack extends cdk.Stack {
 
 // --- AgentCoreStack ---
 
-export interface AgentCoreStackProps extends cdk.StackProps {
+export interface AgentCoreStackProps extends StackProps {
   /** Runtime role to attach policies to (from GlitchFoundationStack) */
-  readonly runtimeRole: iam.IRole;
+  readonly runtimeRole: IRole;
 }
 
 /**
@@ -1380,8 +1461,8 @@ export interface AgentCoreStackProps extends cdk.StackProps {
  * AgentCore runs in PUBLIC network mode — no VPC/SG dependencies.
  * On-prem LLM access is via Site-to-Site VPN (Foundation stack).
  */
-export class AgentCoreStack extends cdk.Stack {
-  public readonly agentRuntimeRole: iam.IRole;
+export class AgentCoreStack extends Stack {
+  public readonly agentRuntimeRole: IRole;
 
   constructor(scope: Construct, id: string, props: AgentCoreStackProps) {
     super(scope, id, props);
@@ -1389,13 +1470,13 @@ export class AgentCoreStack extends cdk.Stack {
     const { runtimeRole } = props;
     this.agentRuntimeRole = runtimeRole;
 
-    new iam.ManagedPolicy(this, 'AgentRuntimeRoleDefaultPolicy', {
+    new ManagedPolicy(this, 'AgentRuntimeRoleDefaultPolicy', {
       roles: [runtimeRole],
-      document: new iam.PolicyDocument({
+      document: new PolicyDocument({
         statements: [
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'BedrockModelAccess',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
             resources: [
               ...BEDROCK_MODEL_ARNS,
@@ -1404,15 +1485,15 @@ export class AgentCoreStack extends cdk.Stack {
             ],
           }),
           // ECR pull: required for UpdateAgentRuntime / runtime to pull container image.
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'ECRTokenAccess',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: ['ecr:GetAuthorizationToken'],
             resources: ['*'],
           }),
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'ECRImageAccess',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: [
               'ecr:BatchCheckLayerAvailability',
               'ecr:GetDownloadUrlForLayer',
@@ -1420,9 +1501,9 @@ export class AgentCoreStack extends cdk.Stack {
             ],
             resources: [`arn:aws:ecr:${this.region}:${this.account}:repository/bedrock-agentcore-*`],
           }),
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'AgentCoreMemoryAccess',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: [
               'bedrock-agentcore:CreateEvent',
               'bedrock-agentcore:GetEvent',
@@ -1435,9 +1516,9 @@ export class AgentCoreStack extends cdk.Stack {
             ],
             resources: ['*'],
           }),
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'SecretsManagerRead',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: ['secretsmanager:GetSecretValue'],
             resources: [
               `arn:aws:secretsmanager:${this.region}:${this.account}:secret:${SECRET_NAMES.API_KEYS}*`,
@@ -1448,24 +1529,24 @@ export class AgentCoreStack extends cdk.Stack {
               `arn:aws:secretsmanager:${this.region}:${this.account}:secret:glitch/protect-db*`,
             ],
           }),
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'SsmProtectParamsRead',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: ['ssm:GetParameter', 'ssm:GetParameters'],
             resources: [
               `arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/protect/*`,
               `arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/protect-db/*`,
             ],
           }),
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'SecretsManagerWrite',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: ['secretsmanager:CreateSecret', 'secretsmanager:PutSecretValue', 'secretsmanager:UpdateSecret'],
             resources: [`arn:aws:secretsmanager:${this.region}:${this.account}:secret:glitch/*`],
           }),
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'CloudWatchLogs',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: [
               'logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents',
               'logs:GetLogEvents', 'logs:DescribeLogStreams', 'logs:StartQuery', 'logs:GetQueryResults',
@@ -1477,27 +1558,27 @@ export class AgentCoreStack extends cdk.Stack {
               `arn:aws:logs:${this.region}:${this.account}:log-group:/glitch/*:*`,
             ],
           }),
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'TelegramConfigTableAccess',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem', 'dynamodb:Query'],
             resources: [`arn:aws:dynamodb:${this.region}:${this.account}:table/${TABLE_NAMES.TELEGRAM_CONFIG}`],
           }),
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'SoulS3ListBucket',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: ['s3:ListBucket'],
             resources: [`arn:aws:s3:::${soulBucketName(this.account, this.region)}`],
           }),
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'SoulS3Access',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: ['s3:GetObject', 's3:PutObject'],
             resources: [`arn:aws:s3:::${soulBucketName(this.account, this.region)}/*`],
           }),
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'SoulSsmRead',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: ['ssm:GetParameter', 'ssm:GetParameters'],
             resources: [
               `arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/soul/s3-bucket`,
@@ -1507,40 +1588,40 @@ export class AgentCoreStack extends cdk.Stack {
               `arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/ssh/hosts`,
             ],
           }),
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'StsGetCallerIdentity',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: ['sts:GetCallerIdentity'],
             resources: ['*'],
           }),
           // SSM write — Glitch updates cross-agent ARN parameters after agentcore deploy.
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'SsmAgentArnWrite',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: ['ssm:PutParameter'],
             resources: [
               `arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/sentinel/glitch-runtime-arn`,
               `arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/sentinel/runtime-arn`,
             ],
           }),
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'CodeBuildDeployStatusRead',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: ['codebuild:ListBuildsForProject', 'codebuild:BatchGetBuilds'],
             resources: [
               `arn:aws:codebuild:${this.region}:${this.account}:project/bedrock-agentcore-glitch-builder`,
               `arn:aws:codebuild:${this.region}:${this.account}:project/bedrock-agentcore-sentinel-builder`,
             ],
           }),
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'TelegramWebhookLambdaUrlRead',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: ['lambda:GetFunctionUrlConfig'],
             resources: [`arn:aws:lambda:${this.region}:${this.account}:function:glitch-telegram-webhook`],
           }),
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'InvokeSentinelAgent',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: ['bedrock-agentcore:InvokeAgentRuntime'],
             resources: [`arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`],
             conditions: { StringLike: { 'aws:ResourceTag/Name': 'Sentinel*' } },
@@ -1549,7 +1630,7 @@ export class AgentCoreStack extends cdk.Stack {
       }),
     });
 
-    new cdk.CfnOutput(this, 'AgentRuntimeRoleArn', {
+    new CfnOutput(this, 'AgentRuntimeRoleArn', {
       value: runtimeRole.roleArn,
       description: 'IAM role ARN for AgentCore Runtime',
     });
@@ -1558,9 +1639,9 @@ export class AgentCoreStack extends cdk.Stack {
 
 // --- GlitchSentinelStack ---
 
-export interface SentinelStackProps extends cdk.StackProps {
+export interface SentinelStackProps extends StackProps {
   /** Runtime role created by GlitchFoundationStack. */
-  runtimeRole: iam.IRole;
+  runtimeRole: IRole;
   /** Glitch runtime ARN (for A2A invocation permission). */
   glitchRuntimeArn: string;
 }
@@ -1570,21 +1651,21 @@ export interface SentinelStackProps extends cdk.StackProps {
  * Sentinel owns: CloudWatch Logs read, UniFi Protect, Pi-hole, UniFi Network,
  * DNS Intelligence, Infrastructure Ops, GitHub, Telegram alerting.
  */
-export class GlitchSentinelStack extends cdk.Stack {
+export class GlitchSentinelStack extends Stack {
   constructor(scope: Construct, id: string, props: SentinelStackProps) {
     super(scope, id, props);
 
     const { runtimeRole, glitchRuntimeArn } = props;
 
-    new iam.ManagedPolicy(this, 'SentinelRuntimePolicy', {
+    new ManagedPolicy(this, 'SentinelRuntimePolicy', {
       managedPolicyName: `GlitchSentinelRuntimePolicy-${this.region}`,
       roles: [runtimeRole],
-      document: new iam.PolicyDocument({
+      document: new PolicyDocument({
         statements: [
           // Bedrock model access (Sonnet 4 + 4.5; Opus excluded for ops agent cost control)
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'BedrockModelAccess',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
             resources: [
               ...SENTINEL_BEDROCK_MODEL_ARNS,
@@ -1592,22 +1673,22 @@ export class GlitchSentinelStack extends cdk.Stack {
               `arn:aws:bedrock:${this.region}::inference-profile/*`,
             ],
           }),
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'ECRImageAccess',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: ['ecr:BatchGetImage', 'ecr:GetDownloadUrlForLayer'],
             resources: [`arn:aws:ecr:${this.region}:${this.account}:repository/bedrock-agentcore-*`],
           }),
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'ECRTokenAccess',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: ['ecr:GetAuthorizationToken'],
             resources: ['*'],
           }),
           // CloudWatch Logs — read monitored log groups
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'CloudWatchLogsRead',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: [
               'logs:DescribeLogGroups',
               'logs:DescribeLogStreams',
@@ -1626,9 +1707,9 @@ export class GlitchSentinelStack extends cdk.Stack {
             ],
           }),
           // CloudWatch Logs — write Sentinel's own logs
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'CloudWatchLogsWrite',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: ['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents'],
             resources: [
               `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/bedrock-agentcore/*`,
@@ -1638,9 +1719,9 @@ export class GlitchSentinelStack extends cdk.Stack {
             ],
           }),
           // CloudWatch Metrics — read Lambda metrics, alarms
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'CloudWatchMetricsRead',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: ['cloudwatch:GetMetricData', 'cloudwatch:GetMetricStatistics', 'cloudwatch:ListMetrics', 'cloudwatch:DescribeAlarms'],
             resources: ['*'],
           }),
@@ -1648,24 +1729,24 @@ export class GlitchSentinelStack extends cdk.Stack {
           // AWS execution role docs require "bedrock-agentcore" namespace for the runtime's
           // built-in OTEL instrumentation (xray + cloudwatch). "Glitch/Sentinel" is for
           // custom Sentinel metrics.
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'CloudWatchMetricsWrite',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: ['cloudwatch:PutMetricData'],
             resources: ['*'],
             conditions: { StringEquals: { 'cloudwatch:namespace': ['bedrock-agentcore', 'Glitch/Sentinel'] } },
           }),
           // X-Ray tracing
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'XRayTracing',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: ['xray:PutTraceSegments', 'xray:PutTelemetryRecords', 'xray:GetSamplingRules', 'xray:GetSamplingTargets'],
             resources: ['*'],
           }),
           // CloudFormation — read-only for stack inspection and drift detection
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'CloudFormationRead',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: [
               'cloudformation:DescribeStacks',
               'cloudformation:DescribeStackEvents',
@@ -1679,9 +1760,9 @@ export class GlitchSentinelStack extends cdk.Stack {
             resources: [`arn:aws:cloudformation:${this.region}:${this.account}:stack/*/*`],
           }),
           // CloudFormation — rollback operations
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'CloudFormationRollback',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: [
               'cloudformation:CancelUpdateStack',
               'cloudformation:ContinueUpdateRollback',
@@ -1689,9 +1770,9 @@ export class GlitchSentinelStack extends cdk.Stack {
             resources: [`arn:aws:cloudformation:${this.region}:${this.account}:stack/Glitch*/*`],
           }),
           // Secrets Manager — read credentials for all Sentinel tools
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'SecretsManagerRead',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: ['secretsmanager:GetSecretValue'],
             resources: [
               `arn:aws:secretsmanager:${this.region}:${this.account}:secret:${SECRET_NAMES.TELEGRAM_BOT_TOKEN}*`,
@@ -1702,16 +1783,16 @@ export class GlitchSentinelStack extends cdk.Stack {
             ],
           }),
           // DynamoDB — read Telegram config for owner chat ID
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'TelegramConfigRead',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: ['dynamodb:GetItem', 'dynamodb:Query'],
             resources: [`arn:aws:dynamodb:${this.region}:${this.account}:table/${TABLE_NAMES.TELEGRAM_CONFIG}`],
           }),
           // SSM Parameters — read Sentinel config and Protect config
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'SsmParameterRead',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: ['ssm:GetParameter', 'ssm:GetParameters', 'ssm:GetParametersByPath'],
             resources: [
               `arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/sentinel/*`,
@@ -1721,9 +1802,9 @@ export class GlitchSentinelStack extends cdk.Stack {
           // Workload identity — required by AgentCore Runtime execution role for agent
           // identity features (GetWorkloadAccessToken*). Scoped to the default workload
           // identity directory per the official execution role template.
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'GetWorkloadAccessToken',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: [
               'bedrock-agentcore:GetWorkloadAccessToken',
               'bedrock-agentcore:GetWorkloadAccessTokenForJWT',
@@ -1737,9 +1818,9 @@ export class GlitchSentinelStack extends cdk.Stack {
           // A2A: invoke Glitch agent.
           // Widened to wildcard + tag condition so this survives agent redeploys without
           // needing a CDK redeployment when Glitch's runtime ARN changes.
-          new iam.PolicyStatement({
+          new PolicyStatement({
             sid: 'InvokeGlitchAgent',
-            effect: iam.Effect.ALLOW,
+            effect: Effect.ALLOW,
             actions: ['bedrock-agentcore:InvokeAgentRuntime'],
             resources: [`arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`],
             conditions: { StringLike: { 'aws:ResourceTag/Name': 'Glitch*' } },
@@ -1749,49 +1830,49 @@ export class GlitchSentinelStack extends cdk.Stack {
     });
 
     // Scheduled Sentinel Protect evaluation (EventBridge + Lambda)
-    const protectEvalRole = new iam.Role(this, 'SentinelProtectEvalRole', {
-      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+    const protectEvalRole = new Role(this, 'SentinelProtectEvalRole', {
+      assumedBy: new ServicePrincipal('lambda.amazonaws.com'),
       description: 'Role for glitch-sentinel-protect-eval Lambda',
     });
     protectEvalRole.addManagedPolicy(
-      iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole')
+      ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole')
     );
     protectEvalRole.addToPolicy(
-      new iam.PolicyStatement({
+      new PolicyStatement({
         sid: 'SsmSentinelArn',
-        effect: iam.Effect.ALLOW,
+        effect: Effect.ALLOW,
         actions: ['ssm:GetParameter'],
         resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/sentinel/runtime-arn`],
       })
     );
     protectEvalRole.addToPolicy(
-      new iam.PolicyStatement({
+      new PolicyStatement({
         sid: 'InvokeSentinelRuntime',
-        effect: iam.Effect.ALLOW,
+        effect: Effect.ALLOW,
         actions: ['bedrock-agentcore:InvokeAgentRuntime'],
         resources: [`arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`],
         conditions: { StringLike: { 'aws:ResourceTag/Name': 'Sentinel*' } },
       })
     );
-    const protectEvalFn = new lambda.Function(this, 'SentinelProtectEvalFunction', {
+    const protectEvalFn = new LambdaFunction(this, 'SentinelProtectEvalFunction', {
       functionName: 'glitch-sentinel-protect-eval',
-      runtime: lambda.Runtime.PYTHON_3_12,
+      runtime: Runtime.PYTHON_3_12,
       handler: 'index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/sentinel-protect-eval')),
-      timeout: cdk.Duration.seconds(120),
+      code: Code.fromAsset(path.join(__dirname, '../lambda/sentinel-protect-eval')),
+      timeout: Duration.seconds(120),
       memorySize: 128,
       role: protectEvalRole,
     });
-    new events.Rule(this, 'SentinelProtectEvalSchedule', {
-      schedule: events.Schedule.rate(cdk.Duration.minutes(15)),
-      targets: [new targets.LambdaFunction(protectEvalFn)],
+    new Rule(this, 'SentinelProtectEvalSchedule', {
+      schedule: Schedule.rate(Duration.minutes(15)),
+      targets: [new LambdaFunctionTarget(protectEvalFn)],
       description: 'Invoke Sentinel every 15 min for Protect camera evaluation',
     });
 
     // SSM parameters for Sentinel configuration.
     // Use AwsCustomResource with PutParameter Overwrite so we never fail with "parameter already exists"
     // (e.g. after stack re-create or param created outside the stack).
-    new cr.AwsCustomResource(this, 'SentinelGlitchRuntimeArnParam', {
+    new AwsCustomResource(this, 'SentinelGlitchRuntimeArnParam', {
       onUpdate: {
         service: 'SSM',
         action: 'putParameter',
@@ -1802,11 +1883,11 @@ export class GlitchSentinelStack extends cdk.Stack {
           Overwrite: true,
           Description: 'Glitch agent runtime ARN for Sentinel A2A invocation',
         },
-        physicalResourceId: cr.PhysicalResourceId.of('/glitch/sentinel/glitch-runtime-arn'),
+        physicalResourceId: PhysicalResourceId.of('/glitch/sentinel/glitch-runtime-arn'),
       },
-      policy: cr.AwsCustomResourcePolicy.fromStatements([
-        new iam.PolicyStatement({
-          effect: iam.Effect.ALLOW,
+      policy: AwsCustomResourcePolicy.fromStatements([
+        new PolicyStatement({
+          effect: Effect.ALLOW,
           actions: ['ssm:PutParameter'],
           resources: [
             `arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/sentinel/glitch-runtime-arn`,
@@ -1815,7 +1896,7 @@ export class GlitchSentinelStack extends cdk.Stack {
       ]),
     });
 
-    new ssm.StringParameter(this, 'SentinelMonitoredLogGroupsParam', {
+    new StringParameter(this, 'SentinelMonitoredLogGroupsParam', {
       parameterName: '/glitch/sentinel/monitored-log-groups',
       stringValue: JSON.stringify([
         '/aws/bedrock-agentcore/runtimes',
@@ -1828,7 +1909,7 @@ export class GlitchSentinelStack extends cdk.Stack {
       description: 'JSON array of CloudWatch log groups for Sentinel to monitor',
     });
 
-    new cdk.CfnOutput(this, 'SentinelRuntimeRoleArn', {
+    new CfnOutput(this, 'SentinelRuntimeRoleArn', {
       value: runtimeRole.roleArn,
       description: 'IAM role ARN for Sentinel AgentCore Runtime',
     });
