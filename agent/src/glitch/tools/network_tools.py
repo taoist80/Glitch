@@ -106,3 +106,88 @@ def traceroute_host(
 
     success, output = asyncio.run(_run_on_host(source_host, _trace, password=password))
     return output if success else f"traceroute failed: {output}"
+
+
+@tool
+def curl_request(
+    source_host: str,
+    url: str,
+    method: str = "GET",
+    headers: str = "",
+    data: str = "",
+    follow_redirects: bool = True,
+    timeout_seconds: int = 15,
+    password: str = None,
+) -> str:
+    """Run a curl HTTP request from a remote SSH host.
+
+    Useful for testing API reachability, checking HTTP responses, or diagnosing
+    connectivity issues from within the on-prem network.
+
+    Args:
+        source_host: SSH host alias or user@host[:port]
+        url: Target URL (e.g. "http://10.10.110.202:11434/api/tags")
+        method: HTTP method (GET, POST, PUT, DELETE, HEAD)
+        headers: Extra headers, one per line in "Key: Value" format
+        data: Request body (for POST/PUT)
+        follow_redirects: Follow HTTP redirects (-L flag)
+        timeout_seconds: curl connect+max-time timeout (capped at 60)
+        password: SSH password if key auth not configured
+    """
+    timeout_seconds = max(1, min(timeout_seconds, 60))
+    parts = ["curl", "-s", "-S", "-w", r'"\n--- HTTP %{http_code} ---"',
+             "-X", shlex.quote(method.upper()),
+             "--connect-timeout", "5",
+             "--max-time", str(timeout_seconds)]
+    if follow_redirects:
+        parts.append("-L")
+    for line in (headers or "").splitlines():
+        line = line.strip()
+        if line:
+            parts += ["-H", shlex.quote(line)]
+    if data:
+        parts += ["-d", shlex.quote(data)]
+    parts.append(shlex.quote(url))
+    cmd = " ".join(parts) + " 2>&1"
+
+    async def _curl(conn):
+        result = await conn.run(cmd, timeout=timeout_seconds + 10)
+        return ((result.stdout or "") + (result.stderr or "")).strip()
+
+    success, output = asyncio.run(_run_on_host(source_host, _curl, password=password))
+    return output if success else f"curl failed: {output}"
+
+
+@tool
+def dig_host(
+    source_host: str,
+    name: str,
+    record_type: str = "A",
+    dns_server: str = "",
+    password: str = None,
+) -> str:
+    """Run a DNS lookup (dig) from a remote SSH host.
+
+    Useful for verifying DNS resolution from within the on-prem network,
+    testing split-horizon DNS, or diagnosing name resolution issues.
+
+    Args:
+        source_host: SSH host alias or user@host[:port]
+        name: Hostname or domain to resolve (e.g. "home.awoo.agency")
+        record_type: DNS record type (A, AAAA, MX, TXT, CNAME, PTR, NS, SOA)
+        dns_server: Optional specific DNS server to query (e.g. "8.8.8.8")
+        password: SSH password if key auth not configured
+    """
+    parts = ["dig", "+noall", "+answer", "+stats",
+             shlex.quote(record_type.upper()),
+             shlex.quote(name)]
+    if dns_server:
+        parts.insert(1, f"@{shlex.quote(dns_server)}")
+    cmd = " ".join(parts) + " 2>&1"
+
+    async def _dig(conn):
+        result = await conn.run(cmd, timeout=15)
+        return ((result.stdout or "") + (result.stderr or "")).strip() or "(no output)"
+
+    success, output = asyncio.run(_run_on_host(source_host, _dig, password=password))
+    return output if success else f"dig failed: {output}"
