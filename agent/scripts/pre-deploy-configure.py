@@ -53,6 +53,7 @@ SSM_TELEGRAM_CONFIG_TABLE = '/glitch/telegram/config-table'
 SSM_SSH_HOSTS = '/glitch/ssh/hosts'
 SSM_SOUL_S3_BUCKET = '/glitch/soul/s3-bucket'
 SSM_OLLAMA_PROXY_HOST = '/glitch/ollama/proxy-host'
+SSM_OLLAMA_API_KEY = '/glitch/ollama/api-key'
 
 AGENT_DIR = Path(__file__).parent.parent
 CONFIG_FILE = AGENT_DIR / '.bedrock_agentcore.yaml'
@@ -159,6 +160,13 @@ def main():
             log(f"Ollama proxy host set to {ollama_proxy_host} (from SSM)", 'SUCCESS')
         else:
             log("SSM /glitch/ollama/proxy-host not found; deploy GlitchFoundationStack first", 'WARN')
+
+        ollama_api_key = get_ssm_parameter(ssm_client, SSM_OLLAMA_API_KEY)
+        if ollama_api_key:
+            env_vars['GLITCH_OLLAMA_API_KEY'] = ollama_api_key
+            log("Ollama API key loaded from SSM", 'SUCCESS')
+        else:
+            log("SSM /glitch/ollama/api-key not set; Ollama proxy will be unauthenticated", 'WARN')
 
         # Set default timeouts for Ollama requests
         if 'GLITCH_OLLAMA_TIMEOUT' not in env_vars:

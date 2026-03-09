@@ -43,6 +43,21 @@ def _ollama_proxy_host() -> Optional[str]:
     return v or None
 
 
+def _ollama_api_key() -> Optional[str]:
+    """API key for nginx proxy auth. Set via GLITCH_OLLAMA_API_KEY env var."""
+    v = os.environ.get("GLITCH_OLLAMA_API_KEY", "").strip()
+    return v or None
+
+
+def _ollama_headers() -> dict:
+    """Base headers for all Ollama requests. Includes X-Api-Key when proxy auth is configured."""
+    headers: dict = {"Content-Type": "application/json"}
+    key = _ollama_api_key()
+    if key:
+        headers["X-Api-Key"] = key
+    return headers
+
+
 def _ollama_chat_host() -> str:
     """Chat endpoint: proxy host (port 11434) or direct 10.10.110.202."""
     return _ollama_proxy_host() or "10.10.110.202"
@@ -192,7 +207,7 @@ async def vision_agent(
         
         async with httpx.AsyncClient(timeout=config.timeout) as client:
             logger.info(f"Sending vision request to {endpoint} with model {model}")
-            response = await client.post(endpoint, json=payload)
+            response = await client.post(endpoint, json=payload, headers=_ollama_headers())
             response.raise_for_status()
             
             result: OllamaGenerateResponse = response.json()
@@ -247,7 +262,7 @@ async def local_chat(
         
         async with httpx.AsyncClient(timeout=config.timeout) as client:
             logger.info(f"Sending chat request to {endpoint} with model {model}")
-            response = await client.post(endpoint, json=payload)
+            response = await client.post(endpoint, json=payload, headers=_ollama_headers())
             response.raise_for_status()
             
             result: OllamaGenerateResponse = response.json()
@@ -287,7 +302,7 @@ def test_ollama_model(
         url = f"http://{config.chat_host}:{config.port}/api/generate"
 
     payload = json.dumps({"model": model, "prompt": prompt, "stream": False}).encode()
-    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(url, data=payload, headers=_ollama_headers())
     t0 = time.monotonic()
     try:
         with urllib.request.urlopen(req, timeout=config.timeout) as resp:
@@ -397,7 +412,7 @@ async def _check_single_host(
     try:
         endpoint = f"http://{host}:{port}{path}"
         async with httpx.AsyncClient(timeout=3.0) as client:
-            response = await client.get(endpoint)
+            response = await client.get(endpoint, headers=_ollama_headers())
             latency_ms = (time.monotonic() - t0) * 1000
             if response.status_code == 200:
                 raw = response.json()
