@@ -53,16 +53,14 @@ class ProtectClient:
     def __init__(self, config: ProtectConfig):
         self._config = config
 
-        # Strip any embedded port from host (e.g. "home.awoo.agency:7443" -> "home.awoo.agency").
-        # The integration API (API key mode) is only served on port 443; the private API
-        # (cookie mode) may be on a custom port embedded in the host string.
+        # Parse host (may include port, e.g. "home.awoo.agency:13443").
         raw_host = config.host
         if ":" in raw_host:
             hostname, embedded_port = raw_host.rsplit(":", 1)
-            effective_port = 443 if config.use_api_key else int(embedded_port)
+            effective_port = int(embedded_port)
         else:
             hostname = raw_host
-            effective_port = 443 if config.use_api_key else config.port
+            effective_port = config.port
 
         if effective_port == 443:
             self._base_url = f"https://{hostname}"

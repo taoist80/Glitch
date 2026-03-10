@@ -135,10 +135,18 @@ class ProtectEventPoller:
     # ------------------------------------------------------------------
 
     def _build_ws_url(self, ws_path: str) -> str:
-        """Build ``wss://`` URL on port 443 (strip any embedded custom port)."""
+        """Build ``https://`` URL using the configured host and port."""
         raw_host = self._config.host
-        hostname = raw_host.rsplit(":", 1)[0] if ":" in raw_host else raw_host
-        return f"https://{hostname}{ws_path}"
+        if ":" in raw_host:
+            hostname, port_str = raw_host.rsplit(":", 1)
+            port = int(port_str)
+        else:
+            hostname = raw_host
+            port = self._config.port
+
+        if port == 443:
+            return f"https://{hostname}{ws_path}"
+        return f"https://{hostname}:{port}{ws_path}"
 
     def _build_ws_headers(self) -> dict:
         """Build auth headers for the WebSocket connection."""

@@ -61,8 +61,8 @@ A hybrid AI agent system built on AWS AgentCore Runtime. Glitch is the user-faci
 │                                                                                 │
 │  ┌──────────────────────────────────────────────────────────────────────┐      │
 │  │ nginx TCP stream proxy — 10.10.100.230                               │      │
-│  │  :443  → 192.168.1.1:443  (UDM-Pro integration API, X-API-KEY auth) │      │
-│  │  :7443 → 192.168.1.1:443  (UDM-Pro private API, legacy cookie auth) │      │
+│  │  :443  → 192.168.1.1:443  (Protect API + WS, WAN:13443 port fwd)   │      │
+│  │  :7443 → 192.168.1.1:443  (legacy cookie auth, local only)         │      │
 │  │  :80   → HTTP proxy for Glitch UI (S3) and Lambda gateway           │      │
 │  └──────────────────────────────────────────────────────────────────────┘      │
 │                                                                                 │
@@ -122,8 +122,8 @@ The VPC exists solely to host the Site-to-Site VPN. It has:
 
 An nginx instance at `10.10.100.230` acts as the on-prem ingress point for `home.awoo.agency`:
 
-- **Port 443 → `192.168.1.1:443`** (TCP stream passthrough): Required for UniFi Protect integration API (`/proxy/protect/integration/v1/...`) which only accepts `X-API-KEY` header auth on the native UDM-Pro HTTPS port. Used by Sentinel in API key mode.
-- **Port 7443 → `192.168.1.1:443`** (TCP stream passthrough): Legacy path for cookie-based auth to the private Protect API (`/proxy/protect/api/...`). Kept as fallback for cookie auth mode.
+- **Port 443 → `192.168.1.1:443`** (TCP stream passthrough): UniFi Protect integration API and WebSocket endpoints. Receives traffic from the UDM-Pro port forward (WAN `13443` → LAN `10.10.100.230:443`), enabling Sentinel containers in PUBLIC mode to reach Protect via the public internet at `home.awoo.agency:13443`.
+- **Port 7443 → `192.168.1.1:443`** (TCP stream passthrough): Legacy path for cookie-based auth to the private Protect API (`/proxy/protect/api/...`). Kept as fallback; not used in API key mode.
 - **Port 80**: HTTP reverse proxy for Glitch UI (S3 bucket) and Lambda gateway. Config in `infrastructure/scripts/glitch-proxy.conf`.
 
 The TCP stream blocks live in `/etc/nginx/nginx.conf` (not in `conf.d/`). The HTTP server block lives in `/etc/nginx/conf.d/glitch-proxy.conf`.
