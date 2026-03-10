@@ -12,9 +12,34 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE TABLE IF NOT EXISTS cameras (
     camera_id       TEXT PRIMARY KEY,
     name            TEXT NOT NULL,
+    mac             TEXT,
+    model_key       TEXT,  -- "camera"
+    state           TEXT,  -- CONNECTED, DISCONNECTED, etc.
     location        TEXT,
-    type            TEXT,
+    type            TEXT,  -- camera hardware model
     zone            TEXT,  -- front, rear, side, garage, interior
+    -- Audio/video settings
+    is_mic_enabled  BOOLEAN,
+    mic_volume      INT,
+    video_mode      TEXT,  -- default, highFps, sport, slowShutter
+    hdr_type        TEXT,  -- auto, off, on
+    -- Capability flags from featureFlags
+    has_hdr             BOOLEAN,
+    has_mic             BOOLEAN,
+    has_speaker         BOOLEAN,
+    has_led_status      BOOLEAN,
+    has_full_hd_snapshot BOOLEAN,
+    video_modes         TEXT[],  -- ["default","highFps","sport","slowShutter"]
+    smart_detect_types  TEXT[],  -- ["person","vehicle","animal","package"]
+    smart_detect_audio_types TEXT[],  -- ["alrmSmoke","alrmCmonx","alrmBabyCry","alrmSpeak"]
+    -- Active smart detect config
+    smart_detect_object_types TEXT[],
+    smart_detect_audio_config TEXT[],
+    -- LED & OSD settings (JSONB for nested objects)
+    led_settings    JSONB DEFAULT '{}'::jsonb,
+    osd_settings    JSONB DEFAULT '{}'::jsonb,
+    lcd_message     JSONB DEFAULT '{}'::jsonb,
+    -- Sentinel-managed fields
     is_restricted   BOOLEAN DEFAULT FALSE,
     restricted_hours_start INT,  -- hour 0-23 (NULL = not restricted)
     restricted_hours_end   INT,

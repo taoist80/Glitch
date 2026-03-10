@@ -14,6 +14,7 @@ import type {
   InvocationResponse,
   StreamingInfo,
   StreamEvent,
+  ProtectCamerasResponse,
   ProtectEntitiesResponse,
   ProtectEventsResponse,
   ProtectAlertsResponse,
@@ -109,6 +110,11 @@ export const api = {
 
   async getProtectSummary(): Promise<ProtectSummary> {
     return fetchJson<ProtectSummary>(`${API_BASE}/protect/summary`);
+  },
+
+  async getProtectCameras(params?: { limit?: number }): Promise<ProtectCamerasResponse> {
+    const q = params?.limit != null ? `?limit=${params.limit}` : '';
+    return fetchJson<ProtectCamerasResponse>(`${API_BASE}/protect/cameras${q}`);
   },
 
   async getProtectEntities(params?: { limit?: number }): Promise<ProtectEntitiesResponse> {

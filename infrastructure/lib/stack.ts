@@ -958,6 +958,7 @@ export class GlitchGatewayStack extends Stack {
     // IAM authentication: Lambda role gets rds-db:connect on the glitch_iam DB user.
     protectDb.grantConnect(protectQueryFn, 'glitch_iam');
 
+
     this.gatewayFunction = new LambdaFunction(this, 'GatewayFunction', {
       functionName: 'glitch-gateway',
       runtime: Runtime.PYTHON_3_12,

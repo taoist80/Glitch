@@ -1,10 +1,11 @@
 """Protect Query Lambda — direct Postgres reader for the UI Protect tab.
 
-Bypasses both LLMs entirely for the five /api/protect/* structured-data endpoints,
+Bypasses both LLMs entirely for the /api/protect/* structured-data endpoints,
 reducing response latency from ~5-10s to <500ms.
 
 Routes:
     GET /api/protect/summary   → entities_total, events_24h, alerts_unack, cameras_online
+    GET /api/protect/cameras   → ?limit=N  (default 20)
     GET /api/protect/entities  → ?limit=N  (default 50)
     GET /api/protect/events    → ?hours=N&limit=N  (default 24h, 30 events)
     GET /api/protect/alerts    → ?limit=N&unack_only=true  (default 20)
@@ -96,16 +97,19 @@ def query_summary(conn) -> Dict[str, int]:
              WHERE timestamp > NOW() - INTERVAL '24 hours') AS events_24h,
             (SELECT COUNT(*) FROM alerts
              WHERE user_response IS NULL) AS alerts_unack,
-            (SELECT COUNT(*) FROM cameras) AS cameras_online
+            (SELECT COUNT(*) FROM cameras) AS cameras_total,
+            (SELECT COUNT(*) FROM cameras
+             WHERE state = 'CONNECTED') AS cameras_online
     """)
     if rows:
         return {
             "entities_total": int(rows[0][0] or 0),
             "events_24h":     int(rows[0][1] or 0),
             "alerts_unack":   int(rows[0][2] or 0),
-            "cameras_online": int(rows[0][3] or 0),
+            "cameras_total":  int(rows[0][3] or 0),
+            "cameras_online": int(rows[0][4] or 0),
         }
-    return {"entities_total": 0, "events_24h": 0, "alerts_unack": 0, "cameras_online": 0}
+    return {"entities_total": 0, "events_24h": 0, "alerts_unack": 0, "cameras_total": 0, "cameras_online": 0}
 
 
 def query_entities(conn, limit: int) -> Dict[str, Any]:
@@ -234,6 +238,46 @@ def query_sentinel_health(conn) -> Dict[str, Any]:
     }
 
 
+def query_cameras(conn, limit: int) -> Dict[str, Any]:
+    limit = max(1, min(limit, 50))
+    rows = conn.run(
+        """
+        SELECT camera_id, name, mac, model_key, state, type, zone,
+               is_mic_enabled, mic_volume, video_mode, hdr_type,
+               has_hdr, has_mic, has_speaker, has_led_status, has_full_hd_snapshot,
+               video_modes, smart_detect_types, smart_detect_audio_types,
+               smart_detect_object_types, smart_detect_audio_config,
+               led_settings, osd_settings, lcd_message,
+               updated_at
+        FROM cameras
+        ORDER BY name
+        LIMIT :limit
+        """,
+        limit=limit,
+    )
+    columns = [
+        "camera_id", "name", "mac", "model_key", "state", "type", "zone",
+        "is_mic_enabled", "mic_volume", "video_mode", "hdr_type",
+        "has_hdr", "has_mic", "has_speaker", "has_led_status", "has_full_hd_snapshot",
+        "video_modes", "smart_detect_types", "smart_detect_audio_types",
+        "smart_detect_object_types", "smart_detect_audio_config",
+        "led_settings", "osd_settings", "lcd_message",
+        "updated_at",
+    ]
+    cameras = []
+    for row in rows:
+        d = _row_to_dict(columns, row)
+        d["updated_at"] = _iso(d["updated_at"])
+        for bool_key in ("is_mic_enabled", "has_hdr", "has_mic", "has_speaker",
+                         "has_led_status", "has_full_hd_snapshot"):
+            if d[bool_key] is not None:
+                d[bool_key] = bool(d[bool_key])
+        cameras.append(d)
+    total_rows = conn.run("SELECT COUNT(*) FROM cameras")
+    total = int(total_rows[0][0]) if total_rows else len(cameras)
+    return {"cameras": cameras, "total": total}
+
+
 def query_patterns(conn, limit: int) -> Dict[str, Any]:
     limit = max(1, min(limit, 100))
     rows = conn.run(
@@ -281,6 +325,8 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         if path.endswith("/summary"):
             body = query_summary(conn)
+        elif path.endswith("/cameras"):
+            body = query_cameras(conn, int(query.get("limit", 20)))
         elif path.endswith("/entities"):
             body = query_entities(conn, int(query.get("limit", 50)))
         elif path.endswith("/events"):

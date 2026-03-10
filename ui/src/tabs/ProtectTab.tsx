@@ -239,7 +239,9 @@ export function ProtectTab() {
             <div className="stat-title flex items-center gap-2">
               <Camera size={16} /> Cameras
             </div>
-            <div className="stat-value text-2xl">{summary.cameras_online}</div>
+            <div className="stat-value text-2xl">
+              {summary.cameras_online}/{summary.cameras_total ?? summary.cameras_online}
+            </div>
           </div>
         </div>
       )}

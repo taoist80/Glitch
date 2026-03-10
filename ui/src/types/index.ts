@@ -63,10 +63,44 @@ export interface ProtectPattern {
   confidence?: number;
 }
 
+export interface ProtectCamera {
+  camera_id: string;
+  name: string;
+  mac?: string;
+  model_key?: string;
+  state?: string;
+  type?: string;
+  zone?: string;
+  is_mic_enabled?: boolean;
+  mic_volume?: number;
+  video_mode?: string;
+  hdr_type?: string;
+  has_hdr?: boolean;
+  has_mic?: boolean;
+  has_speaker?: boolean;
+  has_led_status?: boolean;
+  has_full_hd_snapshot?: boolean;
+  video_modes?: string[];
+  smart_detect_types?: string[];
+  smart_detect_audio_types?: string[];
+  smart_detect_object_types?: string[];
+  smart_detect_audio_config?: string[];
+  led_settings?: Record<string, unknown>;
+  osd_settings?: Record<string, unknown>;
+  lcd_message?: Record<string, unknown>;
+  updated_at?: string;
+}
+
+export interface ProtectCamerasResponse {
+  cameras: ProtectCamera[];
+  total: number;
+}
+
 export interface ProtectSummary {
   entities_total: number;
   events_24h: number;
   alerts_unack: number;
+  cameras_total: number;
   cameras_online: number;
 }
 

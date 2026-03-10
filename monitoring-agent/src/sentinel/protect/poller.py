@@ -59,6 +59,9 @@ class ProtectEventPoller:
         """Launch background reconnect loops.  Returns the asyncio Tasks."""
         self._running = True
 
+        # Seed cameras in background so it doesn't block the health check
+        asyncio.create_task(self._seed_cameras(), name="protect-camera-seed")
+
         if self._config.use_api_key:
             events_task = asyncio.create_task(
                 self._reconnect_loop("events", _EVENTS_WS_PATH),
@@ -85,6 +88,49 @@ class ProtectEventPoller:
             )
 
         return self._tasks
+
+    async def _seed_cameras(self) -> None:
+        """Fetch all cameras via REST and upsert into Postgres.
+
+        Runs once at startup so the cameras table is fully populated before
+        the WS streams begin delivering incremental updates.
+        """
+        try:
+            cameras = await self._client.get_cameras()
+            logger.info("ProtectEventPoller: seeding %d cameras from REST", len(cameras))
+            from sentinel.protect import db as protect_db
+
+            for cam in cameras:
+                ff = cam.get("featureFlags", {})
+                sds = cam.get("smartDetectSettings", {})
+                await protect_db.upsert_camera(
+                    camera_id=cam["id"],
+                    name=cam.get("name", cam["id"]),
+                    camera_type=cam.get("type"),
+                    mac=cam.get("mac"),
+                    model_key=cam.get("modelKey"),
+                    state=cam.get("state"),
+                    is_mic_enabled=cam.get("isMicEnabled"),
+                    mic_volume=cam.get("micVolume"),
+                    video_mode=cam.get("videoMode"),
+                    hdr_type=cam.get("hdrType"),
+                    has_hdr=ff.get("hasHdr"),
+                    has_mic=ff.get("hasMic"),
+                    has_speaker=ff.get("hasSpeaker"),
+                    has_led_status=ff.get("hasLedStatus"),
+                    has_full_hd_snapshot=ff.get("supportFullHdSnapshot"),
+                    video_modes=ff.get("videoModes"),
+                    smart_detect_types=ff.get("smartDetectTypes"),
+                    smart_detect_audio_types=ff.get("smartDetectAudioTypes"),
+                    smart_detect_object_types=sds.get("objectTypes"),
+                    smart_detect_audio_config=sds.get("audioTypes"),
+                    led_settings=cam.get("ledSettings"),
+                    osd_settings=cam.get("osdSettings"),
+                    lcd_message=cam.get("lcdMessage"),
+                )
+            logger.info("ProtectEventPoller: camera seed complete")
+        except Exception as exc:
+            logger.warning("ProtectEventPoller: camera seed failed (non-fatal): %s", exc)
 
     def stop(self) -> None:
         """Signal all poller tasks to stop."""
@@ -312,10 +358,10 @@ class ProtectEventPoller:
     async def _ingest_device_update(
         self, item: dict, model_key: str, action_type: str,
     ) -> None:
-        """Log device state changes from the devices WS.
+        """Sync device state changes from the devices WS into Postgres.
 
-        Camera updates are synced to the cameras table; other model types
-        (nvr, sensor, light, etc.) are logged for observability.
+        Camera updates are fully persisted to the cameras table;
+        other model types (nvr, sensor, light, etc.) are logged for observability.
         """
         device_id = item.get("id", "unknown")
         name = item.get("name", "")
@@ -328,18 +374,33 @@ class ProtectEventPoller:
             )
             try:
                 from sentinel.protect import db as protect_db
-                camera_meta = {}
-                if "featureFlags" in item:
-                    camera_meta["featureFlags"] = item["featureFlags"]
-                if "state" in item:
-                    camera_meta["state"] = item["state"]
-                if "mac" in item:
-                    camera_meta["mac"] = item["mac"]
+                ff = item.get("featureFlags", {})
+                sds = item.get("smartDetectSettings", {})
+
                 await protect_db.upsert_camera(
                     camera_id=device_id,
                     name=name or device_id,
                     camera_type=item.get("type"),
-                    metadata=camera_meta if camera_meta else None,
+                    mac=item.get("mac"),
+                    model_key=model_key,
+                    state=state or None,
+                    is_mic_enabled=item.get("isMicEnabled"),
+                    mic_volume=item.get("micVolume"),
+                    video_mode=item.get("videoMode"),
+                    hdr_type=item.get("hdrType"),
+                    has_hdr=ff.get("hasHdr"),
+                    has_mic=ff.get("hasMic"),
+                    has_speaker=ff.get("hasSpeaker"),
+                    has_led_status=ff.get("hasLedStatus"),
+                    has_full_hd_snapshot=ff.get("supportFullHdSnapshot"),
+                    video_modes=ff.get("videoModes"),
+                    smart_detect_types=ff.get("smartDetectTypes"),
+                    smart_detect_audio_types=ff.get("smartDetectAudioTypes"),
+                    smart_detect_object_types=sds.get("objectTypes"),
+                    smart_detect_audio_config=sds.get("audioTypes"),
+                    led_settings=item.get("ledSettings"),
+                    osd_settings=item.get("osdSettings"),
+                    lcd_message=item.get("lcdMessage"),
                 )
             except Exception as exc:
                 logger.debug("ProtectEventPoller: camera upsert failed: %s", exc)

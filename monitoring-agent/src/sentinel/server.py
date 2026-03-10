@@ -45,96 +45,98 @@ _component_health: dict = {
 }
 
 
+_poller: Optional[object] = None
+
+
+async def _start_protect_subsystem() -> None:
+    """Initialize Protect DB, poller, and event processor in the background.
+
+    Runs as an asyncio task so the /ping health check can respond immediately
+    while DB connections, migrations, and REST seed calls complete.
+    """
+    global _poller
+
+    from sentinel.protect.poller import ProtectEventPoller
+    from sentinel.protect.client import get_client as get_protect_client
+    from sentinel.protect.config import get_protect_config
+
+    try:
+        from sentinel.protect.db import get_pool
+        await get_pool()
+        _component_health["protect_db"] = "ok"
+        logger.info("Protect DB pool initialised")
+    except Exception as exc:
+        _component_health["protect_db"] = f"error: {exc}"
+        logger.warning(
+            "Protect DB not reachable (%s) — DB writes disabled, Telegram alerts still active", exc
+        )
+        try:
+            from sentinel.tools.telegram_tools import send_telegram_alert
+            await send_telegram_alert.__wrapped__(
+                message=(
+                    "⚠️ <b>Sentinel: Protect DB unreachable</b>\n"
+                    f"DB writes are disabled until connectivity is restored.\n"
+                    f"Error: <code>{exc}</code>"
+                ),
+                severity="medium",
+                component="ProtectDB",
+            )
+        except Exception:
+            pass
+
+    client = get_protect_client()
+    config = get_protect_config()
+
+    if client.auth_mode == "api_key":
+        logger.info("Protect auth: API key — WS streams use X-API-KEY header (no login needed)")
+    else:
+        try:
+            await client._authenticate()
+            logger.info("Protect pre-auth (cookie) succeeded")
+        except Exception as auth_exc:
+            logger.warning("Protect pre-auth failed: %s — poller will retry with backoff", auth_exc)
+
+    poller = ProtectEventPoller(protect_client=client, config=config)
+    await poller.start()
+    _poller = poller
+    _component_health["protect_poller"] = "running"
+
+    try:
+        from sentinel.protect.event_processor import ProtectEventProcessor
+        cameras = await client.get_cameras()
+        camera_ids = [c["id"] for c in cameras if isinstance(c, dict)]
+        _processor = ProtectEventProcessor()
+        await _processor.start(
+            camera_ids=camera_ids,
+            check_interval=float(os.environ.get("GLITCH_PROTECT_CHECK_INTERVAL", "120")),
+        )
+        _component_health["protect_processor"] = "running"
+        logger.info("Event processor started for %d cameras at %ss interval",
+                     len(camera_ids), os.environ.get("GLITCH_PROTECT_CHECK_INTERVAL", "120"))
+    except Exception as exc:
+        _component_health["protect_processor"] = f"error: {exc}"
+        logger.warning("Failed to start event processor: %s — continuing without it", exc)
+
+    asyncio.create_task(_daily_report_loop(), name="daily-report")
+    logger.info("Daily report scheduler started (fires at 08:00 UTC)")
+
+    asyncio.create_task(_health_writer_loop(), name="health-writer")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """FastAPI lifespan: start optional protect poller on startup, clean up on shutdown."""
-    _poller: Optional[object] = None
 
     try:
         from sentinel.protect.config import is_protect_configured
-        from sentinel.protect.poller import ProtectEventPoller
-        from sentinel.protect.client import get_client as get_protect_client
-        from sentinel.protect.config import get_protect_config
 
         _component_health["protect_configured"] = is_protect_configured()
 
         if is_protect_configured():
-            logger.info("Protect config detected — starting event poller")
-
-            try:
-                from sentinel.protect.db import get_pool
-                await get_pool()
-                _component_health["protect_db"] = "ok"
-                logger.info("Protect DB pool initialised")
-            except Exception as exc:
-                _component_health["protect_db"] = f"error: {exc}"
-                logger.warning(
-                    "Protect DB not reachable (%s) — DB writes disabled, Telegram alerts still active", exc
-                )
-                try:
-                    from sentinel.tools.telegram_tools import send_telegram_alert
-                    await send_telegram_alert.__wrapped__(
-                        message=(
-                            "⚠️ <b>Sentinel: Protect DB unreachable</b>\n"
-                            f"DB writes are disabled until connectivity is restored.\n"
-                            f"Error: <code>{exc}</code>"
-                        ),
-                        severity="medium",
-                        component="ProtectDB",
-                    )
-                except Exception as telegram_exc:
-                    logger.warning("Could not send Telegram alert for DB failure: %s", telegram_exc)
-
-            client = get_protect_client()
-            config = get_protect_config()
-
-            if client.auth_mode == "api_key":
-                logger.info("Protect auth: API key — WS streams use X-API-KEY header (no login needed)")
-            else:
-                try:
-                    await client._authenticate()
-                    logger.info("Protect pre-auth (cookie) succeeded — starting poller and processor")
-                except Exception as auth_exc:
-                    logger.warning("Protect pre-auth failed: %s — poller will retry with backoff", auth_exc)
-
-            poller = ProtectEventPoller(protect_client=client, config=config)
-            await poller.start()
-            _poller = poller
-            _component_health["protect_poller"] = "running"
-
-            try:
-                from sentinel.protect.event_processor import ProtectEventProcessor
-                cameras = await client.get_cameras()
-                camera_ids = [c["id"] for c in cameras if isinstance(c, dict)]
-                _processor = ProtectEventProcessor()
-                await _processor.start(
-                    camera_ids=camera_ids,
-                    check_interval=float(os.environ.get("GLITCH_PROTECT_CHECK_INTERVAL", "120")),
-                )
-                _component_health["protect_processor"] = "running"
-                logger.info(f"Event processor started for {len(camera_ids)} cameras at "
-                            f"{os.environ.get('GLITCH_PROTECT_CHECK_INTERVAL', '120')}s interval")
-            except Exception as exc:
-                _component_health["protect_processor"] = f"error: {exc}"
-                logger.warning("Failed to start event processor: %s — continuing without it", exc)
-                try:
-                    from sentinel.tools.telegram_tools import send_telegram_alert
-                    await send_telegram_alert.__wrapped__(
-                        message=(
-                            "⚠️ <b>Sentinel: Protect event processor failed to start</b>\n"
-                            f"Camera polling and vision analysis are offline.\n"
-                            f"Error: <code>{exc}</code>"
-                        ),
-                        severity="medium",
-                        component="ProtectPoller",
-                    )
-                except Exception as telegram_exc:
-                    logger.warning("Could not send Telegram alert for event processor failure: %s", telegram_exc)
-
-            asyncio.create_task(_daily_report_loop(), name="daily-report")
-            logger.info("Daily report scheduler started (fires at 08:00 UTC)")
-
-            asyncio.create_task(_health_writer_loop(), name="health-writer")
+            logger.info("Protect config detected — deferring setup to background task")
+            asyncio.create_task(
+                _start_protect_subsystem(), name="protect-startup"
+            )
         else:
             logger.info("Protect not configured (GLITCH_PROTECT_HOST missing) — skipping event poller")
     except ImportError as exc:

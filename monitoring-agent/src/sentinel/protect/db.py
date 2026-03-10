@@ -17,6 +17,7 @@ _pool = None
 _schema_applied = False
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
+MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
 
 async def get_pool():
@@ -77,7 +78,7 @@ async def get_pool():
 
 
 async def _apply_schema() -> None:
-    """Apply schema.sql if tables don't exist yet."""
+    """Apply schema.sql if tables don't exist, then run any pending migrations."""
     global _schema_applied
     if _schema_applied:
         return
@@ -86,7 +87,6 @@ async def _apply_schema() -> None:
     schema_sql = SCHEMA_PATH.read_text()
 
     async with pool.acquire() as conn:
-        # Check if events table exists as a proxy for schema state
         exists = await conn.fetchval(
             "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
             "WHERE table_name = 'events' AND table_schema = 'public')"
@@ -97,6 +97,13 @@ async def _apply_schema() -> None:
             logger.info("Protect DB schema applied successfully")
         else:
             logger.debug("Protect DB schema already applied")
+
+        # Run idempotent migration scripts in sorted order
+        if MIGRATIONS_DIR.is_dir():
+            for migration in sorted(MIGRATIONS_DIR.glob("*.sql")):
+                logger.info("Applying migration: %s", migration.name)
+                await conn.execute(migration.read_text())
+                logger.info("Migration %s applied", migration.name)
 
     _schema_applied = True
 
@@ -694,18 +701,88 @@ async def upsert_camera(
     camera_type: Optional[str] = None,
     zone: Optional[str] = None,
     metadata: Optional[Dict] = None,
+    *,
+    mac: Optional[str] = None,
+    model_key: Optional[str] = None,
+    state: Optional[str] = None,
+    is_mic_enabled: Optional[bool] = None,
+    mic_volume: Optional[int] = None,
+    video_mode: Optional[str] = None,
+    hdr_type: Optional[str] = None,
+    has_hdr: Optional[bool] = None,
+    has_mic: Optional[bool] = None,
+    has_speaker: Optional[bool] = None,
+    has_led_status: Optional[bool] = None,
+    has_full_hd_snapshot: Optional[bool] = None,
+    video_modes: Optional[List[str]] = None,
+    smart_detect_types: Optional[List[str]] = None,
+    smart_detect_audio_types: Optional[List[str]] = None,
+    smart_detect_object_types: Optional[List[str]] = None,
+    smart_detect_audio_config: Optional[List[str]] = None,
+    led_settings: Optional[Dict] = None,
+    osd_settings: Optional[Dict] = None,
+    lcd_message: Optional[Dict] = None,
 ) -> None:
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO cameras (camera_id, name, location, type, zone, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            ON CONFLICT (camera_id) DO UPDATE
-            SET name = $2, location = $3, type = $4, zone = $5,
-                metadata = $6, updated_at = NOW()
+            INSERT INTO cameras (
+                camera_id, name, mac, model_key, state,
+                location, type, zone,
+                is_mic_enabled, mic_volume, video_mode, hdr_type,
+                has_hdr, has_mic, has_speaker, has_led_status, has_full_hd_snapshot,
+                video_modes, smart_detect_types, smart_detect_audio_types,
+                smart_detect_object_types, smart_detect_audio_config,
+                led_settings, osd_settings, lcd_message,
+                metadata
+            ) VALUES (
+                $1, $2, $3, $4, $5,
+                $6, $7, $8,
+                $9, $10, $11, $12,
+                $13, $14, $15, $16, $17,
+                $18, $19, $20,
+                $21, $22,
+                $23, $24, $25,
+                $26
+            )
+            ON CONFLICT (camera_id) DO UPDATE SET
+                name = COALESCE($2, cameras.name),
+                mac = COALESCE($3, cameras.mac),
+                model_key = COALESCE($4, cameras.model_key),
+                state = COALESCE($5, cameras.state),
+                location = COALESCE($6, cameras.location),
+                type = COALESCE($7, cameras.type),
+                zone = COALESCE($8, cameras.zone),
+                is_mic_enabled = COALESCE($9, cameras.is_mic_enabled),
+                mic_volume = COALESCE($10, cameras.mic_volume),
+                video_mode = COALESCE($11, cameras.video_mode),
+                hdr_type = COALESCE($12, cameras.hdr_type),
+                has_hdr = COALESCE($13, cameras.has_hdr),
+                has_mic = COALESCE($14, cameras.has_mic),
+                has_speaker = COALESCE($15, cameras.has_speaker),
+                has_led_status = COALESCE($16, cameras.has_led_status),
+                has_full_hd_snapshot = COALESCE($17, cameras.has_full_hd_snapshot),
+                video_modes = COALESCE($18, cameras.video_modes),
+                smart_detect_types = COALESCE($19, cameras.smart_detect_types),
+                smart_detect_audio_types = COALESCE($20, cameras.smart_detect_audio_types),
+                smart_detect_object_types = COALESCE($21, cameras.smart_detect_object_types),
+                smart_detect_audio_config = COALESCE($22, cameras.smart_detect_audio_config),
+                led_settings = COALESCE($23, cameras.led_settings),
+                osd_settings = COALESCE($24, cameras.osd_settings),
+                lcd_message = COALESCE($25, cameras.lcd_message),
+                metadata = COALESCE($26, cameras.metadata),
+                updated_at = NOW()
             """,
-            camera_id, name, location, camera_type, zone,
+            camera_id, name, mac, model_key, state,
+            location, camera_type, zone,
+            is_mic_enabled, mic_volume, video_mode, hdr_type,
+            has_hdr, has_mic, has_speaker, has_led_status, has_full_hd_snapshot,
+            video_modes, smart_detect_types, smart_detect_audio_types,
+            smart_detect_object_types, smart_detect_audio_config,
+            json.dumps(led_settings) if led_settings else None,
+            json.dumps(osd_settings) if osd_settings else None,
+            json.dumps(lcd_message) if lcd_message else None,
             json.dumps(metadata or {}),
         )
 
@@ -721,6 +798,44 @@ async def list_cameras() -> List[Dict]:
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch("SELECT * FROM cameras ORDER BY name")
+        return [dict(r) for r in rows]
+
+
+async def list_cameras_summary() -> List[Dict]:
+    """Compact camera listing: id, name, state, detection capabilities, and last update."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT camera_id, name, mac, state, type, zone,
+                   smart_detect_types, smart_detect_audio_types,
+                   video_mode, hdr_type, has_speaker, has_mic,
+                   updated_at
+            FROM cameras
+            ORDER BY name
+            """
+        )
+        return [dict(r) for r in rows]
+
+
+async def get_cameras_by_state(state: str) -> List[Dict]:
+    """List cameras filtered by connection state (e.g. CONNECTED, DISCONNECTED)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM cameras WHERE state = $1 ORDER BY name", state
+        )
+        return [dict(r) for r in rows]
+
+
+async def get_cameras_with_capability(capability: str) -> List[Dict]:
+    """List cameras that support a specific smart detect type (e.g. 'package', 'person')."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM cameras WHERE $1 = ANY(smart_detect_types) ORDER BY name",
+            capability,
+        )
         return [dict(r) for r in rows]
 
 
