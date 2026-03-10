@@ -56,10 +56,17 @@ A hybrid AI agent system built on AWS AgentCore Runtime. Glitch is the user-faci
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐       │
 │  │ Ollama Chat  │  │ Ollama Vision│  │  Pi-hole DNS │  │ UniFi Protect│       │
 │  │ llama3.2     │  │ LLaVA        │  │  10.10.100.70│  │  cameras     │       │
-│  │ 10.10.110.202│  │ 10.10.110.137│  │  10.10.100.71│  │              │       │
+│  │ 10.10.110.202│  │ 10.10.110.137│  │  10.10.100.71│  │  UDM-Pro NVR │       │
 │  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘       │
 │                                                                                 │
-│  UDM-Pro (router, VPN endpoint, WAF NAT exit point)                            │
+│  ┌──────────────────────────────────────────────────────────────────────┐      │
+│  │ nginx TCP stream proxy — 10.10.100.230                               │      │
+│  │  :443  → 192.168.1.1:443  (UDM-Pro integration API, X-API-KEY auth) │      │
+│  │  :7443 → 192.168.1.1:443  (UDM-Pro private API, legacy cookie auth) │      │
+│  │  :80   → HTTP proxy for Glitch UI (S3) and Lambda gateway           │      │
+│  └──────────────────────────────────────────────────────────────────────┘      │
+│                                                                                 │
+│  UDM-Pro (192.168.1.1) — router, VPN endpoint, UniFi OS console               │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -110,6 +117,16 @@ The VPC exists solely to host the Site-to-Site VPN. It has:
 - `write-glitch-proxy-conf.sh`, `ensure-glitch-tls.sh`, `renew-glitch-tls.sh`
 - Tailscale auth key secret
 - Manual route table entries
+
+### On-Premises nginx Reverse/TCP Proxy (10.10.100.230)
+
+An nginx instance at `10.10.100.230` acts as the on-prem ingress point for `home.awoo.agency`:
+
+- **Port 443 → `192.168.1.1:443`** (TCP stream passthrough): Required for UniFi Protect integration API (`/proxy/protect/integration/v1/...`) which only accepts `X-API-KEY` header auth on the native UDM-Pro HTTPS port. Used by Sentinel in API key mode.
+- **Port 7443 → `192.168.1.1:443`** (TCP stream passthrough): Legacy path for cookie-based auth to the private Protect API (`/proxy/protect/api/...`). Kept as fallback for cookie auth mode.
+- **Port 80**: HTTP reverse proxy for Glitch UI (S3 bucket) and Lambda gateway. Config in `infrastructure/scripts/glitch-proxy.conf`.
+
+The TCP stream blocks live in `/etc/nginx/nginx.conf` (not in `conf.d/`). The HTTP server block lives in `/etc/nginx/conf.d/glitch-proxy.conf`.
 
 ### Ollama Access from PUBLIC Mode Agents
 Agents in PUBLIC mode cannot directly reach `10.10.110.x` (private IPs). Access requires a proxy reachable from the public internet that routes to on-prem via VPN. Configure via `GLITCH_OLLAMA_PROXY_HOST` environment variable.

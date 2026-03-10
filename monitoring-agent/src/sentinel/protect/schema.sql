@@ -359,3 +359,18 @@ CREATE TABLE IF NOT EXISTS camera_topology (
     notes                TEXT,
     UNIQUE (camera_a, camera_b)
 );
+
+-- sentinel_health: single-row table written by Sentinel on startup and periodically.
+-- Allows the UI (via protect-query Lambda) to see the agent-side DB / poller status
+-- without requiring a direct network path from the UI to the Sentinel agent.
+CREATE TABLE IF NOT EXISTS sentinel_health (
+    id                   INT PRIMARY KEY DEFAULT 1,  -- always 1; enforces single row
+    status               TEXT NOT NULL DEFAULT 'unknown',
+    protect_db           TEXT NOT NULL DEFAULT 'unchecked',
+    protect_poller       TEXT NOT NULL DEFAULT 'stopped',
+    protect_processor    TEXT NOT NULL DEFAULT 'stopped',
+    protect_configured   BOOLEAN NOT NULL DEFAULT FALSE,
+    uptime_seconds       INT,
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT single_row CHECK (id = 1)
+);

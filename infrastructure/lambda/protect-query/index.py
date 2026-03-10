@@ -202,6 +202,38 @@ def query_alerts(conn, limit: int, unack_only: bool) -> Dict[str, Any]:
     return {"alerts": alerts, "total": total}
 
 
+def query_sentinel_health(conn) -> Dict[str, Any]:
+    """Return Sentinel component health from the sentinel_health table."""
+    rows = conn.run("""
+        SELECT status, protect_db, protect_poller, protect_processor,
+               protect_configured, uptime_seconds, updated_at
+        FROM sentinel_health
+        WHERE id = 1
+    """)
+    if rows:
+        row = rows[0]
+        return {
+            "status": row[0],
+            "protect_db": row[1],
+            "protect_poller": row[2],
+            "protect_processor": row[3],
+            "protect_configured": bool(row[4]),
+            "uptime_seconds": row[5],
+            "updated_at": _iso(row[6]),
+            "source": "db",
+        }
+    return {
+        "status": "unknown",
+        "protect_db": "no_data",
+        "protect_poller": "no_data",
+        "protect_processor": "no_data",
+        "protect_configured": False,
+        "uptime_seconds": None,
+        "updated_at": None,
+        "source": "db",
+    }
+
+
 def query_patterns(conn, limit: int) -> Dict[str, Any]:
     limit = max(1, min(limit, 100))
     rows = conn.run(
@@ -261,6 +293,8 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             )
         elif path.endswith("/patterns"):
             body = query_patterns(conn, int(query.get("limit", 20)))
+        elif path.endswith("/health"):
+            body = query_sentinel_health(conn)
         else:
             return {
                 "statusCode": 404,

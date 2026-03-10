@@ -44,11 +44,11 @@ function detectPublicIp(): string | null {
 }
 
 /**
- * Read AgentCore config from .bedrock_agentcore.yaml to get runtime ARN.
+ * Read AgentCore config from a .bedrock_agentcore.yaml to get runtime ARN.
  * Falls back to null if file is missing or ARN not set.
  */
-function getAgentCoreRuntimeArn(agentName: string = 'Glitch'): string | null {
-  const configPath = path.resolve(__dirname, '../../agent/.bedrock_agentcore.yaml');
+function getAgentCoreRuntimeArn(agentName: string = 'Glitch', yamlDir: string = '../../agent'): string | null {
+  const configPath = path.resolve(__dirname, yamlDir, '.bedrock_agentcore.yaml');
   try {
     if (fs.existsSync(configPath)) {
       const content = fs.readFileSync(configPath, 'utf8');
@@ -93,8 +93,13 @@ const foundationStack = new GlitchFoundationStack(app, 'GlitchFoundationStack', 
 
 const agentCoreRuntimeArn =
   app.node.tryGetContext('glitchAgentCoreRuntimeArn') ??
-  getAgentCoreRuntimeArn() ??
+  getAgentCoreRuntimeArn('Glitch', '../../agent') ??
   `arn:aws:bedrock-agentcore:${env.region}:${env.account}:runtime/Glitch-PLACEHOLDER`;
+
+const sentinelRuntimeArn =
+  app.node.tryGetContext('sentinelRuntimeArn') ??
+  getAgentCoreRuntimeArn('Sentinel', '../../monitoring-agent') ??
+  undefined;
 
 // ============================================================================
 // PHASE 3: APPLICATION STACKS (deploy after Phase 2)
@@ -195,6 +200,7 @@ uiHostingStack.addDependency(edgeStack);
 const agentCoreStack = new AgentCoreStack(app, 'GlitchAgentCoreStack', {
   env,
   runtimeRole: foundationStack.runtimeRole,
+  sentinelRuntimeArn,
   description: 'AgentCore runtime policies (Glitch agent, PUBLIC mode)',
 });
 agentCoreStack.addDependency(foundationStack);

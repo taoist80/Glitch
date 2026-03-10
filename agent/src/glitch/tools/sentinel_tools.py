@@ -78,23 +78,43 @@ def _invoke_via_boto3(arn: str, payload: bytes, session_id: str) -> str:
     return "".join(chunks)
 
 
+_COLD_START_DELAYS = [5, 10, 20, 30]  # seconds; 424 = runtime is starting up
+
+
 def _invoke_with_retry(payload: bytes, session_id: str) -> str:
-    """Invoke Sentinel with automatic cache-bust on stale ARN.
+    """Invoke Sentinel with automatic cache-bust on stale ARN and cold-start retry.
 
     On ResourceNotFoundException the cached ARN is cleared and re-resolved from
     SSM before one retry — this covers the case where Sentinel is redeployed and
     gets a new runtime ARN (though ARNs are stable across UpdateAgentRuntime).
+
+    On HTTP 424 (runtime is cold-starting) we wait with backoff and retry up to
+    len(_COLD_START_DELAYS) times before giving up.
     """
     arn = _get_sentinel_arn()
-    try:
-        return _invoke_via_boto3(arn, payload, session_id)
-    except Exception as e:
-        err_str = str(e)
-        if "ResourceNotFoundException" in err_str or "ResourceNotFound" in err_str:
-            logger.warning("Sentinel ARN may be stale (%s); refreshing and retrying once", err_str)
-            arn = _get_sentinel_arn(force_refresh=True)
+    for attempt, delay in enumerate([0] + _COLD_START_DELAYS):
+        if delay:
+            logger.info(
+                "Sentinel cold-start detected — waiting %ds before retry (attempt %d)",
+                delay, attempt,
+            )
+            time.sleep(delay)
+        try:
             return _invoke_via_boto3(arn, payload, session_id)
-        raise
+        except Exception as e:
+            err_str = str(e)
+            if "ResourceNotFoundException" in err_str or "ResourceNotFound" in err_str:
+                logger.warning("Sentinel ARN may be stale (%s); refreshing and retrying once", err_str)
+                arn = _get_sentinel_arn(force_refresh=True)
+                return _invoke_via_boto3(arn, payload, session_id)
+            # RuntimeClientError (HTTP 424) = runtime is cold-starting — retry
+            if "RuntimeClientError" in err_str or (
+                hasattr(e, "response")
+                and e.response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 424
+            ):
+                if attempt < len(_COLD_START_DELAYS):
+                    continue
+            raise
 
 
 @tool
@@ -112,8 +132,9 @@ async def invoke_sentinel(query: str, session_id: Optional[str] = None) -> str:
                - "Check if there are any UniFi alerts or network anomalies"
                - "What is the current CloudFormation stack status?"
                - "Is there suspicious DNS activity on the network?"
-        session_id: Optional session ID for continuity. If omitted, each call
-                    is an independent session. Use a UUID per AWS best practices.
+        session_id: Optional session ID for continuity. If omitted, defaults to
+                    a stable shared ID so all calls route to the same container
+                    (prevents multi-container auth stampedes on the UDM-Pro).
 
     Returns:
         JSON with keys: status ("ok" | "error"), response (Sentinel's answer),
@@ -122,7 +143,11 @@ async def invoke_sentinel(query: str, session_id: Optional[str] = None) -> str:
     import asyncio
     import time as _time
 
-    sid = session_id if session_id else f"glitch-sentinel-{uuid.uuid4()}"
+    # Use a stable session ID so all calls route to the same container.
+    # Multiple containers each run an independent Protect WebSocket poller,
+    # causing auth stampedes (HTTP 429) on the UDM-Pro login endpoint.
+    # A fixed session ID keeps exactly one Sentinel container alive at a time.
+    sid = session_id if session_id else "glitch-sentinel-main"
     t0 = _time.monotonic()
 
     try:

@@ -20,13 +20,18 @@ SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 
 async def get_pool():
-    """Get or create the asyncpg connection pool."""
+    """Get or create the asyncpg connection pool.
+
+    For RDS IAM auth (config.use_iam_auth=True) a fresh token is generated and
+    used as the password.  SSL is required by RDS for IAM auth connections.
+    """
     global _pool
     if _pool is not None:
         return _pool
 
     try:
         import asyncpg
+        import ssl as _ssl
     except ImportError:
         raise RuntimeError(
             "asyncpg is required for Protect DB integration. "
@@ -36,13 +41,37 @@ async def get_pool():
     from sentinel.protect.config import get_db_config
     config = get_db_config()
 
-    _pool = await asyncpg.create_pool(
-        dsn=config.dsn,
+    pool_kwargs: dict = dict(
+        host=config.host,
+        port=config.port,
+        database=config.dbname,
+        user=config.username,
         min_size=2,
         max_size=10,
         command_timeout=30,
     )
-    logger.info(f"Protect DB pool created: {config.host}:{config.port}/{config.dbname}")
+
+    if config.use_iam_auth:
+        # RDS IAM auth: token is the password; SSL required.
+        token = config.get_iam_token()
+        ssl_ctx = _ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = _ssl.CERT_NONE
+        pool_kwargs["password"] = token
+        pool_kwargs["ssl"] = ssl_ctx
+        logger.info(
+            "Connecting to Protect DB via RDS IAM auth: %s:%s/%s user=%s",
+            config.host, config.port, config.dbname, config.username,
+        )
+    else:
+        pool_kwargs["password"] = config.password
+        logger.info(
+            "Connecting to Protect DB via password auth: %s:%s/%s user=%s",
+            config.host, config.port, config.dbname, config.username,
+        )
+
+    _pool = await asyncpg.create_pool(**pool_kwargs)
+    logger.info("Protect DB pool created: %s:%s/%s", config.host, config.port, config.dbname)
     await _apply_schema()
     return _pool
 
@@ -79,6 +108,37 @@ async def close_pool() -> None:
         await _pool.close()
         _pool = None
         _schema_applied = False
+
+
+async def upsert_sentinel_health(
+    status: str,
+    protect_db: str,
+    protect_poller: str,
+    protect_processor: str,
+    protect_configured: bool,
+    uptime_seconds: int,
+) -> None:
+    """Write Sentinel component health to the DB so the UI can read it via protect-query."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO sentinel_health
+                (id, status, protect_db, protect_poller, protect_processor,
+                 protect_configured, uptime_seconds, updated_at)
+            VALUES (1, $1, $2, $3, $4, $5, $6, NOW())
+            ON CONFLICT (id) DO UPDATE
+            SET status = EXCLUDED.status,
+                protect_db = EXCLUDED.protect_db,
+                protect_poller = EXCLUDED.protect_poller,
+                protect_processor = EXCLUDED.protect_processor,
+                protect_configured = EXCLUDED.protect_configured,
+                uptime_seconds = EXCLUDED.uptime_seconds,
+                updated_at = EXCLUDED.updated_at
+            """,
+            status, protect_db, protect_poller, protect_processor,
+            protect_configured, uptime_seconds,
+        )
 
 
 # ============================================================

@@ -129,6 +129,14 @@ class MistralAgent:
         self._buffer[session_id].append(ChatMessage(role="user", content=user_message))
         self._buffer[session_id].append(ChatMessage(role="assistant", content=assistant_message))
 
+    def _auth_headers(self) -> dict:
+        """Return headers required by the nginx proxy, including X-Api-Key when configured."""
+        headers: dict = {"Content-Type": "application/json"}
+        key = os.environ.get("GLITCH_OLLAMA_API_KEY", "").strip()
+        if key:
+            headers["X-Api-Key"] = key
+        return headers
+
     async def _call_openai_format(
         self,
         messages: List[ChatMessage],
@@ -142,7 +150,7 @@ class MistralAgent:
         }
         url = self._openai_url()
         logger.info("Mistral OpenAI-format request starting: %s", url)
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with httpx.AsyncClient(timeout=self.timeout, headers=self._auth_headers()) as client:
             try:
                 resp = await client.post(url, json=payload)
                 resp.raise_for_status()
@@ -200,7 +208,7 @@ class MistralAgent:
         logger.info("Mistral Ollama native request starting: %s (model: %s)", ollama_url, self.model)
         # Set explicit timeouts: 30s to establish connection, 120s total for response
         timeout = httpx.Timeout(timeout=self.timeout, connect=30.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, headers=self._auth_headers()) as client:
             try:
                 resp = await client.post(ollama_url, json=payload)
                 resp.raise_for_status()

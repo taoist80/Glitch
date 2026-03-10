@@ -501,6 +501,20 @@ async def generate_security_report(
             start_date, end_date,
         )
 
+        # Vision processing token + timing stats (stored in event metadata by event_processor)
+        vision_stats = await conn.fetchrow(
+            """
+            SELECT
+                COALESCE(SUM((metadata->>'prompt_tokens')::int), 0)   AS prompt_tokens,
+                COALESCE(SUM((metadata->>'output_tokens')::int), 0)   AS output_tokens,
+                COALESCE(AVG((metadata->>'processing_ms')::float), 0) AS avg_processing_ms
+            FROM events
+            WHERE timestamp BETWEEN $1 AND $2
+              AND metadata ? 'processing_ms'
+            """,
+            start_date, end_date,
+        )
+
     # Calculate metrics
     total_alerts = alert_stats["total"] if alert_stats else 0
     fp_count = alert_stats["fp"] if alert_stats else 0
@@ -538,6 +552,11 @@ async def generate_security_report(
         "threat_summary": dict(threat_summary) if threat_summary else {},
         "hostile_events": hostile_count,
         "recommendations": recommendations,
+        "token_totals": {
+            "prompt_tokens": int(vision_stats["prompt_tokens"]) if vision_stats else 0,
+            "output_tokens": int(vision_stats["output_tokens"]) if vision_stats else 0,
+        },
+        "avg_processing_ms": float(vision_stats["avg_processing_ms"]) if vision_stats else 0.0,
     }
 
     # Store report

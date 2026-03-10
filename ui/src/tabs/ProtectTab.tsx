@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Shield, Users, Calendar, Bell, Activity, RefreshCw, Camera } from 'lucide-react';
+import { Shield, Users, Calendar, Bell, Activity, RefreshCw, Camera, Server } from 'lucide-react';
 import { api } from '../api/client';
 import type {
   ProtectSummary,
@@ -7,6 +7,7 @@ import type {
   ProtectEvent,
   ProtectAlert,
   ProtectPattern,
+  SentinelHealth,
 } from '../types';
 
 function formatTs(iso: string): string {
@@ -38,12 +39,21 @@ function priorityBadgeClass(priority: string): string {
   return map[priority] ?? 'badge-neutral';
 }
 
+function componentBadgeClass(status: string): string {
+  if (status === 'ok' || status === 'running' || status === 'Healthy') return 'badge-success';
+  if (status === 'stopped' || status === 'unchecked' || status === 'no_data' || status === 'unknown') return 'badge-neutral';
+  if (status.startsWith('error')) return 'badge-error';
+  if (status === 'Degraded') return 'badge-warning';
+  return 'badge-neutral';
+}
+
 export function ProtectTab() {
   const [summary, setSummary] = useState<ProtectSummary | null>(null);
   const [entities, setEntities] = useState<ProtectEntity[]>([]);
   const [events, setEvents] = useState<ProtectEvent[]>([]);
   const [alerts, setAlerts] = useState<ProtectAlert[]>([]);
   const [patterns, setPatterns] = useState<ProtectPattern[]>([]);
+  const [sentinelHealth, setSentinelHealth] = useState<SentinelHealth | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -56,6 +66,7 @@ export function ProtectTab() {
       api.getProtectEvents({ hours: 24, limit: 30 }),
       api.getProtectAlerts({ limit: 20, unack_only: false }),
       api.getProtectPatterns({ limit: 20 }),
+      api.getSentinelHealth(),
     ]);
     const errors: string[] = [];
     if (results[0].status === 'fulfilled') {
@@ -88,6 +99,11 @@ export function ProtectTab() {
       setPatterns([]);
       errors.push('Patterns: ' + (results[4].reason?.message ?? 'Failed'));
     }
+    if (results[5].status === 'fulfilled') {
+      setSentinelHealth(results[5].value);
+    } else {
+      setSentinelHealth(null);
+    }
     setError(errors.length > 0 ? errors.join('; ') : null);
     setLoading(false);
   };
@@ -111,6 +127,19 @@ export function ProtectTab() {
           <h2 className="text-xl font-bold flex items-center gap-2">
             <Shield size={24} />
             Protect
+            {loading ? (
+              <span className="badge badge-neutral badge-sm">Checking…</span>
+            ) : summary !== null ? (
+              <span className="badge badge-success badge-sm gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-current" />
+                Connected
+              </span>
+            ) : (
+              <span className="badge badge-error badge-sm gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-current" />
+                Disconnected
+              </span>
+            )}
           </h2>
           <p className="text-sm text-base-content/60">
             Entities, events, alerts, and behaviours from UniFi Protect
@@ -135,6 +164,56 @@ export function ProtectTab() {
           </span>
         </div>
       )}
+
+      {/* Sentinel agent health panel */}
+      <div className="card bg-base-200 mb-6">
+        <div className="card-body p-4">
+          <h3 className="font-semibold flex items-center gap-2 mb-3">
+            <Server size={16} />
+            Sentinel agent health
+          </h3>
+          {sentinelHealth ? (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+              <div>
+                <span className="text-base-content/60 block text-xs mb-1">Overall</span>
+                <span className={`badge ${componentBadgeClass(sentinelHealth.status)}`}>
+                  {sentinelHealth.status}
+                </span>
+              </div>
+              <div>
+                <span className="text-base-content/60 block text-xs mb-1">DB</span>
+                <span className={`badge ${componentBadgeClass(sentinelHealth.protect_db)}`}>
+                  {sentinelHealth.protect_db}
+                </span>
+              </div>
+              <div>
+                <span className="text-base-content/60 block text-xs mb-1">Poller</span>
+                <span className={`badge ${componentBadgeClass(sentinelHealth.protect_poller)}`}>
+                  {sentinelHealth.protect_poller}
+                </span>
+              </div>
+              <div>
+                <span className="text-base-content/60 block text-xs mb-1">Processor</span>
+                <span className={`badge ${componentBadgeClass(sentinelHealth.protect_processor)}`}>
+                  {sentinelHealth.protect_processor}
+                </span>
+              </div>
+            </div>
+          ) : (
+            <p className="text-sm text-base-content/60">
+              No health data — Sentinel has not written to the DB yet.
+            </p>
+          )}
+          {sentinelHealth?.updated_at && (
+            <p className="text-xs text-base-content/40 mt-2">
+              Last updated: {formatTs(sentinelHealth.updated_at)}
+              {sentinelHealth.uptime_seconds != null && (
+                <span> · Uptime: {Math.floor(sentinelHealth.uptime_seconds / 60)}m</span>
+              )}
+            </p>
+          )}
+        </div>
+      </div>
 
       {summary && (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">

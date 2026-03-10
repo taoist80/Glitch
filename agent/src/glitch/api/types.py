@@ -295,3 +295,15 @@ class ProtectPatternsResponse(BaseModel):
     """Response from GET /api/protect/patterns."""
     patterns: List[ProtectPatternModel] = []
     total: int = 0
+
+
+class SentinelHealthResponse(BaseModel):
+    """Response from GET /api/protect/health — Sentinel component health from DB."""
+    status: str = "unknown"
+    protect_db: str = "no_data"
+    protect_poller: str = "no_data"
+    protect_processor: str = "no_data"
+    protect_configured: bool = False
+    uptime_seconds: Optional[int] = None
+    updated_at: Optional[str] = None
+    source: str = "db"

@@ -39,6 +39,7 @@ from glitch.api.types import (
     ProtectEventsResponse,
     ProtectAlertsResponse,
     ProtectPatternsResponse,
+    SentinelHealthResponse,
 )
 
 if TYPE_CHECKING:
@@ -838,6 +839,13 @@ async def get_protect_alerts(limit: int = 20, unack_only: bool = False) -> Prote
     """Get Protect alerts."""
     data = _invoke_protect_query("/api/protect/alerts", {"limit": str(limit), "unack_only": str(unack_only).lower()})
     return ProtectAlertsResponse(**data)
+
+
+@router.get("/protect/health", response_model=SentinelHealthResponse)
+async def get_sentinel_health() -> SentinelHealthResponse:
+    """Get Sentinel component health (protect_db, protect_poller, etc.) from the DB."""
+    data = _invoke_protect_query("/api/protect/health", {})
+    return SentinelHealthResponse(**data)
 
 
 @router.get("/protect/patterns", response_model=ProtectPatternsResponse)

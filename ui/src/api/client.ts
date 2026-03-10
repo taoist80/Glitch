@@ -19,6 +19,7 @@ import type {
   ProtectAlertsResponse,
   ProtectPatternsResponse,
   ProtectSummary,
+  SentinelHealth,
 } from '../types';
 
 // API base URL: use environment variable for Lambda Function URL, or default to relative path
@@ -134,6 +135,10 @@ export const api = {
   async getProtectPatterns(params?: { limit?: number }): Promise<ProtectPatternsResponse> {
     const q = params?.limit != null ? `?limit=${params.limit}` : '';
     return fetchJson<ProtectPatternsResponse>(`${API_BASE}/protect/patterns${q}`);
+  },
+
+  async getSentinelHealth(): Promise<SentinelHealth> {
+    return fetchJson<SentinelHealth>(`${API_BASE}/protect/health`);
   },
 
   async getMCPServers(): Promise<MCPServersResponse> {

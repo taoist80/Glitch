@@ -6,6 +6,7 @@ Each worker runs: snapshot -> LLaVA -> recognition -> DB match -> anomaly -> ale
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -178,14 +179,17 @@ class ProtectEventProcessor:
 
         logger.debug(f"Worker {worker_id} processing event {event_id} ({entity_type}) on {camera_id}")
 
-        # Store raw event
-        await protect_db.insert_event(
-            event_id=event_id,
-            camera_id=camera_id,
-            timestamp=timestamp,
-            entity_type=entity_type,
-            score=event_data.get("score"),
-        )
+        # Store raw event (best-effort — DB may be unreachable)
+        try:
+            await protect_db.insert_event(
+                event_id=event_id,
+                camera_id=camera_id,
+                timestamp=timestamp,
+                entity_type=entity_type,
+                score=event_data.get("score"),
+            )
+        except Exception as e:
+            logger.warning("DB insert skipped for event %s: %s", event_id, e)
 
         # Fetch snapshot for vision analysis
         snapshot_bytes = None
@@ -205,14 +209,43 @@ class ProtectEventProcessor:
             except Exception as e:
                 logger.warning(f"Vision analysis failed for event {event_id}: {e}")
 
-        # Update event with classifications
-        if classifications:
+        # Compute anomaly score from entity type and vision output
+        anomaly_score = _compute_anomaly_score(entity_type, classifications)
+        anomaly_factors = {"entity_type": entity_type, "has_classifications": bool(classifications)}
+
+        # Persist classifications + score + timing metadata (best-effort)
+        try:
             await protect_db.update_event_anomaly(
                 event_id=event_id,
-                anomaly_score=0.0,  # Will be updated after anomaly scoring
-                anomaly_factors={},
-                classifications=classifications,
+                anomaly_score=anomaly_score,
+                anomaly_factors=anomaly_factors,
+                classifications=classifications if classifications else None,
             )
+        except Exception as e:
+            logger.warning("DB update skipped for event %s: %s", event_id, e)
+
+        # Send Telegram alert for substantial events
+        from sentinel.protect.config import PROTECT_ALERT_THRESHOLD
+        if anomaly_score >= PROTECT_ALERT_THRESHOLD and classifications:
+            try:
+                from sentinel.tools.telegram_tools import send_telegram_alert
+                camera_name = event_data.get("camera_name", camera_id)
+                summary = (
+                    classifications.get("summary")
+                    or (f"{len(classifications.get('persons', []))} person(s)" if classifications.get("persons") else None)
+                    or (f"{len(classifications.get('vehicles', []))} vehicle(s)" if classifications.get("vehicles") else None)
+                    or entity_type
+                )
+                msg = (
+                    f"📷 <b>{camera_name}</b>\n"
+                    f"Detected: {summary}\n"
+                    f"Score: {anomaly_score:.2f} | {timestamp.strftime('%H:%M:%S UTC')}"
+                )
+                severity = "high" if anomaly_score >= 0.8 else "medium"
+                await send_telegram_alert.__wrapped__(message=msg, severity=severity, component="Protect")
+                self._stats["alerts_sent"] += 1
+            except Exception as e:
+                logger.warning(f"Telegram alert failed for event {event_id}: {e}")
 
     async def _run_vision_analysis(
         self,
@@ -252,6 +285,7 @@ class ProtectEventProcessor:
         from glitch.tools.ollama_tools import vision_agent as _vision_agent
 
         # Call vision_agent - it's a strands tool, call underlying function
+        t0 = time.monotonic()
         raw_output = await _vision_agent.__wrapped__(
             image_url=image_url,
             prompt=prompt,
@@ -260,12 +294,28 @@ class ProtectEventProcessor:
                 None, lambda: _vision_agent(image_url=image_url, prompt=prompt)
             )
         )
+        processing_ms = (time.monotonic() - t0) * 1000
 
         if entity_type == "vehicle":
             vehicles = extract_vehicle_features(str(raw_output))
-            return {"vehicles": vehicles, "entity_type": "vehicle"}
+            return {"vehicles": vehicles, "entity_type": "vehicle", "processing_ms": processing_ms}
         elif entity_type == "person":
             persons = extract_person_features(str(raw_output))
-            return {"persons": persons, "entity_type": "person"}
+            return {"persons": persons, "entity_type": "person", "processing_ms": processing_ms}
         else:
-            return extract_general_classifications(str(raw_output))
+            result = extract_general_classifications(str(raw_output))
+            result["processing_ms"] = processing_ms
+            return result
+
+
+def _compute_anomaly_score(entity_type: str, classifications: Dict[str, Any]) -> float:
+    """Heuristic anomaly score based on entity type and vision classifications."""
+    if entity_type == "person" and classifications.get("persons"):
+        return 0.75
+    if entity_type == "vehicle" and classifications.get("vehicles"):
+        return 0.55
+    if entity_type == "motion":
+        return 0.35
+    if classifications:
+        return 0.5
+    return 0.2

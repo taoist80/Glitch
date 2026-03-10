@@ -90,6 +90,17 @@ export interface ProtectPatternsResponse {
   total: number;
 }
 
+export interface SentinelHealth {
+  status: string;
+  protect_db: string;
+  protect_poller: string;
+  protect_processor: string;
+  protect_configured: boolean;
+  uptime_seconds: number | null;
+  updated_at: string | null;
+  source: string;
+}
+
 export interface AgentInfo {
   id: string;
   name: string;
