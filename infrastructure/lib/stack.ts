@@ -226,10 +226,28 @@ export class GlitchFoundationStack extends Stack {
       description: 'CodeBuild role ARN for agentcore deploy',
     });
 
-    new StringParameter(this, 'SsmOllamaProxyHost', {
-      parameterName: SSM_PARAMS.OLLAMA_PROXY_HOST,
-      stringValue: 'home.awoo.agency',
-      description: 'DDNS hostname for on-prem Ollama proxy (Chat:11434, Vision:18080)',
+    // Use AwsCustomResource + PutParameter Overwrite so re-running the stack (or a param created
+    // outside CDK) does not fail with "parameter already exists".
+    new AwsCustomResource(this, 'SsmOllamaProxyHost', {
+      onUpdate: {
+        service: 'SSM',
+        action: 'putParameter',
+        parameters: {
+          Name: SSM_PARAMS.OLLAMA_PROXY_HOST,
+          Value: 'home.awoo.agency',
+          Type: 'String',
+          Overwrite: true,
+          Description: 'DDNS hostname for on-prem Ollama proxy (Chat:11434, Vision:18080)',
+        },
+        physicalResourceId: PhysicalResourceId.of(SSM_PARAMS.OLLAMA_PROXY_HOST),
+      },
+      policy: AwsCustomResourcePolicy.fromStatements([
+        new PolicyStatement({
+          effect: Effect.ALLOW,
+          actions: ['ssm:PutParameter'],
+          resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter${SSM_PARAMS.OLLAMA_PROXY_HOST}`],
+        }),
+      ]),
     });
 
     // ========== Outputs ==========
@@ -607,8 +625,20 @@ export interface GlitchProtectDbStackProps extends StackProps {
 
 /**
  * RDS Postgres (db.t4g.micro, single-AZ) for the Protect tab.
- * IAM authentication enabled — no password secret needed at runtime.
- * Master credentials stored in glitch/protect-db-master (for initial DB setup only).
+ *
+ * IAM authentication is the ONLY supported auth method — no password-based
+ * connections are permitted. Two IAM DB users exist:
+ *   - glitch_iam  — used by the protect-query Lambda (read-only UI queries)
+ *   - sentinel_iam — used by the Sentinel agent (event writes)
+ *
+ * The instance is publicly accessible so that the Sentinel AgentCore runtime
+ * (which runs in PUBLIC network mode with no VPC ENIs) can connect. Network
+ * security is provided entirely by RDS IAM authentication; no plaintext
+ * password ever crosses the wire.
+ *
+ * Master credentials (for one-time DB setup) are in glitch/protect-db-master.
+ * The RDS endpoint is stored in SSM /glitch/protect-db/host so the Sentinel
+ * pre-deploy script can pick it up automatically.
  */
 export class GlitchProtectDbStack extends Stack {
   public readonly db: DatabaseInstance;
@@ -619,15 +649,22 @@ export class GlitchProtectDbStack extends Stack {
 
     const dbSg = new SecurityGroup(this, 'ProtectDbSg', {
       vpc,
-      description: 'protect-db RDS: inbound Postgres from VPC',
+      description: 'protect-db RDS: inbound Postgres (IAM auth only)',
       allowAllOutbound: false,
     });
+    // Allow VPC-internal callers (Lambda protect-query)
     dbSg.addIngressRule(Peer.ipv4(vpc.vpcCidrBlock), Port.tcp(5432), 'VPC Postgres access');
+    // Allow Sentinel AgentCore runtime (PUBLIC mode, no VPC) over the internet.
+    // Auth is enforced exclusively by RDS IAM — no password logins are possible.
+    dbSg.addIngressRule(Peer.anyIpv4(), Port.tcp(5432), 'Sentinel AgentCore PUBLIC mode IAM auth');
 
     this.db = new DatabaseInstance(this, 'ProtectDb', {
       engine: DatabaseInstanceEngine.postgres({ version: PostgresEngineVersion.VER_16 }),
       instanceType: new Ec2InstanceType('t4g.micro'),
       vpc,
+      // Keep the existing private subnets — changing the subnet group requires an
+      // RDS replacement which causes downtime. publiclyAccessible:true assigns a
+      // public DNS hostname regardless of subnet type; the SG controls who can reach it.
       vpcSubnets: { subnetType: SubnetType.PRIVATE_WITH_EGRESS },
       securityGroups: [dbSg],
       multiAz: false,
@@ -641,7 +678,87 @@ export class GlitchProtectDbStack extends Stack {
       deletionProtection: true,
       backupRetention: Duration.days(7),
       storageEncrypted: true,
-      publiclyAccessible: false,
+      publiclyAccessible: true,
+    });
+
+    // Store DB connection info in SSM so pre-deploy-configure.py picks it up automatically.
+    // Use AwsCustomResource with Overwrite:true so re-deploys succeed even if the
+    // parameters were previously created outside CloudFormation.
+    const ssmPolicy = AwsCustomResourcePolicy.fromStatements([
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ['ssm:PutParameter'],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/protect-db/host`,
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/protect-db/port`,
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/protect-db/dbname`,
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/protect-db/sentinel-iam-user`,
+        ],
+      }),
+    ]);
+
+    new AwsCustomResource(this, 'ProtectDbHostParam', {
+      onUpdate: {
+        service: 'SSM',
+        action: 'putParameter',
+        parameters: {
+          Name: '/glitch/protect-db/host',
+          Value: this.db.dbInstanceEndpointAddress,
+          Type: 'String',
+          Overwrite: true,
+          Description: 'Protect DB RDS endpoint hostname (read by Sentinel pre-deploy script)',
+        },
+        physicalResourceId: PhysicalResourceId.of('/glitch/protect-db/host'),
+      },
+      policy: ssmPolicy,
+    });
+
+    new AwsCustomResource(this, 'ProtectDbPortParam', {
+      onUpdate: {
+        service: 'SSM',
+        action: 'putParameter',
+        parameters: {
+          Name: '/glitch/protect-db/port',
+          Value: '5432',
+          Type: 'String',
+          Overwrite: true,
+          Description: 'Protect DB RDS port',
+        },
+        physicalResourceId: PhysicalResourceId.of('/glitch/protect-db/port'),
+      },
+      policy: ssmPolicy,
+    });
+
+    new AwsCustomResource(this, 'ProtectDbNameParam', {
+      onUpdate: {
+        service: 'SSM',
+        action: 'putParameter',
+        parameters: {
+          Name: '/glitch/protect-db/dbname',
+          Value: 'glitch_protect',
+          Type: 'String',
+          Overwrite: true,
+          Description: 'Protect DB database name',
+        },
+        physicalResourceId: PhysicalResourceId.of('/glitch/protect-db/dbname'),
+      },
+      policy: ssmPolicy,
+    });
+
+    new AwsCustomResource(this, 'ProtectDbSentinelUserParam', {
+      onUpdate: {
+        service: 'SSM',
+        action: 'putParameter',
+        parameters: {
+          Name: '/glitch/protect-db/sentinel-iam-user',
+          Value: 'sentinel_iam',
+          Type: 'String',
+          Overwrite: true,
+          Description: 'Protect DB IAM DB username for Sentinel agent',
+        },
+        physicalResourceId: PhysicalResourceId.of('/glitch/protect-db/sentinel-iam-user'),
+      },
+      policy: ssmPolicy,
     });
 
     new CfnOutput(this, 'ProtectDbEndpoint', {
@@ -1473,6 +1590,8 @@ export class GlitchUiHostingStack extends Stack {
 export interface AgentCoreStackProps extends StackProps {
   /** Runtime role to attach policies to (from GlitchFoundationStack) */
   readonly runtimeRole: IRole;
+  /** Sentinel runtime ARN for InvokeSentinelAgent policy (from monitoring-agent/.bedrock_agentcore.yaml). */
+  readonly sentinelRuntimeArn?: string;
 }
 
 /**
@@ -1486,7 +1605,7 @@ export class AgentCoreStack extends Stack {
   constructor(scope: Construct, id: string, props: AgentCoreStackProps) {
     super(scope, id, props);
 
-    const { runtimeRole } = props;
+    const { runtimeRole, sentinelRuntimeArn } = props;
     this.agentRuntimeRole = runtimeRole;
 
     new ManagedPolicy(this, 'AgentRuntimeRoleDefaultPolicy', {
@@ -1642,8 +1761,11 @@ export class AgentCoreStack extends Stack {
             sid: 'InvokeSentinelAgent',
             effect: Effect.ALLOW,
             actions: ['bedrock-agentcore:InvokeAgentRuntime'],
-            resources: [`arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`],
-            conditions: { StringLike: { 'aws:ResourceTag/Name': 'Sentinel*' } },
+            // Use explicit ARN if provided; fall back to account-scoped wildcard.
+            // Tag conditions (aws:ResourceTag) are not supported by bedrock-agentcore for this action.
+            resources: sentinelRuntimeArn
+              ? [sentinelRuntimeArn, `${sentinelRuntimeArn}/*`]
+              : [`arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`],
           }),
         ],
       }),
@@ -1798,6 +1920,7 @@ export class GlitchSentinelStack extends Stack {
               `arn:aws:secretsmanager:${this.region}:${this.account}:secret:${SECRET_NAMES.GITHUB_TOKEN}*`,
               `arn:aws:secretsmanager:${this.region}:${this.account}:secret:${SECRET_NAMES.PIHOLE_API}*`,
               `arn:aws:secretsmanager:${this.region}:${this.account}:secret:${SECRET_NAMES.UNIFI_CONTROLLER}*`,
+              `arn:aws:secretsmanager:${this.region}:${this.account}:secret:glitch/protect-api-key*`,
               `arn:aws:secretsmanager:${this.region}:${this.account}:secret:glitch/protect-db*`,
             ],
           }),
@@ -1808,7 +1931,7 @@ export class GlitchSentinelStack extends Stack {
             actions: ['dynamodb:GetItem', 'dynamodb:Query'],
             resources: [`arn:aws:dynamodb:${this.region}:${this.account}:table/${TABLE_NAMES.TELEGRAM_CONFIG}`],
           }),
-          // SSM Parameters — read Sentinel config and Protect config
+          // SSM Parameters — read Sentinel config, Protect API config, and Protect DB config
           new PolicyStatement({
             sid: 'SsmParameterRead',
             effect: Effect.ALLOW,
@@ -1816,6 +1939,18 @@ export class GlitchSentinelStack extends Stack {
             resources: [
               `arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/sentinel/*`,
               `arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/protect/*`,
+              `arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/protect-db/*`,
+            ],
+          }),
+          // RDS IAM auth — allow Sentinel to connect as sentinel_iam DB user.
+          // The DB resource ID wildcard is required because the RDS resource ID is
+          // only known after the first deploy of GlitchProtectDbStack.
+          new PolicyStatement({
+            sid: 'RdsIamConnect',
+            effect: Effect.ALLOW,
+            actions: ['rds-db:connect'],
+            resources: [
+              `arn:aws:rds-db:${this.region}:${this.account}:dbuser:*/sentinel_iam`,
             ],
           }),
           // Workload identity — required by AgentCore Runtime execution role for agent

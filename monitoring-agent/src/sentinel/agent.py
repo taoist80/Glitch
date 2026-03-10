@@ -205,7 +205,7 @@ class SentinelAgent:
     def __init__(self) -> None:
         model_id = os.environ.get(
             "SENTINEL_MODEL_ID",
-            "us.anthropic.claude-sonnet-4-5-20251101-v1:0",
+            "anthropic.claude-sonnet-4-6",
         )
         # cache_tools caches the 91 tool schemas on every request — the largest
         # cacheable token block (~2000 tokens at $0.30/M vs $3.00/M = 90% savings).
