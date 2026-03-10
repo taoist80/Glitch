@@ -143,11 +143,9 @@ async def invoke_sentinel(query: str, session_id: Optional[str] = None) -> str:
     import asyncio
     import time as _time
 
-    # Use a stable session ID so all calls route to the same container.
-    # Multiple containers each run an independent Protect WebSocket poller,
-    # causing auth stampedes (HTTP 429) on the UDM-Pro login endpoint.
-    # A fixed session ID keeps exactly one Sentinel container alive at a time.
-    sid = session_id if session_id else "glitch-sentinel-main"
+    # Stable session ID routes all calls to the same Sentinel container.
+    # Must be >= 33 characters per InvokeAgentRuntime API contract.
+    sid = session_id if session_id else "glitch-sentinel-main-session-fixed"
     t0 = _time.monotonic()
 
     try:
