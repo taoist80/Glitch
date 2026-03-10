@@ -61,7 +61,7 @@ A hybrid AI agent system built on AWS AgentCore Runtime. Glitch is the user-faci
 │                                                                                 │
 │  ┌──────────────────────────────────────────────────────────────────────┐      │
 │  │ nginx TCP stream proxy — 10.10.100.230                               │      │
-│  │  :443  → 192.168.1.1:443  (Protect API + WS, WAN:13443 port fwd)   │      │
+│  │  :443  → 192.168.1.1:443  (Protect API, local/Tailscale only)       │      │
 │  │  :7443 → 192.168.1.1:443  (legacy cookie auth, local only)         │      │
 │  │  :80   → HTTP proxy for Glitch UI (S3) and Lambda gateway           │      │
 │  └──────────────────────────────────────────────────────────────────────┘      │
@@ -122,11 +122,19 @@ The VPC exists solely to host the Site-to-Site VPN. It has:
 
 An nginx instance at `10.10.100.230` acts as the on-prem ingress point for `home.awoo.agency`:
 
-- **Port 443 → `192.168.1.1:443`** (TCP stream passthrough): UniFi Protect integration API and WebSocket endpoints. Receives traffic from the UDM-Pro port forward (WAN `13443` → LAN `10.10.100.230:443`), enabling Sentinel containers in PUBLIC mode to reach Protect via the public internet at `home.awoo.agency:13443`.
+- **Port 443 → `192.168.1.1:443`** (TCP stream passthrough): Local-only path for UniFi Protect API access via Tailscale/LAN.
 - **Port 7443 → `192.168.1.1:443`** (TCP stream passthrough): Legacy path for cookie-based auth to the private Protect API (`/proxy/protect/api/...`). Kept as fallback; not used in API key mode.
 - **Port 80**: HTTP reverse proxy for Glitch UI (S3 bucket) and Lambda gateway. Config in `infrastructure/scripts/glitch-proxy.conf`.
 
 The TCP stream blocks live in `/etc/nginx/nginx.conf` (not in `conf.d/`). The HTTP server block lives in `/etc/nginx/conf.d/glitch-proxy.conf`.
+
+### Public Internet Access to UniFi Protect (for AgentCore Sentinel)
+
+Sentinel containers run in PUBLIC network mode and reach the UDM-Pro via a port forward:
+- **UDM-Pro port forward**: WAN `32443` → `10.10.100.1:443` (UDM-Pro's own LAN interface)
+- **DDNS**: `home.awoo.agency` A record kept current by the `ddns-updater` Lambda
+- **Auth**: `X-API-KEY` header — no nginx proxy needed; the integration API is served natively by UniFi OS on port 443
+- **Config**: `GLITCH_PROTECT_HOST=home.awoo.agency:32443` (SSM `/glitch/protect/host`)
 
 ### Ollama Access from PUBLIC Mode Agents
 Agents in PUBLIC mode cannot directly reach `10.10.110.x` (private IPs). Access requires a proxy reachable from the public internet that routes to on-prem via VPN. Configure via `GLITCH_OLLAMA_PROXY_HOST` environment variable.

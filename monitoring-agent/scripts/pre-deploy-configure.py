@@ -6,7 +6,7 @@ Reads runtime configuration from SSM Parameters and writes .env.deploy
 for agentcore deploy to consume via --env flags.
 
 SSM Parameters:
-  /glitch/protect/host         - UniFi Protect host (home.awoo.agency:13443)
+  /glitch/protect/host         - UniFi Protect host (home.awoo.agency:32443)
   /glitch/protect/username     - Protect API username (SecureString)
   /glitch/protect/password     - Protect API password (SecureString)
   /glitch/protect-db/host      - Protect Postgres host
