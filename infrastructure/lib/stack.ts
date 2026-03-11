@@ -1046,12 +1046,7 @@ export class GlitchEdgeStack extends Stack {
       functionName: 'glitch-ddns-updater-starbase80',
       runtime: Runtime.PYTHON_3_12,
       handler: 'index.handler',
-      code: Code.fromAsset(path.join(__dirname, '../lambda/ddns-updater'), {
-        bundling: {
-          image: Runtime.PYTHON_3_12.bundlingImage,
-          command: ['bash', '-c', 'pip install -r requirements.txt -t /asset-output && cp -au . /asset-output'],
-        },
-      }),
+      code: Code.fromAsset(path.join(__dirname, '../lambda/ddns-updater')),
       timeout: Duration.seconds(30),
       environment: {
         DDNS_SUBDOMAIN: 'starbase80',
