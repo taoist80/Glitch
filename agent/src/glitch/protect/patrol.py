@@ -114,11 +114,10 @@ class CameraPatrol:
 
         try:
             b64 = base64.b64encode(snapshot_bytes).decode("utf-8")
-            image_url = f"data:image/jpeg;base64,{b64}"
 
             from glitch.tools.ollama_tools import vision_agent as _vision_agent
             raw_output = await _vision_agent.__wrapped__(
-                image_url=image_url,
+                image_url=b64,
                 prompt=_SCENE_PROMPT,
             )
 

@@ -198,10 +198,14 @@ async def vision_agent(
     try:
         endpoint = f"http://{config.vision_host}:{config.port}/api/generate"
         
+        raw_b64 = image_url
+        if raw_b64.startswith("data:"):
+            raw_b64 = raw_b64.split(",", 1)[-1]
+
         payload: OllamaGeneratePayload = {
             "model": model,
             "prompt": prompt,
-            "images": [image_url],
+            "images": [raw_b64],
             "stream": False,
         }
         
