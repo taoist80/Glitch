@@ -352,28 +352,12 @@ async def _start_protect_subsystem() -> None:
     except Exception as exc:
         logger.warning("Failed to start camera patrol: %s — continuing without it", exc, exc_info=True)
 
-    # Fire-and-forget backfill of historical events (7 days)
-    async def _backfill_wrapper():
-        from glitch.protect.db import is_pool_available
-        for _ in range(30):
-            if is_pool_available():
-                break
-            await asyncio.sleep(10)
-        try:
-            from glitch.protect.poller import backfill_events
-            result = await backfill_events(days=7)
-            logger.info("Event backfill complete: %s", result)
-        except Exception as exc:
-            logger.warning("Event backfill failed: %s", exc)
-
-    asyncio.create_task(_backfill_wrapper(), name="protect-backfill")
-
     asyncio.create_task(_daily_report_loop(), name="daily-report")
     asyncio.create_task(_daily_briefing_loop(), name="daily-briefing")
     asyncio.create_task(_weekly_fp_learning_loop(), name="weekly-fp-learning")
     asyncio.create_task(_weekly_threshold_optimization_loop(), name="weekly-threshold-opt")
     asyncio.create_task(_health_writer_loop(), name="health-writer")
-    logger.info("Protect subsystem started (poller + processor + patrol + backfill + daily-report + daily-briefing + weekly-learning + health-writer)")
+    logger.info("Protect subsystem started (poller + processor + patrol + daily-report + daily-briefing + weekly-learning + health-writer)")
 
 
 async def _daily_report_loop() -> None:

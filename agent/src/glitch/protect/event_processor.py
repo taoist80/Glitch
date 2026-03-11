@@ -8,7 +8,7 @@ import asyncio
 import logging
 import time
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Deque, Dict, List
 
 logger = logging.getLogger(__name__)
@@ -104,28 +104,27 @@ class ProtectEventProcessor:
         }
 
     async def _ingest_loop(self) -> None:
-        """Poll Protect API for new events and enqueue them."""
-        from glitch.protect.client import get_client
+        """Poll the DB for unprocessed events and enqueue them.
+
+        The UniFi Protect integration API has no REST events endpoint \u2014 events
+        arrive via WebSocket and are persisted by the poller.  This loop picks
+        up unprocessed rows and feeds them to the worker pool for enrichment.
+        """
+        from glitch.protect.db import get_unprocessed_events, is_pool_available
 
         while self._running:
             try:
-                client = get_client()
-                end_time = datetime.now()
-                start_time = end_time - timedelta(seconds=self._check_interval * 2)
+                if not is_pool_available():
+                    await asyncio.sleep(self._check_interval)
+                    continue
 
-                events = await client.get_events(
-                    start=start_time,
-                    end=end_time,
-                )
-
+                events = await get_unprocessed_events(limit=50)
                 for event in events:
-                    event_id = event.get("id") or event.get("event_id")
+                    event_id = event.get("event_id")
                     if not event_id:
                         continue
 
-                    # Deduplicate: track last N event IDs per camera to avoid
-                    # re-processing events that reappear in overlapping poll windows.
-                    camera_id = event.get("camera") or event.get("camera_id", "unknown")
+                    camera_id = event.get("camera_id", "unknown")
                     seen = self._seen_event_ids.setdefault(
                         camera_id, deque(maxlen=_SEEN_DEQUE_SIZE)
                     )
@@ -136,7 +135,7 @@ class ProtectEventProcessor:
                     await self.enqueue(event)
 
             except Exception as e:
-                logger.error(f"Ingest loop error: {e}", exc_info=True)
+                logger.error("Ingest loop error: %s", e, exc_info=True)
 
             await asyncio.sleep(self._check_interval)
 

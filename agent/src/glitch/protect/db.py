@@ -263,6 +263,62 @@ async def query_events(
         return [dict(r) for r in rows]
 
 
+async def get_recent_events(
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
+    camera_ids: Optional[List[str]] = None,
+    entity_types: Optional[List[str]] = None,
+    limit: int = 100,
+) -> List[Dict]:
+    """Query recent events from the DB (replacement for REST API get_events).
+
+    The integration API has no REST events endpoint \u2014 events arrive only via
+    WebSocket and are persisted by the poller.  This function queries those
+    persisted events.
+    """
+    pool = await get_pool()
+    conditions: List[str] = []
+    params: List[Any] = []
+    idx = 1
+
+    if start_time:
+        conditions.append(f"timestamp >= ${idx}")
+        params.append(start_time)
+        idx += 1
+    if end_time:
+        conditions.append(f"timestamp <= ${idx}")
+        params.append(end_time)
+        idx += 1
+    if camera_ids:
+        conditions.append(f"camera_id = ANY(${idx})")
+        params.append(camera_ids)
+        idx += 1
+    if entity_types:
+        conditions.append(f"entity_type = ANY(${idx})")
+        params.append(entity_types)
+        idx += 1
+
+    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+    params.append(limit)
+    sql = f"SELECT * FROM events{where} ORDER BY timestamp DESC LIMIT ${idx}"
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *params)
+        return [dict(r) for r in rows]
+
+
+async def get_unprocessed_events(limit: int = 50) -> List[Dict]:
+    """Return events that haven't been through the enrichment pipeline yet."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM events WHERE processed = FALSE "
+            "ORDER BY timestamp ASC LIMIT $1",
+            limit,
+        )
+        return [dict(r) for r in rows]
+
+
 async def update_event_anomaly(
     event_id: str,
     anomaly_score: float,

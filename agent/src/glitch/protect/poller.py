@@ -26,7 +26,7 @@ import logging
 import random
 import socket
 import ssl
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
@@ -49,66 +49,23 @@ _PRIVATE_WS_PATH = "/proxy/protect/ws/updates"
 
 
 async def backfill_events(days: int = 7) -> dict:
-    """Fetch historical events from the Protect API and insert into the DB.
+    """Historical event backfill is not available with the integration API.
 
-    Paginates in 1-day chunks to avoid API limits.  Uses ON CONFLICT DO NOTHING
-    so duplicates are safe.  Returns a summary dict.
+    The UniFi Protect integration API does not expose a REST endpoint for
+    querying past events.  Events are only delivered via WebSocket and are
+    persisted to the DB by the poller in real time.  This function is kept
+    as a no-op for call-site compatibility.
     """
-    from glitch.protect.client import get_client
-    from glitch.protect import db as protect_db
-
-    client = get_client()
-    now = datetime.now(timezone.utc)
-    total_inserted = 0
-    total_skipped = 0
-    errors = 0
-
-    for day_offset in range(days, 0, -1):
-        chunk_start = now - timedelta(days=day_offset)
-        chunk_end = now - timedelta(days=day_offset - 1)
-        try:
-            events = await client.get_events(start=chunk_start, end=chunk_end, limit=500)
-            for ev in events:
-                event_id = ev.get("id")
-                camera_id = ev.get("camera")
-                if not event_id or not camera_id:
-                    total_skipped += 1
-                    continue
-                start_ms = ev.get("start")
-                ts = (
-                    datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)
-                    if start_ms
-                    else chunk_start
-                )
-                try:
-                    await protect_db.insert_event(
-                        event_id=event_id,
-                        camera_id=camera_id,
-                        timestamp=ts,
-                        entity_type=ev.get("type"),
-                        score=ev.get("score") / 100.0 if ev.get("score") is not None else None,
-                        snapshot_url=ev.get("thumbnail"),
-                    )
-                    total_inserted += 1
-                except Exception:
-                    total_skipped += 1
-            logger.info(
-                "Backfill day -%d: %d events fetched", day_offset, len(events),
-            )
-        except Exception as exc:
-            errors += 1
-            logger.warning("Backfill day -%d failed: %s", day_offset, exc)
-        await asyncio.sleep(1)
-
     logger.info(
-        "Backfill complete: %d inserted, %d skipped, %d errors",
-        total_inserted, total_skipped, errors,
+        "backfill_events: no-op — integration API has no REST events endpoint. "
+        "Events are ingested in real-time via WebSocket."
     )
     return {
         "days": days,
-        "inserted": total_inserted,
-        "skipped": total_skipped,
-        "errors": errors,
+        "inserted": 0,
+        "skipped": 0,
+        "errors": 0,
+        "note": "REST events endpoint not available in integration API; events come via WebSocket only",
     }
 
 

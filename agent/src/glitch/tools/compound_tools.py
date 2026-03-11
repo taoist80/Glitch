@@ -53,35 +53,33 @@ async def security_correlation_scan(
     network_clients: list = []
     suspicious_dns: list = []
 
-    # --- Protect events ---
+    # --- Protect events (from DB — WS poller persists events in real time) ---
     if is_protect_configured():
         try:
-            from glitch.protect.client import get_client as get_protect_client
+            from glitch.protect.db import get_recent_events, is_pool_available
 
-            client = get_protect_client()
-            start_dt = datetime.now() - timedelta(minutes=lookback_minutes)
-            end_dt = datetime.now()
-            cam_list = [c.strip() for c in camera_ids.split(",")] if camera_ids else None
+            if not is_pool_available():
+                errors["protect"] = "DB not ready"
+            else:
+                start_dt = datetime.now() - timedelta(minutes=lookback_minutes)
+                end_dt = datetime.now()
+                cam_list = [c.strip() for c in camera_ids.split(",")] if camera_ids else None
 
-            events = await client.get_events(
-                start=start_dt,
-                end=end_dt,
-                camera_ids=cam_list,
-                limit=100,
-            )
-            for ev in events:
-                ts_raw = ev.get("start") or ev.get("timestamp")
-                if isinstance(ts_raw, (int, float)):
-                    ts = datetime.fromtimestamp(ts_raw / 1000 if ts_raw > 1e10 else ts_raw).isoformat()
-                else:
-                    ts = str(ts_raw)
-                protect_events.append({
-                    "event_id": ev.get("id", ""),
-                    "timestamp": ts,
-                    "camera_id": ev.get("camera", ""),
-                    "event_type": ev.get("type", ""),
-                    "score": ev.get("score"),
-                })
+                events = await get_recent_events(
+                    start_time=start_dt,
+                    end_time=end_dt,
+                    camera_ids=cam_list,
+                    limit=100,
+                )
+                for ev in events:
+                    ts = ev.get("timestamp")
+                    protect_events.append({
+                        "event_id": ev.get("event_id", ""),
+                        "timestamp": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+                        "camera_id": ev.get("camera_id", ""),
+                        "event_type": ev.get("entity_type", ""),
+                        "score": ev.get("score") or ev.get("anomaly_score"),
+                    })
         except Exception as e:
             logger.warning("security_correlation_scan: protect error: %s", e)
             errors["protect"] = str(e)
@@ -197,18 +195,20 @@ async def analyze_and_alert(
     if not is_protect_configured():
         return json.dumps({"error": "Protect not configured. Set GLITCH_PROTECT_HOST/USERNAME/PASSWORD."})
 
-    # Step 1: Fetch events
+    # Step 1: Fetch events from DB (WS poller persists events in real time)
     try:
-        from glitch.protect.client import get_client as get_protect_client
+        from glitch.protect.db import get_recent_events, is_pool_available
 
-        client = get_protect_client()
+        if not is_pool_available():
+            return json.dumps({"error": "Protect DB not ready yet — please retry in a moment"})
+
         start_dt = datetime.now() - timedelta(minutes=lookback_minutes)
         end_dt = datetime.now()
         cam_list = [c.strip() for c in camera_ids.split(",")] if camera_ids else None
 
-        raw_events = await client.get_events(
-            start=start_dt,
-            end=end_dt,
+        raw_events = await get_recent_events(
+            start_time=start_dt,
+            end_time=end_dt,
             camera_ids=cam_list,
             limit=50,
         )
@@ -222,12 +222,11 @@ async def analyze_and_alert(
 
     # Step 2: Analyze each event and decide/alert
     for ev in raw_events:
-        event_id = ev.get("id", "")
+        event_id = ev.get("event_id", "")
         if not event_id:
             continue
 
-        # Quick score filter before hitting the DB
-        score = ev.get("score", 0) or 0
+        score = ev.get("score") or ev.get("anomaly_score") or 0
         if score < min_score:
             continue
 

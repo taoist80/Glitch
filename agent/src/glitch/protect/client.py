@@ -158,14 +158,28 @@ class ProtectClient:
                 headers["x-csrf-token"] = self._csrf_token
 
         url = f"{self._base_url}{path}"
-        http = self._ensure_http_client()
-        response = await http.request(
-            method,
-            url,
-            cookies=self._cookies if not self._use_api_key else None,
-            headers=headers,
-            **kwargs,
-        )
+        try:
+            http = self._ensure_http_client()
+            response = await http.request(
+                method,
+                url,
+                cookies=self._cookies if not self._use_api_key else None,
+                headers=headers,
+                **kwargs,
+            )
+        except RuntimeError as exc:
+            if "Event loop is closed" in str(exc) or "closed" in str(exc).lower():
+                logger.info("Protect httpx hit stale event loop — recreating client and retrying")
+                self._http = self._new_http_client()
+                response = await self._http.request(
+                    method,
+                    url,
+                    cookies=self._cookies if not self._use_api_key else None,
+                    headers=headers,
+                    **kwargs,
+                )
+            else:
+                raise
 
         if response.status_code == 401:
             if self._use_api_key:

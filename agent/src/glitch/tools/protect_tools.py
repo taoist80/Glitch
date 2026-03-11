@@ -152,42 +152,37 @@ async def protect_get_events(
         return _not_configured_msg()
 
     try:
-        from glitch.protect.client import get_client
+        from glitch.protect.db import get_recent_events, is_pool_available
 
-        client = get_client()
+        if not is_pool_available():
+            return json.dumps({"error": "Protect DB not ready yet — please retry in a moment", "events": [], "count": 0})
 
         start_dt = datetime.fromisoformat(start_time) if start_time else datetime.now() - timedelta(hours=1)
         end_dt = datetime.fromisoformat(end_time) if end_time else datetime.now()
         cam_list = [c.strip() for c in camera_ids.split(",")] if camera_ids else None
         type_list = [t.strip() for t in event_types.split(",")] if event_types else None
 
-        events = await client.get_events(
-            start=start_dt,
-            end=end_dt,
+        events = await get_recent_events(
+            start_time=start_dt,
+            end_time=end_dt,
             camera_ids=cam_list,
-            event_types=type_list,
+            entity_types=type_list,
             limit=limit,
         )
 
         result = []
         for ev in events:
-            ts_raw = ev.get("start") or ev.get("timestamp")
-            if isinstance(ts_raw, (int, float)):
-                ts = datetime.fromtimestamp(ts_raw / 1000 if ts_raw > 1e10 else ts_raw).isoformat()
-            else:
-                ts = str(ts_raw)
-
+            ts = ev.get("timestamp")
             result.append({
-                "event_id": ev.get("id", ""),
-                "timestamp": ts,
-                "camera_id": ev.get("camera", ""),
-                "event_type": ev.get("type", ""),
-                "score": ev.get("score"),
-                "thumbnail_url": ev.get("thumbnail"),
-                "video_clip_url": ev.get("heatmap"),
+                "event_id": ev.get("event_id", ""),
+                "timestamp": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+                "camera_id": ev.get("camera_id", ""),
+                "event_type": ev.get("entity_type", ""),
+                "score": ev.get("score") or ev.get("anomaly_score"),
+                "processed": ev.get("processed", False),
             })
 
-        return json.dumps({"events": result, "count": len(result)}, indent=2)
+        return json.dumps({"events": result, "count": len(result), "source": "database"}, indent=2)
     except Exception as e:
         logger.error("protect_get_events error: %s", e, exc_info=True)
         return f"Error: {e}"
