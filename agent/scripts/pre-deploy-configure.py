@@ -56,6 +56,8 @@ SSM_OLLAMA_PROXY_HOST = '/glitch/ollama/proxy-host'
 SSM_OLLAMA_API_KEY = '/glitch/ollama/api-key'
 # Protect subsystem SSM params (previously only in monitoring-agent)
 SSM_PROTECT_HOST = '/glitch/protect/host'
+SSM_PROTECT_2_HOST = '/glitch/protect/site2/host'
+SSM_PROTECT_2_API_KEY = '/glitch/protect/site2/api_key'
 SSM_PROTECT_DB_HOST = '/glitch/protect-db/host'
 SSM_PROTECT_DB_PORT = '/glitch/protect-db/port'
 SSM_PROTECT_DB_NAME = '/glitch/protect-db/dbname'
@@ -255,6 +257,16 @@ def main():
             log(f"Protect host set to {protect_host}", 'SUCCESS')
         else:
             log("SSM /glitch/protect/host not found; Protect subsystem will be disabled", 'WARN')
+
+        # Site 2 — opt-in; only set env vars if SSM params exist
+        protect_2_host = get_ssm_parameter(ssm_client, SSM_PROTECT_2_HOST)
+        if protect_2_host:
+            env_vars['GLITCH_PROTECT_2_HOST'] = protect_2_host
+            log(f"Protect site 2 host set to {protect_2_host}", 'SUCCESS')
+        protect_2_api_key = get_ssm_parameter(ssm_client, SSM_PROTECT_2_API_KEY)
+        if protect_2_api_key:
+            env_vars['GLITCH_PROTECT_2_API_KEY'] = protect_2_api_key
+            log("Protect site 2 API key loaded from SSM", 'SUCCESS')
 
         protect_db_host = get_ssm_parameter(ssm_client, SSM_PROTECT_DB_HOST)
         if protect_db_host:
