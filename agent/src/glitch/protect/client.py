@@ -21,7 +21,7 @@ from glitch.protect.config import ProtectConfig, get_protect_config, parse_host_
 
 logger = logging.getLogger(__name__)
 
-_client_instance: Optional["ProtectClient"] = None
+_client_instances: Dict[str, "ProtectClient"] = {}
 
 _PRIVATE_API_PREFIX = "/proxy/protect/api"
 _PUBLIC_API_PREFIX = "/proxy/protect/integration/v1"
@@ -314,18 +314,27 @@ class ProtectClient:
         await self._http.aclose()
 
 
-def get_client() -> ProtectClient:
-    """Get or create the singleton Protect client."""
-    global _client_instance
-    if _client_instance is None:
+def get_client(site_id: str = "site1") -> ProtectClient:
+    """Get or create the ProtectClient for the given site."""
+    global _client_instances
+    if site_id not in _client_instances:
+        from glitch.protect.config import get_protect_config
         config = get_protect_config()
-        _client_instance = ProtectClient(config)
-    return _client_instance
+        _client_instances[site_id] = ProtectClient(config)
+    return _client_instances[site_id]
+
+
+def get_client_for_config(site_id: str, config: "ProtectConfig") -> ProtectClient:
+    """Get or create a ProtectClient for an arbitrary site config."""
+    global _client_instances
+    if site_id not in _client_instances:
+        _client_instances[site_id] = ProtectClient(config)
+    return _client_instances[site_id]
 
 
 async def reset_client() -> None:
-    """Close and reset the singleton client (for testing or config reload)."""
-    global _client_instance
-    if _client_instance is not None:
-        await _client_instance.close()
-        _client_instance = None
+    """Close and reset all cached clients (for testing or config reload)."""
+    global _client_instances
+    for client in _client_instances.values():
+        await client.close()
+    _client_instances = {}

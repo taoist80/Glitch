@@ -48,9 +48,10 @@ _SCENE_PROMPT = (
 class CameraPatrol:
     """Periodic camera patrol with LLaVA vision analysis."""
 
-    def __init__(self, protect_client: "ProtectClient", interval_seconds: int = 120) -> None:
+    def __init__(self, protect_client: "ProtectClient", interval_seconds: int = 120, site_id: str = "site1") -> None:
         self._client = protect_client
         self._interval = interval_seconds
+        self._site_id = site_id
         self._task: Optional[asyncio.Task] = None
         self._running = False
         self._camera_ids: List[str] = []
@@ -113,7 +114,7 @@ class CameraPatrol:
             error_msg = f"Snapshot fetch failed: {exc}"
             logger.warning("Patrol[%s]: %s", camera_id, error_msg)
             try:
-                await protect_db.insert_patrol(camera_id=camera_id, error=error_msg)
+                await protect_db.insert_patrol(camera_id=camera_id, error=error_msg, site_id=self._site_id)
             except Exception:
                 pass
             result["error"] = error_msg
@@ -131,7 +132,7 @@ class CameraPatrol:
             logger.debug("Patrol[%s]: vision skipped (not in GLITCH_PROTECT_VISION_CAMERAS)", camera_id)
             # Store a snapshot-only patrol row with no vision results
             try:
-                patrol_id = await protect_db.insert_patrol(camera_id=camera_id)
+                patrol_id = await protect_db.insert_patrol(camera_id=camera_id, site_id=self._site_id)
                 result["patrol_id"] = patrol_id
             except Exception:
                 pass
@@ -170,6 +171,7 @@ class CameraPatrol:
                 model_used=os.environ.get("GLITCH_LLAVA_OLLAMA_MODEL", "llava-v1.6-mistral-7b"),
                 processing_ms=processing_ms,
                 error=error_msg,
+                site_id=self._site_id,
             )
             result["patrol_id"] = patrol_id
         except Exception as db_exc:

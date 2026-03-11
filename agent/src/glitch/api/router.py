@@ -873,10 +873,12 @@ async def get_protect_patrols(hours: int = 24, limit: int = 50) -> ProtectPatrol
 async def trigger_protect_scan():
     """Trigger an on-demand snapshot + LLaVA scan of all cameras."""
     import main as _main
-    if _main._protect_patrol is None:
+    if not _main._protect_patrols:
         raise HTTPException(status_code=503, detail="Camera patrol not running")
     try:
-        results = await _main._protect_patrol.scan_now()
+        results = []
+        for patrol in _main._protect_patrols.values():
+            results.extend(await patrol.scan_now())
         return {"status": "complete", "results": results, "count": len(results)}
     except Exception as e:
         logger.error("protect scan failed: %s", e, exc_info=True)

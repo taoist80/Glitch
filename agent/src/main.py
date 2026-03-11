@@ -247,10 +247,77 @@ _protect_health: dict = {
     "protect_processor": "stopped",
 }
 
-_protect_poller: _Optional[object] = None
-_protect_processor: _Optional[object] = None
-_protect_patrol: _Optional[object] = None
-_protect_camera_ids: list = []
+_protect_pollers: dict = {}
+_protect_processors: dict = {}
+_protect_patrols: dict = {}
+_protect_camera_ids_by_site: dict = {}
+
+
+async def _start_protect_site(site_cfg) -> None:
+    """Start poller, event processor, and patrol for a single Protect site."""
+    global _protect_pollers, _protect_processors, _protect_patrols, _protect_camera_ids_by_site
+
+    from glitch.protect.client import get_client_for_config
+    from glitch.protect.config import SiteConfig
+
+    site_id = site_cfg.site_id
+    protect_cfg = site_cfg.protect
+
+    client = get_client_for_config(site_id, protect_cfg)
+
+    if protect_cfg.use_api_key:
+        logger.info("[%s] Protect auth: API key", site_id)
+    else:
+        try:
+            await client._authenticate()
+            logger.info("[%s] Protect pre-auth (cookie) succeeded", site_id)
+        except Exception as auth_exc:
+            logger.warning("[%s] Protect pre-auth failed: %s — poller will retry", site_id, auth_exc)
+
+    from glitch.protect.poller import ProtectEventPoller
+    poller = ProtectEventPoller(protect_client=client, config=protect_cfg, site_id=site_id)
+    await poller.start()
+    _protect_pollers[site_id] = poller
+    _protect_health["protect_poller"] = "running"
+
+    camera_ids: list = []
+    try:
+        cameras = await client.get_cameras()
+        camera_ids = [c["id"] for c in cameras if isinstance(c, dict)]
+        _protect_camera_ids_by_site[site_id] = camera_ids
+        logger.info("[%s] Protect cameras fetched: %d", site_id, len(camera_ids))
+    except Exception as exc:
+        logger.warning("[%s] Failed to fetch cameras: %s", site_id, exc)
+
+    try:
+        from glitch.protect.event_processor import ProtectEventProcessor
+        processor = ProtectEventProcessor()
+        await processor.start(
+            camera_ids=camera_ids,
+            check_interval=float(os.environ.get("GLITCH_PROTECT_CHECK_INTERVAL", "120")),
+        )
+        _protect_processors[site_id] = processor
+        _protect_health["protect_processor"] = "running"
+        logger.info("[%s] Event processor started for %d cameras", site_id, len(camera_ids))
+    except Exception as exc:
+        _protect_health["protect_processor"] = f"error: {exc}"
+        logger.warning("[%s] Failed to start event processor: %s", site_id, exc, exc_info=True)
+
+    try:
+        from glitch.protect.patrol import CameraPatrol
+        patrol = CameraPatrol(
+            protect_client=client,
+            interval_seconds=int(os.environ.get("GLITCH_PROTECT_PATROL_INTERVAL", "600")),
+            site_id=site_id,
+        )
+        if camera_ids:
+            await patrol.start(camera_ids)
+            _protect_patrols[site_id] = patrol
+            logger.info("[%s] Camera patrol started for %d cameras", site_id, len(camera_ids))
+        else:
+            logger.warning("[%s] No camera IDs — camera patrol not started", site_id)
+    except Exception as exc:
+        logger.warning("[%s] Failed to start camera patrol: %s", site_id, exc, exc_info=True)
 
 
 async def _start_protect_subsystem() -> None:
@@ -260,13 +327,10 @@ async def _start_protect_subsystem() -> None:
     /ping health check can respond immediately while SSM, DB, and WS connections
     complete in the background.
     """
-    global _protect_poller, _protect_processor, _protect_camera_ids
-
     # Wait for the health check to pass before making outbound connections.
     await asyncio.sleep(10)
 
-    from glitch.protect.config import is_protect_configured, get_protect_config
-    from glitch.protect.client import get_client as get_protect_client
+    from glitch.protect.config import is_protect_configured
 
     try:
         configured = is_protect_configured()
@@ -293,69 +357,14 @@ async def _start_protect_subsystem() -> None:
 
     asyncio.create_task(_db_init_watcher(), name="protect-db-init")
 
-    client = get_protect_client()
-    config = get_protect_config()
+    from glitch.protect.config import get_all_site_configs
+    site_configs = get_all_site_configs()
+    if not site_configs:
+        logger.warning("No Protect sites configured — skipping poller/processor/patrol")
+        return
 
-    if client.auth_mode == "api_key":
-        logger.info("Protect auth: API key — WS streams use X-API-KEY header (no login needed)")
-    else:
-        try:
-            await client._authenticate()
-            logger.info("Protect pre-auth (cookie) succeeded")
-        except Exception as auth_exc:
-            logger.warning("Protect pre-auth failed: %s — poller will retry with backoff", auth_exc)
-
-    from glitch.protect.poller import ProtectEventPoller
-    poller = ProtectEventPoller(protect_client=client, config=config)
-    await poller.start()
-    _protect_poller = poller
-    _protect_health["protect_poller"] = "running"
-
-    camera_ids: list = []
-    try:
-        cameras = await client.get_cameras()
-        camera_ids = [c["id"] for c in cameras if isinstance(c, dict)]
-        _protect_camera_ids = camera_ids
-        logger.info("Protect cameras fetched: %d", len(camera_ids))
-    except Exception as exc:
-        logger.warning("Failed to fetch cameras (will retry in poller seed): %s", exc)
-
-    try:
-        from glitch.protect.event_processor import ProtectEventProcessor
-        processor = ProtectEventProcessor()
-        await processor.start(
-            camera_ids=camera_ids,
-            check_interval=float(os.environ.get("GLITCH_PROTECT_CHECK_INTERVAL", "120")),
-        )
-        _protect_processor = processor
-        _protect_health["protect_processor"] = "running"
-        logger.info(
-            "Event processor started for %d cameras at %ss interval",
-            len(camera_ids),
-            os.environ.get("GLITCH_PROTECT_CHECK_INTERVAL", "120"),
-        )
-    except Exception as exc:
-        _protect_health["protect_processor"] = f"error: {exc}"
-        logger.warning(
-            "Failed to start event processor: %s — continuing without it", exc, exc_info=True
-        )
-
-    # Camera patrol: periodic snapshot + LLaVA analysis
-    global _protect_patrol
-    try:
-        from glitch.protect.patrol import CameraPatrol
-        patrol = CameraPatrol(
-            protect_client=client,
-            interval_seconds=int(os.environ.get("GLITCH_PROTECT_PATROL_INTERVAL", "600")),
-        )
-        if camera_ids:
-            await patrol.start(camera_ids)
-            _protect_patrol = patrol
-            logger.info("Camera patrol started for %d cameras", len(camera_ids))
-        else:
-            logger.warning("No camera IDs available — camera patrol not started")
-    except Exception as exc:
-        logger.warning("Failed to start camera patrol: %s — continuing without it", exc, exc_info=True)
+    for site_cfg in site_configs:
+        await _start_protect_site(site_cfg)
 
     asyncio.create_task(_daily_report_loop(), name="daily-report")
     asyncio.create_task(_daily_briefing_loop(), name="daily-briefing")
@@ -363,7 +372,10 @@ async def _start_protect_subsystem() -> None:
     asyncio.create_task(_weekly_threshold_optimization_loop(), name="weekly-threshold-opt")
     asyncio.create_task(_health_writer_loop(), name="health-writer")
     asyncio.create_task(_protect_watchdog_loop(), name="protect-watchdog")
-    logger.info("Protect subsystem started (poller + processor + patrol + daily-report + daily-briefing + weekly-learning + health-writer + watchdog)")
+    logger.info(
+        "Protect subsystem started: %d site(s) (poller + processor + patrol + watchdog)",
+        len(site_configs),
+    )
 
 
 async def _protect_watchdog_loop() -> None:
@@ -375,54 +387,53 @@ async def _protect_watchdog_loop() -> None:
     - Camera patrol stopped
     Restarts each component independently using the stored camera IDs.
     """
-    global _protect_poller, _protect_processor, _protect_patrol, _protect_camera_ids
+    global _protect_pollers, _protect_processors, _protect_patrols, _protect_camera_ids_by_site
 
     _WATCHDOG_INTERVAL = int(os.environ.get("GLITCH_PROTECT_WATCHDOG_INTERVAL", "60"))
 
     while True:
         await asyncio.sleep(_WATCHDOG_INTERVAL)
 
-        # --- Event processor ---
-        if _protect_processor is not None:
+        for site_id, processor in list(_protect_processors.items()):
             try:
-                status = _protect_processor.get_status()
+                status = processor.get_status()
             except Exception:
                 status = {"running": False}
             if not status.get("running"):
-                logger.warning("Watchdog: event processor stopped — restarting")
+                logger.warning("Watchdog[%s]: event processor stopped — restarting", site_id)
                 try:
-                    await _protect_processor.start(
-                        camera_ids=_protect_camera_ids,
+                    camera_ids = _protect_camera_ids_by_site.get(site_id, [])
+                    await processor.start(
+                        camera_ids=camera_ids,
                         check_interval=float(os.environ.get("GLITCH_PROTECT_CHECK_INTERVAL", "120")),
                     )
                     _protect_health["protect_processor"] = "running"
-                    logger.info("Watchdog: event processor restarted")
+                    logger.info("Watchdog[%s]: event processor restarted", site_id)
                 except Exception as exc:
                     _protect_health["protect_processor"] = f"watchdog_error: {exc}"
-                    logger.error("Watchdog: failed to restart event processor: %s", exc)
+                    logger.error("Watchdog[%s]: failed to restart event processor: %s", site_id, exc)
 
-        # --- Poller: check if all WS tasks have died ---
-        if _protect_poller is not None:
-            tasks = getattr(_protect_poller, "_tasks", [])
+        for site_id, poller in list(_protect_pollers.items()):
+            tasks = getattr(poller, "_tasks", [])
             if tasks and all(t.done() for t in tasks):
-                logger.warning("Watchdog: all poller tasks are done — restarting WS streams")
+                logger.warning("Watchdog[%s]: all poller tasks done — restarting", site_id)
                 try:
-                    await _protect_poller.start()
+                    await poller.start()
                     _protect_health["protect_poller"] = "running"
-                    logger.info("Watchdog: poller restarted")
+                    logger.info("Watchdog[%s]: poller restarted", site_id)
                 except Exception as exc:
                     _protect_health["protect_poller"] = f"watchdog_error: {exc}"
-                    logger.error("Watchdog: failed to restart poller: %s", exc)
+                    logger.error("Watchdog[%s]: failed to restart poller: %s", site_id, exc)
 
-        # --- Camera patrol ---
-        if _protect_patrol is not None:
-            if not getattr(_protect_patrol, "_running", False) and _protect_camera_ids:
-                logger.warning("Watchdog: camera patrol stopped — restarting")
+        for site_id, patrol in list(_protect_patrols.items()):
+            camera_ids = _protect_camera_ids_by_site.get(site_id, [])
+            if not getattr(patrol, "_running", False) and camera_ids:
+                logger.warning("Watchdog[%s]: camera patrol stopped — restarting", site_id)
                 try:
-                    await _protect_patrol.start(_protect_camera_ids)
-                    logger.info("Watchdog: camera patrol restarted")
+                    await patrol.start(camera_ids)
+                    logger.info("Watchdog[%s]: camera patrol restarted", site_id)
                 except Exception as exc:
-                    logger.error("Watchdog: failed to restart camera patrol: %s", exc)
+                    logger.error("Watchdog[%s]: failed to restart patrol: %s", site_id, exc)
 
 
 async def _daily_report_loop() -> None:
@@ -601,20 +612,20 @@ async def _health_writer_loop() -> None:
 
 async def _shutdown_protect_subsystem() -> None:
     """Gracefully stop the Protect poller, processor, patrol, and DB pool."""
-    global _protect_processor, _protect_poller, _protect_patrol
-    if _protect_processor is not None:
+    global _protect_processors, _protect_pollers, _protect_patrols
+    for processor in _protect_processors.values():
         try:
-            await _protect_processor.stop()
+            await processor.stop()
         except Exception:
             pass
-    if _protect_patrol is not None:
+    for patrol in _protect_patrols.values():
         try:
-            _protect_patrol.stop()
+            patrol.stop()
         except Exception:
             pass
-    if _protect_poller is not None:
+    for poller in _protect_pollers.values():
         try:
-            _protect_poller.stop()
+            poller.stop()
         except Exception:
             pass
     try:
@@ -623,8 +634,8 @@ async def _shutdown_protect_subsystem() -> None:
     except Exception:
         pass
     try:
-        from glitch.protect.client import get_client as get_protect_client
-        await get_protect_client().close()
+        from glitch.protect.client import reset_client
+        await reset_client()
     except Exception:
         pass
     logger.info("Protect subsystem shutdown complete")

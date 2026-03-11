@@ -320,3 +320,53 @@ def reset_config_cache() -> None:
 
 # Minimum anomaly score (0.0–1.0) required to send a Telegram alert.
 PROTECT_ALERT_THRESHOLD = float(os.environ.get("GLITCH_PROTECT_ALERT_THRESHOLD", "0.7"))
+
+
+@dataclass
+class SiteConfig:
+    """Configuration bundle for a single Protect site."""
+    site_id: str  # e.g. "site1", "starbase80" — used as site label in DB
+    protect: ProtectConfig
+
+
+def get_all_site_configs() -> "list[SiteConfig]":
+    """Return a SiteConfig for every configured Protect site.
+
+    Site 1 always uses the existing env vars / SSM (GLITCH_PROTECT_HOST etc.).
+    Site 2 is opt-in: only included when GLITCH_PROTECT_2_HOST is set.
+    """
+    sites: "list[SiteConfig]" = []
+
+    # Site 1 — existing config path, no changes to get_protect_config()
+    try:
+        sites.append(SiteConfig(
+            site_id=os.environ.get("GLITCH_PROTECT_LABEL", "site1"),
+            protect=get_protect_config(),
+        ))
+    except RuntimeError as exc:
+        logger.warning("Site 1 Protect config unavailable: %s", exc)
+
+    # Site 2 — opt-in via GLITCH_PROTECT_2_HOST
+    host2 = os.environ.get("GLITCH_PROTECT_2_HOST", "").strip()
+    if host2:
+        api_key2 = os.environ.get("GLITCH_PROTECT_2_API_KEY", "").strip() or None
+        port_str2 = os.environ.get("GLITCH_PROTECT_2_PORT", "443")
+        site_id2 = os.environ.get("GLITCH_PROTECT_2_LABEL", "site2")
+        if api_key2:
+            host2_parsed, port2 = parse_host_port(host2, int(port_str2))
+            sites.append(SiteConfig(
+                site_id=site_id2,
+                protect=ProtectConfig(
+                    host=host2_parsed,
+                    port=port2,
+                    verify_ssl=False,
+                    api_key=api_key2,
+                ),
+            ))
+            logger.info("Site 2 (%s) configured: host=%s, port=%d", site_id2, host2_parsed, port2)
+        else:
+            logger.warning(
+                "GLITCH_PROTECT_2_HOST set but GLITCH_PROTECT_2_API_KEY missing — skipping site2"
+            )
+
+    return sites

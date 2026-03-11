@@ -72,14 +72,16 @@ async def backfill_events(days: int = 7) -> dict:
 class ProtectEventPoller:
     """WebSocket consumer for UniFi Protect real-time events and device updates."""
 
-    def __init__(self, protect_client: "ProtectClient", config: "ProtectConfig") -> None:
+    def __init__(self, protect_client: "ProtectClient", config: "ProtectConfig", site_id: str = "site1") -> None:
         """
         Args:
             protect_client: singleton ProtectClient instance
             config: ProtectConfig instance (host, port, verify_ssl, api_key)
+            site_id: site label used in DB (e.g. "site1", "starbase80")
         """
         self._client = protect_client
         self._config = config
+        self._site_id = site_id
         self._tasks: list[asyncio.Task] = []
         self._running = False
 
@@ -163,6 +165,7 @@ class ProtectEventPoller:
                     led_settings=cam.get("ledSettings"),
                     osd_settings=cam.get("osdSettings"),
                     lcd_message=cam.get("lcdMessage"),
+                    site_id=self._site_id,
                 )
             logger.info("ProtectEventPoller: camera seed complete")
         except Exception as exc:
@@ -490,6 +493,7 @@ class ProtectEventPoller:
                     led_settings=item.get("ledSettings"),
                     osd_settings=item.get("osdSettings"),
                     lcd_message=item.get("lcdMessage"),
+                    site_id=self._site_id,
                 )
             except Exception as exc:
                 logger.debug("ProtectEventPoller: camera upsert failed: %s", exc)

@@ -853,13 +853,14 @@ async def upsert_camera(
     led_settings: Optional[Dict] = None,
     osd_settings: Optional[Dict] = None,
     lcd_message: Optional[Dict] = None,
+    site_id: str = "site1",
 ) -> None:
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO cameras (
-                camera_id, name, mac, model_key, state,
+                camera_id, name, site_id, mac, model_key, state,
                 location, type, zone,
                 is_mic_enabled, mic_volume, video_mode, hdr_type,
                 has_hdr, has_mic, has_speaker, has_led_status, has_full_hd_snapshot,
@@ -868,7 +869,7 @@ async def upsert_camera(
                 led_settings, osd_settings, lcd_message,
                 metadata
             ) VALUES (
-                $1, $2, $3, $4, $5,
+                $1, $2, $27, $3, $4, $5,
                 $6, $7, $8,
                 $9, $10, $11, $12,
                 $13, $14, $15, $16, $17,
@@ -879,6 +880,7 @@ async def upsert_camera(
             )
             ON CONFLICT (camera_id) DO UPDATE SET
                 name = COALESCE($2, cameras.name),
+                site_id = $27,
                 mac = COALESCE($3, cameras.mac),
                 model_key = COALESCE($4, cameras.model_key),
                 state = COALESCE($5, cameras.state),
@@ -915,6 +917,7 @@ async def upsert_camera(
             json.dumps(osd_settings) if osd_settings else None,
             json.dumps(lcd_message) if lcd_message else None,
             json.dumps(metadata or {}),
+            site_id,
         )
 
 
@@ -984,6 +987,7 @@ async def insert_patrol(
     model_used: str = "llava",
     processing_ms: Optional[int] = None,
     error: Optional[str] = None,
+    site_id: str = "site1",
 ) -> str:
     pool = await get_pool()
     patrol_id = str(uuid.uuid4())
@@ -991,15 +995,16 @@ async def insert_patrol(
         await conn.execute(
             """
             INSERT INTO camera_patrols
-                (patrol_id, camera_id, scene_description, detected_objects,
+                (patrol_id, camera_id, site_id, scene_description, detected_objects,
                  anomaly_detected, anomaly_description, confidence,
                  model_used, processing_ms, error)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            VALUES ($1, $2, $11, $3, $4, $5, $6, $7, $8, $9, $10)
             """,
             patrol_id, camera_id, scene_description,
             json.dumps(detected_objects or []),
             anomaly_detected, anomaly_description, confidence,
             model_used, processing_ms, error,
+            site_id,
         )
     return patrol_id
 

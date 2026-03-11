@@ -901,6 +901,14 @@ export class GlitchEdgeStack extends Stack {
     });
     ipv4Set.node.addDependency(porkbunIpResource);
 
+    // Starbase80 site WAF IP set
+    const ipv4SetStarbase80 = new CfnIPSet(this, 'GlitchAllowedIPsStarbase80', {
+      name: 'GlitchAllowedIPs-Starbase80',
+      scope: 'CLOUDFRONT',
+      ipAddressVersion: 'IPV4',
+      addresses: ['10.0.0.138/32'],
+    });
+
     const rules: CfnWebACL.RuleProperty[] = [
       {
         name: 'AllowTrustedIPv4',
@@ -912,6 +920,19 @@ export class GlitchEdgeStack extends Stack {
           sampledRequestsEnabled: true,
         },
         statement: { ipSetReferenceStatement: { arn: ipv4Set.attrArn } },
+      },
+      {
+        name: 'AllowTrustedIPv4Starbase80',
+        priority: 2,
+        action: { allow: {} },
+        visibilityConfig: {
+          cloudWatchMetricsEnabled: true,
+          metricName: 'AllowTrustedIPv4Starbase80',
+          sampledRequestsEnabled: true,
+        },
+        statement: {
+          ipSetReferenceStatement: { arn: ipv4SetStarbase80.attrArn },
+        },
       },
     ];
 
@@ -1018,6 +1039,63 @@ export class GlitchEdgeStack extends Stack {
     new CfnOutput(this, 'DdnsUpdaterUrl', {
       value: ddnsUpdaterUrl.url,
       description: 'DDNS updater webhook URL — POST with Authorization: Bearer <glitch/ddns-token>',
+    });
+
+    // DDNS updater for Starbase80 site
+    const ddnsUpdaterFnStarbase80 = new LambdaFunction(this, 'DdnsUpdaterFunctionStarbase80', {
+      functionName: 'glitch-ddns-updater-starbase80',
+      runtime: Runtime.PYTHON_3_12,
+      handler: 'index.handler',
+      code: Code.fromAsset(path.join(__dirname, '../lambda/ddns-updater'), {
+        bundling: {
+          image: Runtime.PYTHON_3_12.bundlingImage,
+          command: ['bash', '-c', 'pip install -r requirements.txt -t /asset-output && cp -au . /asset-output'],
+        },
+      }),
+      timeout: Duration.seconds(30),
+      environment: {
+        DDNS_SUBDOMAIN: 'starbase80',
+        DDNS_DOMAIN: 'awoo.agency',
+        WAF_IP_SET_ID: ipv4SetStarbase80.attrId,
+        WAF_IP_SET_NAME: 'GlitchAllowedIPs-Starbase80',
+        WAF_REGION: 'us-east-1',
+        SSM_PARAM: '/glitch/waf/allowed-ipv4-starbase80',
+        SSM_REGION: 'us-east-1',
+        CLOUDFLARE_SECRET_NAME: CLOUDFLARE_SECRET_NAME,
+        CLOUDFLARE_SECRET_REGION: 'us-east-1',
+        DDNS_TOKEN_SECRET_ARN: ddnsTokenSecret.secretArn,
+        TOKEN_SECRET_REGION: this.region,
+      },
+    });
+
+    // Grant Secrets Manager read
+    ddnsTokenSecret.grantRead(ddnsUpdaterFnStarbase80);
+    const cloudflareSecret = Secret.fromSecretNameV2(this, 'CloudflareSecretStarbase80Ref', CLOUDFLARE_SECRET_NAME);
+    cloudflareSecret.grantRead(ddnsUpdaterFnStarbase80);
+
+    // Grant SSM put for starbase80 IP param
+    ddnsUpdaterFnStarbase80.addToRolePolicy(new PolicyStatement({
+      sid: 'WriteIpSsmStarbase80',
+      actions: ['ssm:PutParameter'],
+      resources: [
+        `arn:aws:ssm:us-east-1:${this.account}:parameter/glitch/waf/allowed-ipv4-starbase80`,
+      ],
+    }));
+
+    // Grant WAF IP set update for Starbase80
+    ddnsUpdaterFnStarbase80.addToRolePolicy(new PolicyStatement({
+      sid: 'UpdateWafIpSetStarbase80',
+      actions: ['wafv2:GetIPSet', 'wafv2:UpdateIPSet'],
+      resources: [ipv4SetStarbase80.attrArn],
+    }));
+
+    const ddnsUpdaterUrlStarbase80 = ddnsUpdaterFnStarbase80.addFunctionUrl({
+      authType: FunctionUrlAuthType.NONE,
+    });
+
+    new CfnOutput(this, 'DdnsUpdaterUrlStarbase80', {
+      value: ddnsUpdaterUrlStarbase80.url,
+      description: 'DDNS updater Function URL for Starbase80 site',
     });
   }
 }
