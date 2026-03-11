@@ -292,6 +292,11 @@ async def _start_protect_subsystem() -> None:
 
     asyncio.create_task(_db_init_watcher(), name="protect-db-init")
 
+    from glitch.protect.client import reset_client as _reset_protect_client
+    try:
+        await _reset_protect_client()
+    except Exception:
+        pass
     client = get_protect_client()
     config = get_protect_config()
 
@@ -310,10 +315,16 @@ async def _start_protect_subsystem() -> None:
     _protect_poller = poller
     _protect_health["protect_poller"] = "running"
 
+    camera_ids: list = []
     try:
-        from glitch.protect.event_processor import ProtectEventProcessor
         cameras = await client.get_cameras()
         camera_ids = [c["id"] for c in cameras if isinstance(c, dict)]
+        logger.info("Protect cameras fetched: %d", len(camera_ids))
+    except Exception as exc:
+        logger.warning("Failed to fetch cameras (will retry in poller seed): %s", exc)
+
+    try:
+        from glitch.protect.event_processor import ProtectEventProcessor
         processor = ProtectEventProcessor()
         await processor.start(
             camera_ids=camera_ids,
@@ -337,9 +348,12 @@ async def _start_protect_subsystem() -> None:
     try:
         from glitch.protect.patrol import CameraPatrol
         patrol = CameraPatrol(protect_client=client, interval_seconds=120)
-        await patrol.start(camera_ids)
-        _protect_patrol = patrol
-        logger.info("Camera patrol started for %d cameras", len(camera_ids))
+        if camera_ids:
+            await patrol.start(camera_ids)
+            _protect_patrol = patrol
+            logger.info("Camera patrol started for %d cameras", len(camera_ids))
+        else:
+            logger.warning("No camera IDs available — camera patrol not started")
     except Exception as exc:
         logger.warning("Failed to start camera patrol: %s — continuing without it", exc, exc_info=True)
 

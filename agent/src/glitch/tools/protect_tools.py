@@ -82,15 +82,25 @@ async def protect_get_cameras() -> str:
         result = []
         for cam in cameras:
             cam_id = cam.get("id", "")
+            state = cam.get("state", "UNKNOWN")
+            is_connected = cam.get("isConnected", state == "CONNECTED")
+            is_recording = cam.get(
+                "isRecording",
+                cam.get("recordingSettings", {}).get("mode", "") != "never"
+                if isinstance(cam.get("recordingSettings"), dict) else None,
+            )
             cam_info = {
                 "camera_id": cam_id,
                 "name": cam.get("name", ""),
                 "type": cam.get("type", ""),
-                "state": cam.get("state", ""),
-                "is_recording": cam.get("isRecording", False),
-                "is_connected": cam.get("isConnected", False),
+                "state": state,
+                "is_recording": is_recording,
+                "is_connected": is_connected,
                 "last_motion": cam.get("lastMotion"),
-                "location": cam.get("featureFlags", {}).get("hasSpeaker"),
+                "smart_detect_types": cam.get("smartDetectSettings", {}).get("objectTypes", [])
+                    if isinstance(cam.get("smartDetectSettings"), dict) else [],
+                "recording_mode": cam.get("recordingSettings", {}).get("mode")
+                    if isinstance(cam.get("recordingSettings"), dict) else None,
             }
             result.append(cam_info)
 
