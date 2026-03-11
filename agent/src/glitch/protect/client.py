@@ -196,23 +196,33 @@ class ProtectClient:
         self,
         start: Optional[datetime] = None,
         end: Optional[datetime] = None,
-        camera_ids: Optional[List[str]] = None,
+        camera_ids: Optional[List[str]] = None,  # kept for call-site compat; silently ignored (API doesn't support it)
         event_types: Optional[List[str]] = None,
         limit: int = 100,
     ) -> List[Dict[str, Any]]:
-        """Query events with optional filters."""
+        """Query events from the integration API.
+
+        Note: the UniFi Protect integration API does not support filtering by
+        camera_ids via query parameter — passing it causes a 404. Camera
+        filtering must be done client-side after fetching.
+        """
         params: Dict[str, Any] = {"limit": limit}
         if start:
             params["start"] = int(start.timestamp() * 1000)
         if end:
             params["end"] = int(end.timestamp() * 1000)
-        if camera_ids:
-            params["cameras"] = ",".join(camera_ids)
         if event_types:
             params["types"] = ",".join(event_types)
 
         data = await self._request("GET", f"{self._api_prefix}/events", params=params)
-        return data if isinstance(data, list) else data.get("data", [])
+        events = data if isinstance(data, list) else data.get("data", [])
+
+        # Client-side camera filter if requested
+        if camera_ids:
+            camera_set = set(camera_ids)
+            events = [e for e in events if e.get("camera") in camera_set]
+
+        return events
 
     async def get_snapshot(
         self,

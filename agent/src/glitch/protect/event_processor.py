@@ -116,7 +116,6 @@ class ProtectEventProcessor:
                 events = await client.get_events(
                     start=start_time,
                     end=end_time,
-                    camera_ids=self._camera_ids if self._camera_ids else None,
                 )
 
                 for event in events:
