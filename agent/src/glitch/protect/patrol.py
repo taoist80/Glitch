@@ -13,6 +13,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -142,7 +143,7 @@ class CameraPatrol:
                 anomaly_detected=anomaly_detected,
                 anomaly_description=anomaly_description,
                 confidence=confidence,
-                model_used="llava",
+                model_used=os.environ.get("GLITCH_LLAVA_OLLAMA_MODEL", "llava-v1.6-mistral-7b"),
                 processing_ms=processing_ms,
                 error=error_msg,
             )

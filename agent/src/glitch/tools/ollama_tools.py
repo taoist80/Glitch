@@ -175,10 +175,15 @@ class HealthCheckResult:
 
 
 @tool
+def _vision_model_name() -> str:
+    """Return the configured LLaVA model name, matching llava_agent.py."""
+    return os.environ.get("GLITCH_LLAVA_OLLAMA_MODEL", "llava-v1.6-mistral-7b")
+
+
 async def vision_agent(
     image_url: str,
     prompt: str,
-    model: str = "llava",
+    model: str = "",
 ) -> str:
     """Process an image with the local LLaVA vision model.
     
@@ -194,23 +199,24 @@ async def vision_agent(
         Model's analysis or response about the image
     """
     config = _get_config()
-    
+    resolved_model = model or _vision_model_name()
+
     try:
         endpoint = f"http://{config.vision_host}:{config.port}/api/generate"
-        
+
         raw_b64 = image_url
         if raw_b64.startswith("data:"):
             raw_b64 = raw_b64.split(",", 1)[-1]
 
         payload: OllamaGeneratePayload = {
-            "model": model,
+            "model": resolved_model,
             "prompt": prompt,
             "images": [raw_b64],
             "stream": False,
         }
         
         async with httpx.AsyncClient(timeout=config.timeout) as client:
-            logger.info(f"Sending vision request to {endpoint} with model {model}")
+            logger.info(f"Sending vision request to {endpoint} with model {resolved_model}")
             response = await client.post(endpoint, json=payload, headers=_ollama_headers())
             response.raise_for_status()
             
@@ -479,7 +485,7 @@ async def check_ollama_health() -> str:
     # Expected models match the defaults used by local_chat and vision_agent respectively.
     tasks = [
         _check_single_host("Chat", config.chat_host, config, expected_models=["mistral-nemo:12b"]),
-        _check_single_host("Vision", config.vision_host, config, port_override=config.vision_port, use_openai_format=True, expected_models=["llava"]),
+        _check_single_host("Vision", config.vision_host, config, port_override=config.vision_port, use_openai_format=True, expected_models=[_vision_model_name()]),
     ]
     results = await asyncio.gather(*tasks)
     lines = [r.to_string() for r in results]
