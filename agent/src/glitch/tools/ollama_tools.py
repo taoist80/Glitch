@@ -201,33 +201,51 @@ async def vision_agent(
     config = _get_config()
     resolved_model = model or _vision_model_name()
 
+    # Use OpenAI-compatible format on the vision port (18080) — same path as llava_agent.py.
+    # Port 11434 (native Ollama) requires different auth and doesn't support images the same way.
+    endpoint = f"http://{config.vision_host}:{config.vision_port}/v1/chat/completions"
+
+    # Accept raw base64, data URI, or http/https URL
+    if image_url.startswith("data:"):
+        image_data_url = image_url  # already a data URI
+    elif image_url.startswith("http://") or image_url.startswith("https://"):
+        image_data_url = image_url  # pass URL directly
+    else:
+        image_data_url = f"data:image/jpeg;base64,{image_url}"
+
+    payload = {
+        "model": resolved_model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": image_data_url, "detail": "auto"}},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ],
+        "max_tokens": 1024,
+        "temperature": 0.3,
+        "stream": False,
+    }
+
     try:
-        endpoint = f"http://{config.vision_host}:{config.port}/api/generate"
-
-        raw_b64 = image_url
-        if raw_b64.startswith("data:"):
-            raw_b64 = raw_b64.split(",", 1)[-1]
-
-        payload: OllamaGeneratePayload = {
-            "model": resolved_model,
-            "prompt": prompt,
-            "images": [raw_b64],
-            "stream": False,
-        }
-        
         async with httpx.AsyncClient(timeout=config.timeout) as client:
-            logger.info(f"Sending vision request to {endpoint} with model {resolved_model}")
+            logger.info("Sending vision request to %s with model %s", endpoint, resolved_model)
             response = await client.post(endpoint, json=payload, headers=_ollama_headers())
             response.raise_for_status()
-            
-            result: OllamaGenerateResponse = response.json()
-            return result.get("response", "No response from vision model")
-            
+
+            result = response.json()
+            choices = result.get("choices", [])
+            if choices:
+                return choices[0].get("message", {}).get("content", "No response from vision model")
+            return "No response from vision model"
+
     except httpx.HTTPError as e:
-        logger.error(f"HTTP error calling vision model: {e}")
+        logger.error("HTTP error calling vision model: %s", e)
         return f"Error connecting to vision model: {str(e)}"
     except Exception as e:
-        logger.error(f"Unexpected error in vision_agent: {e}")
+        logger.error("Unexpected error in vision_agent: %s", e)
         return f"Vision processing failed: {str(e)}"
 
 
