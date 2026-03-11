@@ -15,12 +15,25 @@ import json
 import logging
 import os
 import time
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
 
 if TYPE_CHECKING:
     from glitch.protect.client import ProtectClient
 
 logger = logging.getLogger(__name__)
+
+
+def _vision_camera_ids() -> Set[str]:
+    """Camera IDs that should receive LLaVA vision analysis.
+
+    Read from GLITCH_PROTECT_VISION_CAMERAS (comma-separated).
+    Empty / unset means all cameras get vision analysis.
+    """
+    raw = os.environ.get("GLITCH_PROTECT_VISION_CAMERAS", "").strip()
+    if not raw:
+        return set()
+    return {c.strip() for c in raw.split(",") if c.strip()}
+
 
 _SCENE_PROMPT = (
     "Analyze this security camera image. Describe the scene in 1-2 sentences. "
@@ -113,11 +126,22 @@ class CameraPatrol:
         confidence = 0.0
         error_msg = None
 
+        _vision_cameras = _vision_camera_ids()
+        if _vision_cameras and camera_id not in _vision_cameras:
+            logger.debug("Patrol[%s]: vision skipped (not in GLITCH_PROTECT_VISION_CAMERAS)", camera_id)
+            # Store a snapshot-only patrol row with no vision results
+            try:
+                patrol_id = await protect_db.insert_patrol(camera_id=camera_id)
+                result["patrol_id"] = patrol_id
+            except Exception:
+                pass
+            return result
+
         try:
             b64 = base64.b64encode(snapshot_bytes).decode("utf-8")
 
             from glitch.tools.ollama_tools import vision_agent as _vision_agent
-            raw_output = await _vision_agent.__wrapped__(
+            raw_output = await _vision_agent(
                 image_url=b64,
                 prompt=_SCENE_PROMPT,
             )

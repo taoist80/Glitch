@@ -342,7 +342,10 @@ async def _start_protect_subsystem() -> None:
     global _protect_patrol
     try:
         from glitch.protect.patrol import CameraPatrol
-        patrol = CameraPatrol(protect_client=client, interval_seconds=120)
+        patrol = CameraPatrol(
+            protect_client=client,
+            interval_seconds=int(os.environ.get("GLITCH_PROTECT_PATROL_INTERVAL", "600")),
+        )
         if camera_ids:
             await patrol.start(camera_ids)
             _protect_patrol = patrol

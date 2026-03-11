@@ -319,4 +319,4 @@ def reset_config_cache() -> None:
 
 
 # Minimum anomaly score (0.0–1.0) required to send a Telegram alert.
-PROTECT_ALERT_THRESHOLD = float(os.environ.get("GLITCH_PROTECT_ALERT_THRESHOLD", "0.6"))
+PROTECT_ALERT_THRESHOLD = float(os.environ.get("GLITCH_PROTECT_ALERT_THRESHOLD", "0.7"))

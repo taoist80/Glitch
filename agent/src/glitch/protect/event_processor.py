@@ -295,7 +295,7 @@ class ProtectEventProcessor:
         from glitch.tools.ollama_tools import vision_agent as _vision_agent
 
         t0 = time.monotonic()
-        raw_output = await _vision_agent.__wrapped__(
+        raw_output = await _vision_agent(
             image_url=image_url,
             prompt=prompt,
         )
