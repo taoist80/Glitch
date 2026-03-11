@@ -9,6 +9,7 @@
 -- ============================================================
 CREATE TABLE IF NOT EXISTS cameras (
     camera_id       TEXT PRIMARY KEY,
+    site_id         TEXT NOT NULL DEFAULT 'site1',
     name            TEXT NOT NULL,
     mac             TEXT,
     model_key       TEXT,  -- "camera"
@@ -390,6 +391,7 @@ CREATE TABLE IF NOT EXISTS camera_topology (
 CREATE TABLE IF NOT EXISTS camera_patrols (
     patrol_id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     camera_id           TEXT REFERENCES cameras(camera_id) ON DELETE CASCADE,
+    site_id             TEXT NOT NULL DEFAULT 'site1',
     timestamp           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     scene_description   TEXT,
     detected_objects    JSONB DEFAULT '[]'::jsonb,
@@ -402,6 +404,8 @@ CREATE TABLE IF NOT EXISTS camera_patrols (
 );
 
 CREATE INDEX IF NOT EXISTS idx_patrols_camera_ts ON camera_patrols(camera_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_cameras_site ON cameras(site_id);
+CREATE INDEX IF NOT EXISTS idx_patrols_site ON camera_patrols(site_id);
 
 -- sentinel_health: single-row table written by Sentinel on startup and periodically.
 -- Allows the UI (via protect-query Lambda) to see the agent-side DB / poller status
