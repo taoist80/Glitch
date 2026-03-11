@@ -292,11 +292,6 @@ async def _start_protect_subsystem() -> None:
 
     asyncio.create_task(_db_init_watcher(), name="protect-db-init")
 
-    from glitch.protect.client import reset_client as _reset_protect_client
-    try:
-        await _reset_protect_client()
-    except Exception:
-        pass
     client = get_protect_client()
     config = get_protect_config()
 

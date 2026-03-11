@@ -70,11 +70,21 @@ class ProtectClient:
         self._cookies: Dict[str, str] = {}
         self._csrf_token: Optional[str] = None
         self._auth_lock = asyncio.Lock()
-        self._http = httpx.AsyncClient(
-            verify=config.verify_ssl,
+        self._http = self._new_http_client()
+
+    def _new_http_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            verify=self._config.verify_ssl,
             timeout=30.0,
             follow_redirects=True,
         )
+
+    def _ensure_http_client(self) -> httpx.AsyncClient:
+        """Return a live httpx client, recreating it if the previous one was closed."""
+        if self._http.is_closed:
+            logger.info("Protect httpx client was closed — recreating")
+            self._http = self._new_http_client()
+        return self._http
 
     @property
     def auth_mode(self) -> str:
@@ -103,7 +113,8 @@ class ProtectClient:
                 "rememberMe": True,
             }
             try:
-                response = await self._http.post(url, json=payload)
+                http = self._ensure_http_client()
+                response = await http.post(url, json=payload)
                 if response.status_code == 429:
                     retry_after = float(
                         response.headers.get("Retry-After", "60")
@@ -147,7 +158,8 @@ class ProtectClient:
                 headers["x-csrf-token"] = self._csrf_token
 
         url = f"{self._base_url}{path}"
-        response = await self._http.request(
+        http = self._ensure_http_client()
+        response = await http.request(
             method,
             url,
             cookies=self._cookies if not self._use_api_key else None,
@@ -168,7 +180,8 @@ class ProtectClient:
             headers = {}
             if self._csrf_token:
                 headers["x-csrf-token"] = self._csrf_token
-            response = await self._http.request(
+            http = self._ensure_http_client()
+            response = await http.request(
                 method,
                 url,
                 cookies=self._cookies,
