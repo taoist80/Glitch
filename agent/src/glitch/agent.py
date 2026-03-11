@@ -1,27 +1,18 @@
 """Glitch - Primary orchestrator agent for AgentCore hybrid system.
 
 Dataflow:
-    User Message -> TaskPlanner -> TaskSpec
+    User Message -> select_skills_for_message() -> skill suffix
                                       |
                                       v
-                              SkillSelector(TaskSpec, model)
+                              Strands Agent (base prompt + skills) -> AgentResult
                                       |
                                       v
-                              List[SelectedSkill] (max 3)
-                                      |
-                                      v
-                              build_prompt_with_skills()
-                                      |
-                                      v
-                              Strands Agent -> AgentResult
-                                      |
-                                      v
-                              InvocationResponse (with metrics + skill telemetry)
+                              InvocationResponse (with metrics)
 
 The GlitchAgent orchestrates:
 1. Memory management (AgentCore Memory API)
 2. Model routing (tier escalation)
-3. Skill selection and injection
+3. Skill selection and injection (keyword-based, simplified)
 4. Tool execution (local Ollama, network tools)
 5. Metrics collection (via Strands telemetry)
 """
@@ -46,12 +37,7 @@ from glitch.tools.code_interpreter_tools import (
 from glitch.routing.model_router import ModelRouter
 from glitch.memory.sliding_window import GlitchMemoryManager
 from glitch.mcp.manager import MCPServerManager
-from glitch.skills.loader import SkillLoader, get_default_skills_dir
-from glitch.skills.registry import SkillRegistry
-from glitch.skills.selector import SkillSelector
-from glitch.skills.planner import TaskPlanner
-from glitch.skills.prompt_builder import build_prompt_with_skills
-from glitch.skills.types import SkillSelectionResult
+from glitch.skills.skills import select_skills_for_message
 from glitch.telemetry import (
     extract_metrics_from_result,
     log_invocation_metrics,
@@ -110,30 +96,58 @@ GLITCH_TECHNICAL_CONTEXT = """
 **Your Name:** Glitch
 
 **Your Role:**
-- Primary orchestrator agent (Tier 1 - Claude Sonnet)
-- You manage conversations, route tasks, and coordinate with specialized sub-agents
-- You are the only agent allowed to escalate to higher cognitive tiers
+- Primary conversational agent and autonomous ops agent (single combined agent)
+- Handle user conversations, route tasks, monitor infrastructure, and run autonomous operations
+- You escalate to higher cognitive tiers only when justified
 
 **Where you run:**
-- You are the same Glitch agent across all interfaces. You can be reached via:
+- You are the same Glitch agent across all interfaces:
   - **Telegram DMs** (direct messages to the bot)
   - **Telegram group chats** (when the user @mentions the bot in the group, or per owner configuration)
   - **This conversation interface** (e.g. Cursor, web chat, or other clients that call your API)
-- Do not claim you "don't have Telegram" or "only work here". You are one agent; the delivery channel (Telegram vs this chat) is just how the user reached you. If someone says they're not getting replies in a Telegram group, help them troubleshoot (e.g. they may need to @mention the bot in the group, or the owner may need to allow the group).
+- Do not claim you "don't have Telegram" or "only work here". You are one agent; the delivery channel is just how the user reached you.
 
 **Your Capabilities:**
 - Conversation management with sliding memory
-- Task routing to appropriate executors (local or cloud)
-- Confidence scoring and complexity assessment
-- Escalation governance (max 1 per turn, 2 per session)
-- Integration with on-premises Ollama models via proxy (GLITCH_OLLAMA_PROXY_HOST)
-- Delegation to Sentinel for network, camera, and DNS operations via invoke_sentinel
+- On-premises SSH access (ssh_run_command, ssh_read_file, etc.)
+- Ollama models via proxy (GLITCH_OLLAMA_PROXY_HOST)
+- CloudWatch log monitoring and Lambda metrics
+- UniFi Protect camera surveillance (WebSocket event stream + REST API)
+- UniFi Network monitoring (clients, APs, switches, VPN, firewall)
+- Pi-hole DNS management
+- DNS intelligence (query patterns, suspicious domains, blocklists)
+- CDK/CloudFormation infrastructure operations (synth, diff, deploy via SSH)
+- GitHub operations (file read/write, branch, PR)
+- Autonomous alerting via Telegram (send_telegram_alert, send_telegram_resolved)
+
+**Available Tool Groups:**
+- **cloudwatch**: get_my_recent_logs, tail_log_stream, list_all_log_groups, scan_log_groups_for_errors, get_log_group_errors, list_monitored_log_groups, get_lambda_metrics, query_cloudwatch_insights
+- **local_network**: net_tcp_check, net_resolve, net_curl, net_ping, net_traceroute — run FROM THIS CONTAINER (no SSH needed)
+- **protect (13 core tools)**: cameras, events, snapshots, DB ops, alerts, monitoring controls, entity mgmt
+- **pihole**: pihole_list_dns_records, pihole_add_dns_record, pihole_delete_dns_record, pihole_update_dns_record
+- **unifi_network**: unifi_list_clients, unifi_get_device_status, unifi_get_ap_stats, unifi_get_switch_ports, unifi_get_firewall_rules, unifi_block_client, unifi_get_traffic_stats, unifi_get_network_health, unifi_get_vpn_status, unifi_get_wifi_networks, unifi_get_alerts_events, unifi_get_network_topology
+- **dns**: dns_analyze_query_patterns, dns_detect_suspicious_domains, dns_get_top_blocked, dns_get_client_query_stats, dns_monitor_live_queries, dns_get_query_trends, dns_manage_blocklists
+- **infra_ops**: list_cfn_stacks_status, check_cfn_drift, rollback_stack, cdk_synth_and_validate, cdk_diff, cdk_deploy_stack
+- **github**: github_get_file, github_create_branch, github_commit_file, github_create_pr
+- **ops_telegram**: send_telegram_alert, send_telegram_resolved
+- **compound**: security_correlation_scan (protect + network + DNS), analyze_and_alert (full surveillance pipeline)
+- **ssh**: ssh_list_hosts, ssh_run_command, ssh_read_file, ssh_write_file, ssh_mkdir, ssh_file_exists, ssh_list_dir
+- **network**: run_packet_capture, ping_host, traceroute_host, curl_request, dig_host (SSH-based, targets on-prem hosts)
+- **memory**, **telemetry**, **soul**, **secrets**, **deploy**, **ollama**
+
+**Operating Guidelines:**
+1. Always use `get_my_recent_logs` or `tail_log_stream` FIRST when diagnosing errors — these query CloudWatch directly with no SSH needed.
+2. For network connectivity checks FROM THIS CONTAINER (e.g. can I reach RDS, protect.awoo.agency, etc.), use `net_tcp_check`, `net_curl`, or `net_ping` — NOT ssh_run_command. These run locally inside the AgentCore container.
+3. Use `ssh_run_command` only for tasks that must run on on-premises hosts (tower, arc, pi-hole, etc.) — never use it to diagnose issues with this container's own connectivity.
+4. Correlate across domains — single signals are often noise.
+5. Require confirmed=True for cdk_deploy_stack. Always send Telegram alert and wait for confirmation before calling with confirmed=True.
+6. When creating a GitHub PR for a code fix, include root cause, fix description, and testing notes in the PR body.
+7. Never ask the user for SSH passwords. SSH keys are pre-configured. If SSH fails, diagnose via CloudWatch and local_network tools instead.
 
 **Skills:**
-- You have access to **skills** — packaged instructions that teach you how to handle specific tasks (e.g. telemetry, surveillance). When the "Active Skills" section appears in your prompt, **follow those skill instructions**. Each skill specifies which tools to use and how; use the tools it names. Do not substitute other tools unless the skill explicitly allows it.
-- Tool names and parameters are available in your tool list; you do not need every tool described in this prompt. Prefer skill guidance for tool choice and workflow.
+- You have access to **skills** — packaged instructions that teach you how to handle specific tasks. When the "Active Skills" section appears in your prompt, **follow those skill instructions**.
 
-**Tool use:** Call tools when (1) the user's request requires it, or (2) an **active skill** instructs you to. When a skill is active, follow its instructions for which tools to use. Do not call tools on your own initiative for side tasks (e.g. telemetry, thresholds) unless the user explicitly asks. For greetings and simple conversation, respond without using any tools.
+**Tool use:** Call tools when (1) the user's request requires it, or (2) an **active skill** instructs you to. For greetings and simple conversation, respond without using any tools.
 
 **Execution Philosophy:**
 - Local-first: Prefer on-premises execution when appropriate (cost/privacy)
@@ -176,11 +190,7 @@ class GlitchAgent:
         memory_manager: GlitchMemoryManager instance
         model_router: ModelRouter for tier escalation
         mcp_manager: MCPServerManager for external MCP server integration
-        skill_registry: SkillRegistry with loaded skills
-        skill_selector: SkillSelector for task-based skill selection
-        task_planner: TaskPlanner for analyzing user messages
         agent: Strands Agent instance
-        last_skill_selection: Last skill selection result for telemetry
     """
     
     def __init__(self, config: AgentConfig, skills_dir: Optional[Path] = None):
@@ -193,6 +203,7 @@ class GlitchAgent:
         self.session_id = config.session_id
         self.memory_id = config.memory_id
         self.region = config.region
+        self._skills_dir = skills_dir
         
         self.memory_manager = GlitchMemoryManager(
             session_id=config.session_id,
@@ -214,12 +225,8 @@ class GlitchAgent:
         # Initialize MCP servers
         self._init_mcp_servers(config.mcp_config_path)
         
-        # Initialize skill system
-        self._init_skills(skills_dir)
-        
         # Store base prompt for skill injection
         self._base_prompt = build_system_prompt()
-        self.last_skill_selection: Optional[SkillSelectionResult] = None
         
         primary_model = self.model_router.get_primary_model("chat")
         self._current_model_name = primary_model.name
@@ -266,7 +273,6 @@ class GlitchAgent:
         )
         
         logger.info(f"Initialized Glitch agent for session {config.session_id}")
-        logger.info(f"Loaded {len(self.skill_registry)} skills")
         mcp_status = self.mcp_manager.get_status()
         logger.info(f"Loaded {mcp_status['connected_clients']} MCP servers: {mcp_status['server_names']}")
     
@@ -286,69 +292,15 @@ class GlitchAgent:
             self.mcp_manager.config = MCPConfig(servers={})
             self.mcp_manager.clients = {}
     
-    def _init_skills(self, skills_dir: Optional[Path] = None) -> None:
-        """Initialize the skill system.
-        
-        Args:
-            skills_dir: Optional path to skills directory
-        """
-        skills_path = skills_dir or get_default_skills_dir()
-        
-        # Load skills (non-strict mode to gracefully handle missing/invalid skills)
-        loader = SkillLoader(skills_path, strict=False)
-        skills = loader.load_all()
-        
-        # Build registry
-        self.skill_registry = SkillRegistry()
-        self.skill_registry.register_all(skills)
-        
-        # Create selector and planner
-        self.skill_selector = SkillSelector(self.skill_registry)
-        self.task_planner = TaskPlanner()
     
     def _select_and_inject_skills(self, user_message: str, model_name: str) -> list[SystemContentBlock]:
         """Select skills and return a cache-aware system prompt block list.
 
-        Returns a list of SystemContentBlock:
-          [base_prompt_block, cache_point, skill_block (if any skills selected)]
-
-        The cache point after the static base prompt lets Bedrock reuse the cached
-        base across requests. Skills are appended after it so only the (small, variable)
-        skill section is re-processed on each invocation.
-
-        Args:
-            user_message: The user's input message
-            model_name: Name of the model that will execute
-
-        Returns:
-            List of SystemContentBlock for agent.system_prompt assignment
+        Returns [base_prompt_block, cache_point, skill_block (if any match)].
+        The cache point after the static base lets Bedrock reuse the cached base
+        across requests; only the small skill section is re-processed per call.
         """
-        # Plan the task
-        task_spec = self.task_planner.plan(user_message)
-
-        # Select skills
-        self.last_skill_selection = self.skill_selector.select(task_spec, model_name)
-
-        # Log skill selection
-        if self.last_skill_selection.selected:
-            logger.info(
-                f"Selected skills for model {model_name}: "
-                f"{[s.skill_id for s in self.last_skill_selection.selected]}"
-            )
-            for selected in self.last_skill_selection.selected:
-                reasons = [r.value for r in selected.reasons]
-                logger.debug(
-                    f"  {selected.skill_id}: score={selected.match_score:.2f}, "
-                    f"reasons={reasons}"
-                )
-
-        # Build the full prompt string to extract the skills suffix
-        full_prompt = build_prompt_with_skills(
-            self._base_prompt,
-            self.last_skill_selection.selected,
-        )
-        # Skill content is everything appended after the static base prompt
-        skill_suffix = full_prompt[len(self._base_prompt):]
+        skill_suffix = select_skills_for_message(user_message, self._skills_dir)
 
         blocks: list[SystemContentBlock] = [
             SystemContentBlock(text=self._base_prompt),
@@ -362,16 +314,10 @@ class GlitchAgent:
         """Process a user message through the Glitch orchestrator.
 
         Dataflow:
-            user_message -> TaskPlanner -> TaskSpec
+            user_message -> select_skills_for_message()
                                               |
                                               v
-                                      SkillSelector(TaskSpec, model)
-                                              |
-                                              v
-                                      build_prompt_with_skills()
-                                              |
-                                              v
-                                      Strands Agent -> AgentResult
+                                      Strands Agent (prompt + skills) -> AgentResult
                                               |
                                               v
                                       InvocationResponse (with skill telemetry)
@@ -531,24 +477,8 @@ class GlitchAgent:
             yield {"error": str(e), "message": str(e)}
 
     def _get_skill_telemetry(self) -> Dict[str, Any]:
-        """Get skill selection info for telemetry logging.
-        
-        Returns:
-            Dictionary with skill selection details
-        """
-        if not self.last_skill_selection:
-            return {"skills_injected": 0, "skill_ids": []}
-            
-        return {
-            "skills_injected": len(self.last_skill_selection.selected),
-            "skill_ids": [s.skill_id for s in self.last_skill_selection.selected],
-            "skill_reasons": {
-                s.skill_id: [r.value for r in s.reasons]
-                for s in self.last_skill_selection.selected
-            },
-            "model_used": self.last_skill_selection.model_used,
-            "total_skill_candidates": self.last_skill_selection.total_candidates,
-        }
+        """Get skill selection info for telemetry logging."""
+        return {"skills_injected": 0, "skill_ids": []}
     
     def get_status(self) -> AgentStatus:
         """Get agent status and statistics.
@@ -562,10 +492,6 @@ class GlitchAgent:
             routing_stats=self.model_router.get_stats(),
             structured_memory=self.memory_manager.structured_memory.to_dict(),
         )
-        # Add skill info to status
-        status["skills_loaded"] = len(self.skill_registry)
-        if self.last_skill_selection:
-            status["last_skill_selection"] = self.last_skill_selection.to_log_dict()
         # Add MCP server info to status
         status["mcp_servers"] = self.mcp_manager.get_status()
         # Add Code Interpreter availability

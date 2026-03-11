@@ -1,12 +1,11 @@
 {
   "id": "glitch-agent-deploy",
   "version": "1.0.0",
-  "description": "Manage deployments of the Glitch and Sentinel agents: check current ARNs, update cross-agent SSM parameters after a fresh deploy, trigger CDK stack deploys, and check CodeBuild status. Use when the user asks to deploy, redeploy, wire up ARNs, check deploy status, or after running agentcore deploy locally.",
+  "description": "Manage deployments of the Glitch agent: check current ARN, update SSM parameters after a fresh deploy, and check CodeBuild status. Use when the user asks to deploy, redeploy, wire up ARNs, check deploy status, or after running agentcore deploy locally.",
   "triggers": [
     "deploy",
     "redeploy",
     "deploy agent",
-    "deploy sentinel",
     "deploy glitch",
     "agentcore deploy",
     "update arn",
@@ -14,7 +13,6 @@
     "fresh deploy",
     "new arn",
     "agent arn",
-    "sentinel arn",
     "glitch arn",
     "codebuild",
     "build status",
@@ -22,14 +20,9 @@
     "cdk deploy",
     "deploy cdk",
     "deploy stack",
-    "GlitchSentinelStack",
     "GlitchAgentCoreStack",
     "update ssm",
-    "ssm parameter",
-    "cross-agent",
-    "agents not talking",
-    "invoke sentinel failed",
-    "invoke glitch failed"
+    "ssm parameter"
   ],
   "tags": ["deployment", "infrastructure", "agentcore", "ssm", "cdk", "codebuild"],
   "priority": 80,
@@ -38,9 +31,6 @@
   "required_tools": [
     "get_deployed_arns",
     "update_glitch_arn_in_ssm",
-    "update_sentinel_arn_in_ssm",
-    "update_both_arns_in_ssm",
-    "deploy_cdk_stack",
     "check_codebuild_deploy_status"
   ],
   "author": "Glitch Team"

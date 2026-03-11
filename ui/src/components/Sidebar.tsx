@@ -7,8 +7,6 @@ import {
   Plug,
   Zap,
   Bot,
-  Wifi,
-  Shield,
   Camera,
   Settings,
   ChevronLeft,
@@ -35,9 +33,7 @@ const navItems: NavItem[] = [
   { id: 'telemetry', label: 'Telemetry', icon: <BarChart3 size={20} /> },
   { id: 'mcp', label: 'MCP', icon: <Plug size={20} /> },
   { id: 'skills', label: 'Skills', icon: <Zap size={20} /> },
-  { id: 'unifi', label: 'Unifi', icon: <Wifi size={20} />, badge: 'Soon' },
   { id: 'protect', label: 'Protect', icon: <Camera size={20} /> },
-  { id: 'pihole', label: 'Pi-hole', icon: <Shield size={20} />, badge: 'Soon' },
   { id: 'settings', label: 'Settings', icon: <Settings size={20} /> },
 ];
 

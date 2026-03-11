@@ -6,16 +6,7 @@ import boto3
 from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
 
-
-def get_data_plane_endpoint(region):
-    return "https://bedrock-agentcore." + region + ".amazonaws.com"
-
-
-def parse_runtime_arn(arn):
-    parts = arn.split(':')
-    if len(parts) != 6 or not (parts[5] or '').startswith('runtime/'):
-        raise ValueError("Invalid runtime ARN: " + str(arn))
-    return {'region': parts[3], 'account_id': parts[4], 'runtime_id': parts[5].split('/', 1)[1]}
+from agentcore_utils import get_data_plane_endpoint, parse_runtime_arn
 
 
 def handler(event, context):

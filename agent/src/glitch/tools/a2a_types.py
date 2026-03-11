@@ -3,8 +3,7 @@
 These TypedDicts mirror the contract specified at:
 https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-a2a-protocol-contract.html
 
-Both Glitch (sender → Sentinel) and Sentinel (sender → Glitch) import from here
-to ensure both sides agree on the wire format.
+Used by Glitch for any future A2A communication patterns.
 """
 
 from typing import Any, Dict, List, Literal, Optional

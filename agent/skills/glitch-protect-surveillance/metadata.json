@@ -1,7 +1,7 @@
 {
   "id": "glitch-protect-surveillance",
   "version": "2.0.0",
-  "description": "UniFi Protect surveillance and network security. Delegate to Sentinel via invoke_sentinel for all surveillance operations: cameras, motion events, entity tracking, network anomalies, DNS threats, and security alerts. Use when user mentions Protect, cameras, surveillance, vehicles, license plates, alerts, security, motion, UniFi, or network.",
+  "description": "UniFi Protect surveillance and network security. Use protect_get_cameras, protect_get_events, protect_get_entities, analyze_and_alert, security_correlation_scan, and related tools directly — no delegation needed. Use when user mentions Protect, cameras, surveillance, vehicles, license plates, alerts, security, motion, UniFi, or network.",
   "triggers": [
     "protect",
     "camera",
@@ -53,6 +53,6 @@
   "priority": 90,
   "model_allowlist": null,
   "model_denylist": null,
-  "required_tools": ["invoke_sentinel"],
+  "required_tools": ["protect_get_cameras"],
   "author": "Glitch Team"
 }

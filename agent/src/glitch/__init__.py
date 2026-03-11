@@ -46,18 +46,7 @@ from glitch.types import (
     create_error_response,
 )
 
-from glitch.skills import (
-    SkillLoader,
-    SkillRegistry,
-    SkillSelector,
-    TaskPlanner,
-    SkillMetadata,
-    SkillPackage,
-    TaskSpec,
-    SelectedSkill,
-    SkillSelectionResult,
-    build_prompt_with_skills,
-)
+from glitch.skills import select_skills_for_message
 
 from glitch.mcp import (
     MCPServerConfig,
@@ -134,16 +123,7 @@ __all__ = [
     "create_poet_agent",
     "load_poet_soul",
     # Skills
-    "SkillLoader",
-    "SkillRegistry",
-    "SkillSelector",
-    "TaskPlanner",
-    "SkillMetadata",
-    "SkillPackage",
-    "TaskSpec",
-    "SelectedSkill",
-    "SkillSelectionResult",
-    "build_prompt_with_skills",
+    "select_skills_for_message",
     # MCP
     "MCPServerConfig",
     "MCPConfig",

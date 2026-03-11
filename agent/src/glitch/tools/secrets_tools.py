@@ -1,7 +1,7 @@
 """Secrets Manager management tools for Glitch.
 
 Allows the owner to store and list credentials via Telegram, enabling
-Sentinel and other agents to access new services after deployment.
+Glitch to access new services after deployment.
 
 All operations are restricted to the glitch/* secret prefix.
 """
@@ -27,7 +27,7 @@ def _get_sm_client():
 def store_secret(name: str, value: str) -> str:
     """Create or update a secret in AWS Secrets Manager.
 
-    Use this to store credentials for Sentinel and other agents.
+    Use this to store credentials for Glitch.
     Only secrets under the 'glitch/' prefix are allowed.
 
     Args:

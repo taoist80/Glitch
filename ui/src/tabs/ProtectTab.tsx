@@ -1,12 +1,11 @@
 import { useEffect, useState } from 'react';
-import { Shield, Users, Calendar, Bell, Activity, RefreshCw, Camera, Server } from 'lucide-react';
+import { Shield, Users, Calendar, Bell, RefreshCw, Camera, Server } from 'lucide-react';
 import { api } from '../api/client';
 import type {
   ProtectSummary,
   ProtectEntity,
   ProtectEvent,
   ProtectAlert,
-  ProtectPattern,
   SentinelHealth,
 } from '../types';
 
@@ -52,7 +51,6 @@ export function ProtectTab() {
   const [entities, setEntities] = useState<ProtectEntity[]>([]);
   const [events, setEvents] = useState<ProtectEvent[]>([]);
   const [alerts, setAlerts] = useState<ProtectAlert[]>([]);
-  const [patterns, setPatterns] = useState<ProtectPattern[]>([]);
   const [sentinelHealth, setSentinelHealth] = useState<SentinelHealth | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -65,7 +63,6 @@ export function ProtectTab() {
       api.getProtectEntities({ limit: 50 }),
       api.getProtectEvents({ hours: 24, limit: 30 }),
       api.getProtectAlerts({ limit: 20, unack_only: false }),
-      api.getProtectPatterns({ limit: 20 }),
       api.getSentinelHealth(),
     ]);
     const errors: string[] = [];
@@ -94,13 +91,7 @@ export function ProtectTab() {
       errors.push('Alerts: ' + (results[3].reason?.message ?? 'Failed'));
     }
     if (results[4].status === 'fulfilled') {
-      setPatterns(results[4].value.patterns);
-    } else {
-      setPatterns([]);
-      errors.push('Patterns: ' + (results[4].reason?.message ?? 'Failed'));
-    }
-    if (results[5].status === 'fulfilled') {
-      setSentinelHealth(results[5].value);
+      setSentinelHealth(results[4].value);
     } else {
       setSentinelHealth(null);
     }
@@ -142,7 +133,7 @@ export function ProtectTab() {
             )}
           </h2>
           <p className="text-sm text-base-content/60">
-            Entities, events, alerts, and behaviours from UniFi Protect
+            Entities, events, and alerts from UniFi Protect
           </p>
         </div>
         <button
@@ -353,46 +344,6 @@ export function ProtectTab() {
           </div>
         </section>
 
-        {/* Behaviours / Patterns */}
-        <section>
-          <h3 className="text-lg font-semibold flex items-center gap-2 mb-3">
-            <Activity size={20} /> Behaviours (patterns)
-          </h3>
-          <div className="card bg-base-200">
-            <div className="card-body p-4">
-              {patterns.length === 0 ? (
-                <p className="text-base-content/60">No behaviour patterns recorded.</p>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="table table-sm">
-                    <thead>
-                      <tr>
-                        <th>Camera</th>
-                        <th>Entity</th>
-                        <th>Type</th>
-                        <th>Frequency</th>
-                        <th>Last seen</th>
-                        <th>Confidence</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {patterns.map((p) => (
-                        <tr key={p.pattern_id}>
-                          <td className="font-mono text-xs">{p.camera_id}</td>
-                          <td className="font-mono text-xs">{p.entity_id ?? '—'}</td>
-                          <td>{p.pattern_type}</td>
-                          <td>{(p.frequency ?? 0).toFixed(2)}</td>
-                          <td className="text-xs">{p.last_seen ? formatTs(p.last_seen) : '—'}</td>
-                          <td>{p.confidence != null ? (p.confidence * 100).toFixed(0) + '%' : '—'}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          </div>
-        </section>
       </div>
     </div>
   );

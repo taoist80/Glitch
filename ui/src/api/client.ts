@@ -18,7 +18,6 @@ import type {
   ProtectEntitiesResponse,
   ProtectEventsResponse,
   ProtectAlertsResponse,
-  ProtectPatternsResponse,
   ProtectSummary,
   SentinelHealth,
 } from '../types';
@@ -136,11 +135,6 @@ export const api = {
     if (params?.unack_only === true) sp.set('unack_only', '1');
     const q = sp.toString() ? `?${sp}` : '';
     return fetchJson<ProtectAlertsResponse>(`${API_BASE}/protect/alerts${q}`);
-  },
-
-  async getProtectPatterns(params?: { limit?: number }): Promise<ProtectPatternsResponse> {
-    const q = params?.limit != null ? `?limit=${params.limit}` : '';
-    return fetchJson<ProtectPatternsResponse>(`${API_BASE}/protect/patterns${q}`);
   },
 
   async getSentinelHealth(): Promise<SentinelHealth> {

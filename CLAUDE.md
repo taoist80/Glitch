@@ -39,13 +39,8 @@ agentcore status      # Check runtime status
 agentcore invoke '{"prompt":"hello"}'  # Smoke test the running agent
 ```
 
-### Sentinel Agent (Python — `monitoring-agent/`)
-```bash
-cd monitoring-agent
-pip install -r requirements.txt
-agentcore deploy      # Deploy Sentinel
-agentcore status
-```
+### Sentinel Agent (archived — merged into Glitch)
+The Sentinel agent has been merged into Glitch. The `monitoring-agent/` directory is archived as `_archived_monitoring-agent/`. All ops tools, the Protect subsystem, and skills now live in `agent/`.
 
 ### UI (React + Vite — `ui/`)
 ```bash
@@ -58,20 +53,20 @@ pnpm lint             # ESLint
 
 ## Architecture Overview
 
-This is a two-agent hybrid AI system on AWS AgentCore Runtime:
+This is a **single-agent** AI system on AWS AgentCore Runtime:
 
-- **Glitch** — user-facing conversational agent (HTTP protocol, port 8080). Entry points: Telegram and Web UI (CloudFront → Gateway Lambda → AgentCore).
-- **Sentinel** — autonomous operations brain (A2A protocol, port 9000). Owns all monitoring, networking, and infra ops. Triggered by Glitch via `invoke_sentinel`, can invoke Glitch back via `invoke_glitch_agent`.
+- **Glitch** — unified conversational + ops agent (HTTP protocol, port 8080). Entry points: Telegram and Web UI (CloudFront → Gateway Lambda → AgentCore). Owns all monitoring, surveillance, networking, DNS, and infra ops capabilities (previously split across Sentinel).
 
-Both agents run in **PUBLIC network mode** (no VPC ENIs, no VPC endpoints). The VPC exists only to host the AWS Site-to-Site VPN connecting to the on-premises UDM-Pro/network.
+Runs in **PUBLIC network mode** (no VPC ENIs, no VPC endpoints). The VPC exists only to host RDS (Protect DB) and the AWS Site-to-Site VPN.
 
 ### Key Design Decisions
 
-1. **A2A via InvokeAgentRuntime** — Glitch and Sentinel communicate over `bedrock-agentcore:InvokeAgentRuntime`. ARNs are stored in SSM (`/glitch/sentinel/runtime-arn` and `/glitch/sentinel/glitch-runtime-arn`) with a 5-minute TTL cache in each agent. A `ResourceNotFoundException` busts the cache and re-queries SSM before one retry.
-2. **Strands Agents SDK** — Both agents use the `strands-agents` library. Tools are plain Python functions decorated with `@tool`. Glitch uses `strands-agents[otel]`; Sentinel uses `strands-agents[a2a,otel]`.
-3. **Skill system** — At request time, Glitch runs a `TaskPlanner` → `SkillSelector` pipeline that injects up to 3 skill prompts (from `agent/skills/`) into the system prompt before passing to the Strands agent.
-4. **PUBLIC mode + Ollama proxy** — Agents in PUBLIC mode cannot reach `10.10.110.x` on-prem IPs directly. Ollama access requires a proxy; configure via `GLITCH_OLLAMA_PROXY_HOST` env var.
-5. **`aws_utils.py` pattern** — Both `agent/src/glitch/aws_utils.py` and `monitoring-agent/src/sentinel/aws_utils.py` provide a shared `get_client(service)` factory with a lazy-initialized boto3 client cache. Always use this instead of creating boto3 clients directly in tool files.
+1. **Single agent** — Glitch directly owns all ops tools (CloudWatch, UniFi Protect, UniFi Network, Pi-hole DNS, GitHub, CDK, CloudFormation) without A2A delegation.
+2. **Strands Agents SDK** — Uses `strands-agents[otel]`. Tools are plain Python functions decorated with `@tool`.
+3. **Skill system** — Keyword-based skill matching via `select_skills_for_message()` (from `agent/skills/`). Skills are plain folders with `skill.md` + `metadata.json`.
+4. **Protect subsystem** — `agent/src/glitch/protect/` package with WebSocket poller, event processor, and DB CRUD. Started as an `asyncio.Task` from `main()` before `run_server_async()` so `/ping` health check responds immediately.
+5. **PUBLIC mode + Ollama proxy** — Cannot reach `10.10.110.x` on-prem IPs directly. Ollama access requires a proxy; configure via `GLITCH_OLLAMA_PROXY_HOST` env var.
+6. **`aws_utils.py` pattern** — `agent/src/glitch/aws_utils.py` provides `get_client(service)` factory with lazy-initialized boto3 client cache. Always use this instead of creating boto3 clients directly.
 
 ### CDK Stack Layout
 
@@ -91,7 +86,7 @@ All Lambda functions in `infrastructure/lambda/` use `Code.fromAsset`. They are:
 
 ### Glitch Tool Groups
 
-Tools in `agent/src/glitch/tools/` are registered in `registry.py` by group: `ollama`, `memory`, `telemetry`, `soul`, `ssh`, `sentinel`, `secrets`, `deploy`. The `ToolRegistry` singleton controls which groups are active.
+Tools in `agent/src/glitch/tools/` are registered in `registry.py` by group: `ollama`, `memory`, `telemetry`, `soul`, `ssh`, `secrets`, `deploy`, `cloudwatch`, `ops_telegram`, `github`, `protect`, `pihole`, `unifi_network`, `dns`, `infra_ops`, `compound`. The `ToolRegistry` singleton controls which groups are active.
 
 ### Observability
 
@@ -99,4 +94,4 @@ Tools in `agent/src/glitch/tools/` are registered in `registry.py` by group: `ol
 - Custom telemetry → `/glitch/telemetry` (written by `telemetry.py`)
 - Lambda logs → `/aws/lambda/glitch-*`
 
-When debugging, query the AgentCore log group for the agent under investigation first.
+When debugging, query the AgentCore log group first.

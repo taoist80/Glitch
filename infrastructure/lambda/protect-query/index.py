@@ -70,10 +70,6 @@ def _get_connection():
     return _conn
 
 
-def _row_to_dict(columns: list, row: tuple) -> Dict[str, Any]:
-    return dict(zip(columns, row))
-
-
 def _iso(val) -> Optional[str]:
     """Convert datetime to ISO-8601 string, pass through strings, None → None."""
     if val is None:
@@ -132,7 +128,7 @@ def query_entities(conn, limit: int) -> Dict[str, Any]:
     ]
     entities = []
     for row in rows:
-        d = _row_to_dict(columns, row)
+        d = dict(zip(columns, row))
         d["first_seen"] = _iso(d["first_seen"])
         d["last_seen"] = _iso(d["last_seen"])
         entities.append(d)
@@ -162,7 +158,7 @@ def query_events(conn, hours: int, limit: int) -> Dict[str, Any]:
     ]
     events = []
     for row in rows:
-        d = _row_to_dict(columns, row)
+        d = dict(zip(columns, row))
         d["timestamp"] = _iso(d["timestamp"])
         d["score"] = float(d["score"]) if d["score"] is not None else None
         d["anomaly_score"] = float(d["anomaly_score"] or 0)
@@ -196,7 +192,7 @@ def query_alerts(conn, limit: int, unack_only: bool) -> Dict[str, Any]:
     ]
     alerts = []
     for row in rows:
-        d = _row_to_dict(columns, row)
+        d = dict(zip(columns, row))
         d["timestamp"] = _iso(d["timestamp"])
         d["delivered"] = bool(d["delivered"])
         alerts.append(d)
@@ -266,7 +262,7 @@ def query_cameras(conn, limit: int) -> Dict[str, Any]:
     ]
     cameras = []
     for row in rows:
-        d = _row_to_dict(columns, row)
+        d = dict(zip(columns, row))
         d["updated_at"] = _iso(d["updated_at"])
         for bool_key in ("is_mic_enabled", "has_hdr", "has_mic", "has_speaker",
                          "has_led_status", "has_full_hd_snapshot"):
@@ -296,7 +292,7 @@ def query_patterns(conn, limit: int) -> Dict[str, Any]:
     ]
     patterns = []
     for row in rows:
-        d = _row_to_dict(columns, row)
+        d = dict(zip(columns, row))
         d["last_seen"] = _iso(d["last_seen"])
         d["frequency"] = float(d["frequency"] or 1.0)
         d["confidence"] = float(d["confidence"] or 0.0)

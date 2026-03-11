@@ -1,25 +1,38 @@
-# Glitch Protect Surveillance (Delegated to Sentinel)
+# Glitch Protect Surveillance
 
-All UniFi Protect, UniFi Network, Pi-hole DNS, and security operations live in the **Sentinel agent**.
+You own all UniFi Protect, UniFi Network, Pi-hole DNS, and security operations directly. Use the built-in tools — do **not** delegate to another agent.
 
-When surveillance, network, or security questions arise, delegate using `invoke_sentinel`.
+## Tools Available
 
-## Delegation Examples
+| Category | Tools |
+|---|---|
+| Cameras | `protect_get_cameras`, `protect_get_camera_snapshot` |
+| Events | `protect_get_events`, `protect_get_recent_events` |
+| Entities | `protect_get_entities`, `protect_register_entity`, `protect_get_entity_dossier` |
+| Alerts | `protect_get_alerts`, `protect_get_unacknowledged_alerts`, `protect_acknowledge_alert` |
+| Analysis | `analyze_and_alert`, `security_correlation_scan` |
+| Network | `get_network_clients`, `get_unifi_devices`, `get_wifi_networks` |
+| DNS | `get_pihole_stats`, `get_pihole_top_domains`, `manage_pihole_dns` |
 
-```python
-invoke_sentinel("Check recent UniFi Protect events — any motion or person detections in the last 6 hours?")
-invoke_sentinel("Check for suspicious DNS activity and unknown devices on the network")
-invoke_sentinel("Is there anything unusual on the network or cameras right now?")
-invoke_sentinel("Search entities for [name/description] and return their sighting history")
-invoke_sentinel("Are all cameras online and recording?")
-invoke_sentinel("Run a security correlation scan for the last 30 minutes")
-```
+## Common Tasks
 
-## What Sentinel Handles
+**"Are all cameras online?"**
+→ Call `protect_get_cameras` directly.
 
-- All `protect_*` tools (13 core always active + 35 extended for deep investigations)
-- All `unifi_*` tools (clients, APs, switches, VPN, WiFi, firewall, topology)
-- All `pihole_*` and `dns_*` tools (DNS records, analytics, threat detection)
-- `security_correlation_scan` — protect events + network clients + DNS in one call
-- `analyze_and_alert` — full pipeline: fetch events → analyze → decide → alert
-- Automatic Telegram alerts for security events
+**"Any motion in the last hour?"**
+→ Call `protect_get_recent_events` with appropriate time window.
+
+**"Who is at the front door?"**
+→ Call `protect_get_events` filtered by camera, then `protect_get_entity_dossier` for matches.
+
+**"Run a security check"**
+→ Call `security_correlation_scan` — combines protect events + network clients + DNS in one call.
+
+**"Check network for unknown devices"**
+→ Call `get_network_clients` and compare against known entities.
+
+## Notes
+
+- Protect host: `home.awoo.agency:32443` (forwards to UDM-Pro on-prem)
+- Auth: API key (`glitch/protect-api-key` in Secrets Manager)
+- Camera snapshots require a camera ID — get it from `protect_get_cameras` first

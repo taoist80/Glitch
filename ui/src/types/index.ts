@@ -7,9 +7,7 @@ export type Tab =
   | 'telemetry'
   | 'mcp'
   | 'skills'
-  | 'unifi'
   | 'protect'
-  | 'pihole'
   | 'settings';
 
 // --- UniFi Protect / Surveillance (entities, events, alerts, behaviours) ---
@@ -52,16 +50,6 @@ export interface ProtectAlert {
   user_response?: string;
 }
 
-export interface ProtectPattern {
-  pattern_id: string;
-  camera_id: string;
-  entity_id?: string;
-  entity_type?: string;
-  pattern_type: string;
-  frequency?: number;
-  last_seen?: string;
-  confidence?: number;
-}
 
 export interface ProtectCamera {
   camera_id: string;
@@ -119,10 +107,6 @@ export interface ProtectAlertsResponse {
   total: number;
 }
 
-export interface ProtectPatternsResponse {
-  patterns: ProtectPattern[];
-  total: number;
-}
 
 export interface SentinelHealth {
   status: string;

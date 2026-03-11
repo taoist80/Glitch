@@ -1,0 +1,230 @@
+#!/bin/bash
+# setup-protect-db.sh
+#
+# Creates the glitch_protect Postgres database, user, extensions, and schema.
+# Run this once on the machine hosting the on-prem Postgres instance.
+#
+# Requirements:
+#   - PostgreSQL 15+ installed and running
+#   - psql available on PATH
+#   - pgvector extension installed (https://github.com/pgvector/pgvector)
+#     Ubuntu/Debian: sudo apt install postgresql-16-pgvector
+#     macOS:         brew install pgvector
+#   - Run as a superuser (postgres or a role with CREATEDB + CREATEROLE)
+#
+# Usage:
+#   ./setup-protect-db.sh [options]
+#
+# Options:
+#   --db-name NAME       Database name (default: glitch_protect)
+#   --db-user USER       Application user to create (default: glitch)
+#   --db-password PASS   Password for the app user (prompted if omitted)
+#   --pg-user USER       Postgres superuser to connect as (default: postgres)
+#   --pg-host HOST       Postgres host (default: localhost)
+#   --pg-port PORT       Postgres port (default: 5432)
+#   --schema-file PATH   Path to schema.sql (default: auto-detected from script location)
+#   --skip-create-db     Skip database creation (if it already exists)
+#   --skip-create-user   Skip user creation (if they already exist)
+#
+# Examples:
+#   ./setup-protect-db.sh
+#   ./setup-protect-db.sh --db-password mysecretpassword
+#   ./setup-protect-db.sh --pg-user mysuper --db-name protect_prod
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+DEFAULT_SCHEMA="${REPO_ROOT}/monitoring-agent/src/sentinel/protect/schema.sql"
+
+# Defaults
+DB_NAME="glitch_protect"
+DB_USER="glitch"
+DB_PASSWORD=""
+PG_USER="postgres"
+PG_HOST="localhost"
+PG_PORT="5432"
+SCHEMA_FILE="$DEFAULT_SCHEMA"
+SKIP_CREATE_DB=false
+SKIP_CREATE_USER=false
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --db-name)       DB_NAME="$2";       shift 2 ;;
+        --db-user)       DB_USER="$2";       shift 2 ;;
+        --db-password)   DB_PASSWORD="$2";   shift 2 ;;
+        --pg-user)       PG_USER="$2";       shift 2 ;;
+        --pg-host)       PG_HOST="$2";       shift 2 ;;
+        --pg-port)       PG_PORT="$2";       shift 2 ;;
+        --schema-file)   SCHEMA_FILE="$2";   shift 2 ;;
+        --skip-create-db)   SKIP_CREATE_DB=true;   shift ;;
+        --skip-create-user) SKIP_CREATE_USER=true; shift ;;
+        --help)
+            head -n 35 "$0" | tail -n +3 | sed 's/^# //'
+            exit 0
+            ;;
+        *) echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+done
+
+log()     { echo "[setup-protect-db] $*"; }
+log_ok()  { echo "[setup-protect-db] ✓ $*"; }
+log_err() { echo "[setup-protect-db] ERROR: $*" >&2; }
+
+# Prompt for password if not provided
+if [[ -z "$DB_PASSWORD" ]]; then
+    read -r -s -p "Password for Postgres user '${DB_USER}': " DB_PASSWORD
+    echo
+    read -r -s -p "Confirm password: " DB_PASSWORD_CONFIRM
+    echo
+    if [[ "$DB_PASSWORD" != "$DB_PASSWORD_CONFIRM" ]]; then
+        log_err "Passwords do not match."
+        exit 1
+    fi
+fi
+
+if [[ -z "$DB_PASSWORD" ]]; then
+    log_err "Password cannot be empty."
+    exit 1
+fi
+
+# Validate schema file
+if [[ ! -f "$SCHEMA_FILE" ]]; then
+    log_err "Schema file not found: $SCHEMA_FILE"
+    log_err "Pass --schema-file /path/to/schema.sql or run from the repo root."
+    exit 1
+fi
+
+# Helper: run psql as superuser against a given database
+pg_exec() {
+    local db="$1"; shift
+    PGPASSWORD="" psql \
+        --host="$PG_HOST" \
+        --port="$PG_PORT" \
+        --username="$PG_USER" \
+        --dbname="$db" \
+        --no-password \
+        "$@"
+}
+
+# Helper: run psql as the app user against the app database
+pg_exec_app() {
+    PGPASSWORD="$DB_PASSWORD" psql \
+        --host="$PG_HOST" \
+        --port="$PG_PORT" \
+        --username="$DB_USER" \
+        --dbname="$DB_NAME" \
+        "$@"
+}
+
+log "Starting Protect DB setup"
+log "  Host:     ${PG_HOST}:${PG_PORT}"
+log "  Database: ${DB_NAME}"
+log "  App user: ${DB_USER}"
+log "  Schema:   ${SCHEMA_FILE}"
+echo
+
+# ── Step 1: Check pgvector is installed ────────────────────────────────────────
+log "Checking for pgvector extension..."
+if ! pg_exec postgres -tAc "SELECT 1 FROM pg_available_extensions WHERE name = 'vector'" 2>/dev/null | grep -q 1; then
+    log_err "pgvector extension is not installed."
+    log_err "Install it first:"
+    log_err "  Ubuntu/Debian: sudo apt install postgresql-\$(pg_lscluster | awk '{print \$1}')-pgvector"
+    log_err "  macOS:         brew install pgvector"
+    log_err "  From source:   https://github.com/pgvector/pgvector"
+    exit 1
+fi
+log_ok "pgvector is available"
+
+# ── Step 2: Create app user ────────────────────────────────────────────────────
+if [[ "$SKIP_CREATE_USER" == false ]]; then
+    log "Creating database user '${DB_USER}'..."
+    pg_exec postgres -c "
+        DO \$\$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${DB_USER}') THEN
+                CREATE ROLE \"${DB_USER}\" WITH LOGIN PASSWORD '${DB_PASSWORD}';
+                RAISE NOTICE 'User ${DB_USER} created.';
+            ELSE
+                ALTER ROLE \"${DB_USER}\" WITH PASSWORD '${DB_PASSWORD}';
+                RAISE NOTICE 'User ${DB_USER} already exists — password updated.';
+            END IF;
+        END
+        \$\$;
+    "
+    log_ok "User '${DB_USER}' ready"
+else
+    log "Skipping user creation (--skip-create-user)"
+fi
+
+# ── Step 3: Create database ────────────────────────────────────────────────────
+if [[ "$SKIP_CREATE_DB" == false ]]; then
+    log "Creating database '${DB_NAME}'..."
+    if pg_exec postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '${DB_NAME}'" | grep -q 1; then
+        log "Database '${DB_NAME}' already exists — skipping creation"
+    else
+        pg_exec postgres -c "CREATE DATABASE \"${DB_NAME}\" OWNER \"${DB_USER}\" ENCODING 'UTF8';"
+        log_ok "Database '${DB_NAME}' created"
+    fi
+else
+    log "Skipping database creation (--skip-create-db)"
+fi
+
+# ── Step 4: Grant privileges ───────────────────────────────────────────────────
+log "Granting privileges..."
+pg_exec "$DB_NAME" -c "GRANT ALL PRIVILEGES ON DATABASE \"${DB_NAME}\" TO \"${DB_USER}\";"
+pg_exec "$DB_NAME" -c "ALTER SCHEMA public OWNER TO \"${DB_USER}\";"
+log_ok "Privileges granted"
+
+# ── Step 5: Install extensions ─────────────────────────────────────────────────
+log "Installing extensions (vector, pg_trgm)..."
+pg_exec "$DB_NAME" -c "CREATE EXTENSION IF NOT EXISTS vector;"
+pg_exec "$DB_NAME" -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
+log_ok "Extensions installed"
+
+# ── Step 6: Apply schema ───────────────────────────────────────────────────────
+log "Applying schema from ${SCHEMA_FILE}..."
+# Run schema as superuser so extension-owned objects can be created, then reassign
+pg_exec "$DB_NAME" --file="$SCHEMA_FILE"
+
+# Grant table/sequence access to app user
+pg_exec "$DB_NAME" -c "
+    GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO \"${DB_USER}\";
+    GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO \"${DB_USER}\";
+    ALTER DEFAULT PRIVILEGES IN SCHEMA public
+        GRANT ALL PRIVILEGES ON TABLES TO \"${DB_USER}\";
+    ALTER DEFAULT PRIVILEGES IN SCHEMA public
+        GRANT ALL PRIVILEGES ON SEQUENCES TO \"${DB_USER}\";
+"
+log_ok "Schema applied and privileges set"
+
+# ── Step 7: Verify ─────────────────────────────────────────────────────────────
+log "Verifying tables..."
+TABLE_COUNT=$(pg_exec_app -tAc "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public'")
+log_ok "${TABLE_COUNT} tables present in ${DB_NAME}"
+
+pg_exec_app -tAc "
+SELECT table_name
+FROM information_schema.tables
+WHERE table_schema = 'public'
+ORDER BY table_name;
+" | while read -r t; do
+    echo "        • $t"
+done
+
+echo
+log_ok "Setup complete!"
+echo
+echo "  Next: update the Secrets Manager secret 'glitch/protect-db':"
+echo
+echo "  aws secretsmanager put-secret-value \\"
+echo "    --secret-id glitch/protect-db \\"
+echo "    --region us-west-2 \\"
+echo "    --secret-string '{"
+echo "      \"host\": \"${PG_HOST}\","
+echo "      \"port\": ${PG_PORT},"
+echo "      \"dbname\": \"${DB_NAME}\","
+echo "      \"username\": \"${DB_USER}\","
+echo "      \"password\": \"<your-password>\""
+echo "    }'"

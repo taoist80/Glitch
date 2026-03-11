@@ -1,7 +1,7 @@
 """DDNS Updater webhook Lambda.
 
 Called by the home network (HTTP POST to the Function URL) to:
-  1. Update home.awoo.agency A record in Porkbun DNS to the caller's public IP
+  1. Update home.awoo.agency A record in Cloudflare DNS to the caller's public IP
   2. Update the WAF IP set (GlitchAllowedIPs) with the new CIDR
   3. Write the new CIDR to SSM /glitch/waf/allowed-ipv4
 
@@ -15,7 +15,7 @@ Usage from home network (run every 5 minutes via cron/task scheduler):
   curl -s -X POST https://<DDNS_UPDATER_URL> \\
     -H "Authorization: Bearer $TOKEN"
 
-UDM-Pro: add a Task under System → Scheduled Tasks that runs the curl command above.
+UDM-Pro: add a Task under System > Scheduled Tasks that runs the curl command above.
 """
 
 import json
@@ -24,7 +24,7 @@ import urllib.request
 
 import boto3
 
-PORKBUN_API_BASE = "https://api.porkbun.com/api/json/v3"
+CLOUDFLARE_API_BASE = "https://api.cloudflare.com/client/v4"
 
 DDNS_SUBDOMAIN = os.environ.get("DDNS_SUBDOMAIN", "home")
 DDNS_DOMAIN = os.environ.get("DDNS_DOMAIN", "awoo.agency")
@@ -33,11 +33,10 @@ WAF_IP_SET_ID = os.environ.get("WAF_IP_SET_ID", "")
 WAF_IP_SET_NAME = os.environ.get("WAF_IP_SET_NAME", "GlitchAllowedIPs")
 
 SSM_PARAM = os.environ.get("SSM_PARAM", "/glitch/waf/allowed-ipv4")
-PORKBUN_SECRET_NAME = os.environ.get("PORKBUN_SECRET_NAME", "glitch/porkbun-api")
+CLOUDFLARE_SECRET_NAME = os.environ.get("CLOUDFLARE_SECRET_NAME", "glitch/cloudflare-api")
 DDNS_TOKEN_SECRET_ARN = os.environ.get("DDNS_TOKEN_SECRET_ARN", "")
 
-# Porkbun secret lives in us-west-2; token secret lives in us-east-1 (this stack's region)
-PORKBUN_SECRET_REGION = os.environ.get("PORKBUN_SECRET_REGION", "us-west-2")
+CLOUDFLARE_SECRET_REGION = os.environ.get("CLOUDFLARE_SECRET_REGION", "us-east-1")
 TOKEN_SECRET_REGION = os.environ.get("TOKEN_SECRET_REGION", "us-east-1")
 
 
@@ -54,20 +53,17 @@ def _get_secret(secret_id: str, region: str) -> str:
     return client.get_secret_value(SecretId=secret_id)["SecretString"]
 
 
-def _get_porkbun_keys() -> tuple[str, str]:
-    raw = _get_secret(PORKBUN_SECRET_NAME, PORKBUN_SECRET_REGION)
+def _get_cloudflare_creds() -> tuple[str, str]:
+    """Return (api_token, zone_id) from Secrets Manager."""
+    raw = _get_secret(CLOUDFLARE_SECRET_NAME, CLOUDFLARE_SECRET_REGION)
     secret = json.loads(raw)
-    api_key = (
-        secret.get("apikey") or secret.get("api_key") or secret.get("apiKey")
-        or secret.get("API_KEY") or secret.get("key") or ""
-    )
-    secret_key = (
-        secret.get("secretapikey") or secret.get("secret_api_key") or secret.get("secretApiKey")
-        or secret.get("SECRET_KEY") or secret.get("secret") or ""
-    )
-    if not api_key or not secret_key:
-        raise ValueError("Porkbun API keys not found in secret")
-    return api_key, secret_key
+    api_token = secret.get("api_token") or secret.get("apiToken") or secret.get("token") or ""
+    zone_id = secret.get("zone_id") or secret.get("zoneId") or os.environ.get("CLOUDFLARE_ZONE_ID", "")
+    if not api_token:
+        raise ValueError("Cloudflare API token not found in secret")
+    if not zone_id:
+        raise ValueError("Cloudflare zone_id not found in secret or env")
+    return api_token, zone_id
 
 
 def _get_caller_ip(event: dict) -> str:
@@ -84,7 +80,7 @@ def _get_caller_ip(event: dict) -> str:
 def _validate_token(event: dict) -> bool:
     """Validate Authorization: Bearer <token> header against Secrets Manager."""
     if not DDNS_TOKEN_SECRET_ARN:
-        return True  # auth not configured — skip
+        return True
     auth = ((event.get("headers") or {}).get("authorization") or "")
     if not auth.lower().startswith("bearer "):
         return False
@@ -97,38 +93,56 @@ def _validate_token(event: dict) -> bool:
     return provided == expected
 
 
-def _porkbun_request(path: str, body: dict) -> dict:
-    api_key, secret_key = _get_porkbun_keys()
-    body = {**body, "apikey": api_key, "secretapikey": secret_key}
-    data = json.dumps(body).encode()
+def _cloudflare_request(method: str, path: str, api_token: str, body: dict = None) -> dict:
+    """Make an authenticated request to the Cloudflare API."""
+    data = json.dumps(body).encode() if body else None
     req = urllib.request.Request(
-        f"{PORKBUN_API_BASE}{path}",
+        f"{CLOUDFLARE_API_BASE}{path}",
         data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_token}",
+            "Content-Type": "application/json",
+        },
+        method=method,
     )
     with urllib.request.urlopen(req, timeout=10) as resp:
         return json.loads(resp.read())
 
 
-def _update_porkbun_dns(ip: str) -> None:
-    """Update (or create) the DDNS_SUBDOMAIN.DDNS_DOMAIN A record."""
-    result = _porkbun_request(
-        f"/dns/editByNameType/{DDNS_DOMAIN}/A/{DDNS_SUBDOMAIN}",
-        {"content": ip, "ttl": "600"},
+def _update_cloudflare_dns(ip: str) -> None:
+    """Update (or create) the DDNS_SUBDOMAIN.DDNS_DOMAIN A record in Cloudflare."""
+    api_token, zone_id = _get_cloudflare_creds()
+    fqdn = f"{DDNS_SUBDOMAIN}.{DDNS_DOMAIN}"
+
+    # List existing A records for this FQDN
+    result = _cloudflare_request(
+        "GET",
+        f"/zones/{zone_id}/dns_records?type=A&name={fqdn}",
+        api_token,
     )
-    if result.get("status") == "SUCCESS":
-        print(f"Porkbun: updated {DDNS_SUBDOMAIN}.{DDNS_DOMAIN} → {ip}")
-        return
-    # editByNameType may fail if the record doesn't exist yet — try create
-    result2 = _porkbun_request(
-        f"/dns/create/{DDNS_DOMAIN}",
-        {"name": DDNS_SUBDOMAIN, "type": "A", "content": ip, "ttl": "600"},
-    )
-    if result2.get("status") == "SUCCESS":
-        print(f"Porkbun: created {DDNS_SUBDOMAIN}.{DDNS_DOMAIN} → {ip}")
+    records = result.get("result", [])
+
+    if records:
+        record_id = records[0]["id"]
+        current_ip = records[0].get("content", "")
+        if current_ip == ip:
+            print(f"Cloudflare: {fqdn} already points to {ip}, no update needed")
+            return
+        _cloudflare_request(
+            "PATCH",
+            f"/zones/{zone_id}/dns_records/{record_id}",
+            api_token,
+            {"content": ip, "ttl": 600, "proxied": False},
+        )
+        print(f"Cloudflare: updated {fqdn} → {ip}")
     else:
-        raise RuntimeError(f"Porkbun DNS update failed: {result2}")
+        _cloudflare_request(
+            "POST",
+            f"/zones/{zone_id}/dns_records",
+            api_token,
+            {"type": "A", "name": DDNS_SUBDOMAIN, "content": ip, "ttl": 600, "proxied": False},
+        )
+        print(f"Cloudflare: created {fqdn} → {ip}")
 
 
 def _update_waf_ip_set(ip_cidr: str) -> None:
@@ -166,7 +180,7 @@ def handler(event: dict, context) -> dict:
         ip_cidr = f"{ip}/32"
         print(f"Caller IP: {ip}")
 
-        _update_porkbun_dns(ip)
+        _update_cloudflare_dns(ip)
         _update_waf_ip_set(ip_cidr)
         _update_ssm(ip_cidr)
 

@@ -1,0 +1,19 @@
+{
+  "id": "infrastructure-ops",
+  "version": "1.0.0",
+  "description": "Manage AWS CloudFormation and CDK infrastructure: view stack status, detect drift, preview changes with cdk diff, deploy stacks (with confirmation), and roll back failed deployments.",
+  "triggers": [
+    "deploy", "stack", "cloudformation", "cdk", "infrastructure", "drift",
+    "rollback", "stack status", "diff", "synth", "validate template",
+    "deployment failed", "stack failed", "infrastructure change", "infra ops",
+    "cfn", "update stack", "check drift", "infrastructure health"
+  ],
+  "tags": ["infrastructure", "cloudformation", "cdk", "deployment", "aws"],
+  "priority": 75,
+  "model_allowlist": null,
+  "model_denylist": null,
+  "required_tools": [
+    "list_cfn_stacks_status", "check_cfn_drift", "cdk_diff", "cdk_deploy_stack"
+  ],
+  "author": "Glitch"
+}

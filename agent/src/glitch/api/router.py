@@ -273,7 +273,7 @@ async def get_status() -> StatusResponse:
         session_id=str(status.get("session_id", "")),
         memory_id=str(status.get("memory_id", "")),
         connected=True,
-        skills_loaded=int(status.get("skills_loaded", len(agent.skill_registry))),
+        skills_loaded=0,
         mcp_servers_connected=int(mcp_status.get("connected_clients", 0)),
         routing_stats=_sanitize_for_json(routing) if isinstance(routing, dict) else {},
         structured_memory=_sanitize_for_json(memory) if isinstance(memory, dict) else {},
@@ -685,9 +685,6 @@ async def toggle_skill(skill_id: str, request: SkillToggleRequest) -> SkillToggl
     """Enable or disable a skill. Persists to DynamoDB if available."""
     global _disabled_skills
     agent = _get_agent()
-    
-    if skill_id not in agent.skill_registry.skills_by_id:
-        raise HTTPException(status_code=404, detail=f"Skill '{skill_id}' not found")
     
     if request.enabled:
         _disabled_skills.discard(skill_id)

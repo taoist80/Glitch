@@ -20,6 +20,9 @@ import asyncio
 import json
 import logging
 import os
+import time as _time
+from datetime import datetime, timedelta, timezone
+from typing import Optional as _Optional
 
 # Strands SDK: allow non-interactive tool execution (required for AgentCore/serverless).
 # Set before any Strands/glitch.agent imports.
@@ -234,6 +237,308 @@ def get_webhook_url() -> Optional[str]:
     return None
 
 
+_startup_time = _time.time()
+
+# Component health state — updated by background tasks, readable via /api/status.
+_protect_health: dict = {
+    "protect_configured": False,
+    "protect_db": "unchecked",
+    "protect_poller": "stopped",
+    "protect_processor": "stopped",
+}
+
+_protect_poller: _Optional[object] = None
+_protect_processor: _Optional[object] = None
+
+
+async def _start_protect_subsystem() -> None:
+    """Initialize Protect DB, poller, and event processor in the background.
+
+    Launched as an asyncio task from main() before run_server_async() so the
+    /ping health check can respond immediately while SSM, DB, and WS connections
+    complete in the background.
+    """
+    global _protect_poller, _protect_processor
+
+    # Wait for the health check to pass before making outbound connections.
+    await asyncio.sleep(10)
+
+    from glitch.protect.config import is_protect_configured, get_protect_config
+    from glitch.protect.client import get_client as get_protect_client
+
+    try:
+        configured = is_protect_configured()
+    except Exception as exc:
+        logger.warning("Could not check Protect config: %s — skipping", exc)
+        configured = False
+
+    _protect_health["protect_configured"] = configured
+    if not configured:
+        logger.info("Protect not configured — skipping event poller")
+        return
+
+    # Start pool initialisation as a non-blocking background task.
+    # Tools call get_pool() which fast-fails with RuntimeError when the pool
+    # isn't ready yet, so they never block the request path.
+    async def _db_init_watcher():
+        from glitch.protect.db import init_pool_background, is_pool_available
+        await init_pool_background()
+        if is_pool_available():
+            _protect_health["protect_db"] = "ok"
+            logger.info("Protect DB pool initialised")
+        else:
+            _protect_health["protect_db"] = "failed"
+
+    asyncio.create_task(_db_init_watcher(), name="protect-db-init")
+
+    client = get_protect_client()
+    config = get_protect_config()
+
+    if client.auth_mode == "api_key":
+        logger.info("Protect auth: API key — WS streams use X-API-KEY header (no login needed)")
+    else:
+        try:
+            await client._authenticate()
+            logger.info("Protect pre-auth (cookie) succeeded")
+        except Exception as auth_exc:
+            logger.warning("Protect pre-auth failed: %s — poller will retry with backoff", auth_exc)
+
+    from glitch.protect.poller import ProtectEventPoller
+    poller = ProtectEventPoller(protect_client=client, config=config)
+    await poller.start()
+    _protect_poller = poller
+    _protect_health["protect_poller"] = "running"
+
+    try:
+        from glitch.protect.event_processor import ProtectEventProcessor
+        cameras = await client.get_cameras()
+        camera_ids = [c["id"] for c in cameras if isinstance(c, dict)]
+        processor = ProtectEventProcessor()
+        await processor.start(
+            camera_ids=camera_ids,
+            check_interval=float(os.environ.get("GLITCH_PROTECT_CHECK_INTERVAL", "120")),
+        )
+        _protect_processor = processor
+        _protect_health["protect_processor"] = "running"
+        logger.info(
+            "Event processor started for %d cameras at %ss interval",
+            len(camera_ids),
+            os.environ.get("GLITCH_PROTECT_CHECK_INTERVAL", "120"),
+        )
+    except Exception as exc:
+        _protect_health["protect_processor"] = f"error: {exc}"
+        logger.warning(
+            "Failed to start event processor: %s — continuing without it", exc, exc_info=True
+        )
+
+    asyncio.create_task(_daily_report_loop(), name="daily-report")
+    asyncio.create_task(_daily_briefing_loop(), name="daily-briefing")
+    asyncio.create_task(_weekly_fp_learning_loop(), name="weekly-fp-learning")
+    asyncio.create_task(_weekly_threshold_optimization_loop(), name="weekly-threshold-opt")
+    asyncio.create_task(_health_writer_loop(), name="health-writer")
+    logger.info("Protect subsystem started (poller + processor + daily-report + daily-briefing + weekly-learning + health-writer)")
+
+
+async def _daily_report_loop() -> None:
+    """Send a daily surveillance summary to Telegram at 08:00 UTC."""
+    report_hour = int(os.environ.get("GLITCH_PROTECT_REPORT_HOUR", "8"))
+    while True:
+        now = datetime.now(timezone.utc)
+        next_run = now.replace(hour=report_hour, minute=0, second=0, microsecond=0)
+        if next_run <= now:
+            next_run += timedelta(days=1)
+        await asyncio.sleep((next_run - now).total_seconds())
+
+        try:
+            from glitch.protect.learning import generate_security_report
+            from glitch.tools.ops_telegram_tools import send_telegram_alert
+
+            now = datetime.now(timezone.utc)
+            yesterday_dt = now - timedelta(days=1)
+            result = await generate_security_report(start_date=yesterday_dt, end_date=now)
+            report = result.get("report_data", result)
+
+            event_stats = report.get("event_statistics", [])
+            total = sum(row.get("count", 0) for row in event_stats) if isinstance(event_stats, list) else 0
+            yesterday = yesterday_dt.date()
+            alerts = report.get("alert_accuracy", {}).get("total_alerts", 0)
+            rec_list = report.get("recommendations", [])
+            recommendations = "\n".join(f"• {r}" for r in rec_list) if rec_list else ""
+
+            lines = [
+                f"📊 <b>Daily Surveillance Report — {yesterday}</b>",
+                "",
+                f"Events processed: {total}",
+                f"Alerts sent: {alerts}",
+            ]
+            if recommendations:
+                lines += ["", recommendations]
+
+            await send_telegram_alert.__wrapped__(
+                message="\n".join(lines),
+                severity="low",
+                component="DailyReport",
+            )
+            logger.info("Daily report sent for %s", yesterday)
+        except Exception as exc:
+            logger.error("Daily report failed: %s", exc, exc_info=True)
+
+
+async def _daily_briefing_loop() -> None:
+    """Send a daily security briefing to Telegram covering overnight activity."""
+    briefing_hour = int(os.environ.get("GLITCH_PROTECT_BRIEFING_HOUR", "7"))
+    while True:
+        now = datetime.now(timezone.utc)
+        next_run = now.replace(hour=briefing_hour, minute=0, second=0, microsecond=0)
+        if next_run <= now:
+            next_run += timedelta(days=1)
+        await asyncio.sleep((next_run - now).total_seconds())
+
+        try:
+            from glitch.protect.learning import generate_daily_briefing
+            from glitch.tools.ops_telegram_tools import send_telegram_alert
+
+            result = await generate_daily_briefing()
+            message = result.get("briefing_message", "")
+            if message:
+                await send_telegram_alert.__wrapped__(
+                    message=message,
+                    severity="low",
+                    component="DailyBriefing",
+                )
+            logger.info("Daily briefing sent: assessment=%s", result.get("assessment"))
+        except Exception as exc:
+            logger.error("Daily briefing failed: %s", exc, exc_info=True)
+
+
+async def _weekly_fp_learning_loop() -> None:
+    """Run false-positive root-cause analysis every Sunday and auto-apply corrections."""
+    fp_learn_hour = int(os.environ.get("GLITCH_PROTECT_FP_LEARN_HOUR", "6"))
+    while True:
+        now = datetime.now(timezone.utc)
+        # Advance to the next Sunday (weekday 6) at the configured hour
+        days_until_sunday = (6 - now.weekday()) % 7
+        if days_until_sunday == 0:
+            candidate = now.replace(hour=fp_learn_hour, minute=0, second=0, microsecond=0)
+            if candidate <= now:
+                days_until_sunday = 7
+        next_run = (now + timedelta(days=days_until_sunday)).replace(
+            hour=fp_learn_hour, minute=0, second=0, microsecond=0
+        )
+        await asyncio.sleep((next_run - now).total_seconds())
+
+        try:
+            from glitch.protect.learning import learn_from_false_positives
+            from glitch.tools.ops_telegram_tools import send_telegram_alert
+
+            result = await learn_from_false_positives(lookback_days=7)
+            applied = result.get("corrections_applied", [])
+            analyzed = result.get("false_positives_analyzed", 0)
+            logger.info(
+                "FP learning complete: analyzed=%d applied=%d", analyzed, len(applied)
+            )
+            if applied:
+                await send_telegram_alert.__wrapped__(
+                    message=(
+                        f"🧠 <b>Weekly FP Learning</b>\n\n"
+                        f"Analyzed {analyzed} false positives.\n"
+                        f"Auto-applied {len(applied)} corrections."
+                    ),
+                    severity="low",
+                    component="FPLearning",
+                )
+        except Exception as exc:
+            logger.error("Weekly FP learning failed: %s", exc, exc_info=True)
+
+
+async def _weekly_threshold_optimization_loop() -> None:
+    """Optimize per-camera alert thresholds every Sunday based on FP feedback."""
+    fp_learn_hour = int(os.environ.get("GLITCH_PROTECT_FP_LEARN_HOUR", "6"))
+    opt_hour = fp_learn_hour + 1  # Run one hour after FP learning
+    while True:
+        now = datetime.now(timezone.utc)
+        days_until_sunday = (6 - now.weekday()) % 7
+        if days_until_sunday == 0:
+            candidate = now.replace(hour=opt_hour, minute=0, second=0, microsecond=0)
+            if candidate <= now:
+                days_until_sunday = 7
+        next_run = (now + timedelta(days=days_until_sunday)).replace(
+            hour=opt_hour, minute=0, second=0, microsecond=0
+        )
+        await asyncio.sleep((next_run - now).total_seconds())
+
+        try:
+            from glitch.protect.learning import optimize_alert_thresholds
+            from glitch.tools.ops_telegram_tools import send_telegram_alert
+
+            result = await optimize_alert_thresholds(lookback_days=30)
+            applied = result.get("applied_changes", [])
+            cameras = result.get("cameras_analyzed", 0)
+            logger.info(
+                "Threshold optimization complete: cameras=%d applied=%d", cameras, len(applied)
+            )
+            if applied:
+                await send_telegram_alert.__wrapped__(
+                    message=(
+                        f"⚙️ <b>Weekly Threshold Optimization</b>\n\n"
+                        f"Analyzed {cameras} cameras.\n"
+                        f"Updated thresholds for {len(applied)} camera(s)."
+                    ),
+                    severity="low",
+                    component="ThresholdOpt",
+                )
+        except Exception as exc:
+            logger.error("Weekly threshold optimization failed: %s", exc, exc_info=True)
+
+
+async def _health_writer_loop() -> None:
+    """Write Glitch component health to the Protect DB every 60 seconds."""
+    while True:
+        try:
+            from glitch.protect.db import upsert_sentinel_health
+            now = int(_time.time())
+            db_ok = _protect_health.get("protect_db") == "ok"
+            poller_ok = _protect_health.get("protect_poller") == "running"
+            overall = "Healthy" if (db_ok and poller_ok) else "Degraded"
+            await upsert_sentinel_health(
+                status=overall,
+                protect_db=str(_protect_health.get("protect_db", "unchecked")),
+                protect_poller=str(_protect_health.get("protect_poller", "stopped")),
+                protect_processor=str(_protect_health.get("protect_processor", "stopped")),
+                protect_configured=bool(_protect_health.get("protect_configured", False)),
+                uptime_seconds=now - int(_startup_time),
+            )
+        except Exception as exc:
+            logger.debug("Health writer: could not update DB: %s", exc)
+        await asyncio.sleep(60)
+
+
+async def _shutdown_protect_subsystem() -> None:
+    """Gracefully stop the Protect poller, processor, and DB pool."""
+    global _protect_processor, _protect_poller
+    if _protect_processor is not None:
+        try:
+            await _protect_processor.stop()
+        except Exception:
+            pass
+    if _protect_poller is not None:
+        try:
+            _protect_poller.stop()
+        except Exception:
+            pass
+    try:
+        from glitch.protect.db import close_pool
+        await close_pool()
+    except Exception:
+        pass
+    try:
+        from glitch.protect.client import get_client as get_protect_client
+        await get_protect_client().close()
+    except Exception:
+        pass
+    logger.info("Protect subsystem shutdown complete")
+
+
 async def main() -> None:
     """Main execution function.
     
@@ -347,7 +652,12 @@ async def main() -> None:
             logger.info("Starting HTTP server")
             server_config = get_server_config()
             print(f"Starting HTTP server on {server_config.host}:{server_config.port}")
-            
+
+            # Start the Protect subsystem as a background task before entering the
+            # uvicorn event loop. Both share the same asyncio loop so DB connections,
+            # WebSocket pollers, and the daily-report scheduler run alongside the server.
+            asyncio.create_task(_start_protect_subsystem(), name="protect-startup")
+
             from glitch.server import run_server_async
             await run_server_async(agent, server_config)
     finally:
@@ -358,6 +668,8 @@ async def main() -> None:
                 await telegram_channel.stop()
             except Exception as e:
                 logger.error(f"Error stopping Telegram channel: {e}")
+        # Shut down Protect subsystem gracefully
+        await _shutdown_protect_subsystem()
 
 
 async def interactive_mode(agent: GlitchAgent) -> None:

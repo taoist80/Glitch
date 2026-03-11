@@ -1,0 +1,18 @@
+{
+  "id": "log-monitoring",
+  "version": "1.0.0",
+  "description": "Scan and analyze CloudWatch log groups for errors, exceptions, and anomalies across AgentCore runtime, Lambda functions, and telemetry. Classify error severity, identify patterns, and triage root causes.",
+  "triggers": [
+    "check logs", "scan logs", "look at logs", "log errors", "cloudwatch",
+    "lambda errors", "runtime errors", "error in logs", "what went wrong",
+    "agent errors", "gateway errors", "webhook errors", "keepalive errors",
+    "recent errors", "scan for errors", "any errors", "error analysis",
+    "log analysis", "telemetry errors"
+  ],
+  "tags": ["monitoring", "cloudwatch", "logs", "errors", "lambda"],
+  "priority": 90,
+  "model_allowlist": null,
+  "model_denylist": null,
+  "required_tools": ["scan_log_groups_for_errors", "get_log_group_errors", "get_lambda_metrics"],
+  "author": "Glitch"
+}

@@ -19,6 +19,13 @@ CLIENT_CONFIG = Config(
     retries={"max_attempts": 2, "mode": "standard"},
 )
 
+# Long-timeout config for operations like CloudFormation drift detection (up to 60s).
+CLIENT_CONFIG_LONG = Config(
+    connect_timeout=10,
+    read_timeout=120,
+    retries={"max_attempts": 2, "mode": "standard"},
+)
+
 _clients: dict[str, Any] = {}
 
 

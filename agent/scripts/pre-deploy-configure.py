@@ -54,6 +54,12 @@ SSM_SSH_HOSTS = '/glitch/ssh/hosts'
 SSM_SOUL_S3_BUCKET = '/glitch/soul/s3-bucket'
 SSM_OLLAMA_PROXY_HOST = '/glitch/ollama/proxy-host'
 SSM_OLLAMA_API_KEY = '/glitch/ollama/api-key'
+# Protect subsystem SSM params (previously only in monitoring-agent)
+SSM_PROTECT_HOST = '/glitch/protect/host'
+SSM_PROTECT_DB_HOST = '/glitch/protect-db/host'
+SSM_PROTECT_DB_PORT = '/glitch/protect-db/port'
+SSM_PROTECT_DB_NAME = '/glitch/protect-db/dbname'
+SSM_PROTECT_DB_IAM_USER = '/glitch/protect-db/sentinel-iam-user'
 
 AGENT_DIR = Path(__file__).parent.parent
 CONFIG_FILE = AGENT_DIR / '.bedrock_agentcore.yaml'
@@ -241,6 +247,31 @@ def main():
             log(f"Soul S3 bucket set to {soul_bucket.strip()} (from SSM)", 'SUCCESS')
         else:
             log("SSM /glitch/soul/s3-bucket not found; deploy GlitchStorageStack so agent can write SOUL.md", 'WARN')
+
+        # Protect subsystem env vars (merged from monitoring-agent)
+        protect_host = get_ssm_parameter(ssm_client, SSM_PROTECT_HOST)
+        if protect_host:
+            env_vars['GLITCH_PROTECT_HOST'] = protect_host
+            log(f"Protect host set to {protect_host}", 'SUCCESS')
+        else:
+            log("SSM /glitch/protect/host not found; Protect subsystem will be disabled", 'WARN')
+
+        protect_db_host = get_ssm_parameter(ssm_client, SSM_PROTECT_DB_HOST)
+        if protect_db_host:
+            env_vars['GLITCH_PROTECT_DB_HOST'] = protect_db_host
+            log(f"Protect DB host set from SSM", 'SUCCESS')
+
+        protect_db_port = get_ssm_parameter(ssm_client, SSM_PROTECT_DB_PORT)
+        if protect_db_port:
+            env_vars['GLITCH_PROTECT_DB_PORT'] = protect_db_port
+
+        protect_db_name = get_ssm_parameter(ssm_client, SSM_PROTECT_DB_NAME)
+        if protect_db_name:
+            env_vars['GLITCH_PROTECT_DB_NAME'] = protect_db_name
+
+        protect_db_iam_user = get_ssm_parameter(ssm_client, SSM_PROTECT_DB_IAM_USER)
+        if protect_db_iam_user:
+            env_vars['GLITCH_PROTECT_DB_IAM_USER'] = protect_db_iam_user
 
         save_config(config)
         save_env_deploy(env_vars)

@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import 'source-map-support/register';
 import * as cdk from 'aws-cdk-lib';
-import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'yaml';
@@ -9,15 +8,11 @@ import { execSync } from 'child_process';
 import {
   GlitchFoundationStack,
   GlitchProtectDbStack,
-  SSM_PARAMS,
-  SecretsStack,
   AgentCoreStack,
-  GlitchStorageStack,
   GlitchGatewayStack,
   GlitchEdgeStack,
   GlitchUiHostingStack,
   TelegramWebhookStack,
-  GlitchSentinelStack,
 } from '../lib/stack';
 
 /**
@@ -71,19 +66,14 @@ const env = {
 const customDomain = 'glitch.awoo.agency';
 
 // ============================================================================
-// PHASE 1: FOUNDATION (VPC + IAM Roles + SSM Parameters + S2S VPN)
+// PHASE 1: FOUNDATION (VPC + IAM Roles + SSM Parameters)
 // Deploy first: cdk deploy GlitchFoundationStack
-// Pass on-prem IP when UDM-Pro is ready: -c onPremPublicIp=YOUR.WAN.IP.HERE
 // ============================================================================
 
 const foundationStack = new GlitchFoundationStack(app, 'GlitchFoundationStack', {
   env,
   description: 'Foundation: VPC, IAM roles, SSM parameters',
 });
-
-// GlitchVpnStack decommissioned — VPN resources have DeletionPolicy:RETAIN and must
-// be manually deleted in the AWS console (VPN Connection + Customer Gateway + VGW)
-// to stop the ~$36.50/month charge.
 
 // ============================================================================
 // PHASE 2: AGENT (run after Phase 1)
@@ -96,25 +86,10 @@ const agentCoreRuntimeArn =
   getAgentCoreRuntimeArn('Glitch', '../../agent') ??
   `arn:aws:bedrock-agentcore:${env.region}:${env.account}:runtime/Glitch-PLACEHOLDER`;
 
-const sentinelRuntimeArn =
-  app.node.tryGetContext('sentinelRuntimeArn') ??
-  getAgentCoreRuntimeArn('Sentinel', '../../monitoring-agent') ??
-  undefined;
-
 // ============================================================================
 // PHASE 3: APPLICATION STACKS (deploy after Phase 2)
 // Deploy all: cdk deploy --all
 // ============================================================================
-
-const secretsStack = new SecretsStack(app, 'GlitchSecretsStack', {
-  env,
-  description: 'Secrets Manager references',
-});
-
-const storageStack = new GlitchStorageStack(app, 'GlitchStorageStack', {
-  env,
-  description: 'DynamoDB, S3, and telemetry log group',
-});
 
 const protectDbStack = new GlitchProtectDbStack(app, 'GlitchProtectDbStack', {
   env,
@@ -125,36 +100,23 @@ protectDbStack.addDependency(foundationStack);
 
 const gatewayStack = new GlitchGatewayStack(app, 'GlitchGatewayStack', {
   env,
-  configTable: storageStack.configTable,
+  configTable: foundationStack.configTable,
   agentCoreRuntimeArn,
   vpc: foundationStack.vpc,
-  protectDb: protectDbStack.db,
+  agentcoreUtilsLayer: foundationStack.agentcoreUtilsLayer,
   description: 'Gateway Lambda (IAM-auth Function URL, /api/*, keepalive)',
 });
-gatewayStack.addDependency(storageStack);
-gatewayStack.addDependency(protectDbStack);
+gatewayStack.addDependency(foundationStack);
 
 const telegramWebhookStack = new TelegramWebhookStack(app, 'GlitchTelegramWebhookStack', {
   env,
-  configTable: storageStack.configTable,
-  telegramBotTokenSecret: secretsStack.telegramBotTokenSecret,
+  configTable: foundationStack.configTable,
+  telegramBotTokenSecret: foundationStack.telegramBotTokenSecret,
   agentCoreRuntimeArn,
-  description: 'Telegram webhook Lambda',
+  agentcoreUtilsLayer: foundationStack.agentcoreUtilsLayer,
+  description: 'Telegram webhook Lambda + SSM webhook URL',
 });
-telegramWebhookStack.addDependency(storageStack);
-telegramWebhookStack.addDependency(secretsStack);
-
-// Write the webhook URL to SSM in a separate stack to avoid a CFN circular dependency.
-const telegramSsmStack = new cdk.Stack(app, 'GlitchTelegramSsmStack', {
-  env,
-  description: 'SSM parameter: Telegram webhook URL (written separately to avoid CFN circular dep)',
-});
-new ssm.StringParameter(telegramSsmStack, 'SsmTelegramWebhookUrl', {
-  parameterName: SSM_PARAMS.TELEGRAM_WEBHOOK_URL,
-  stringValue: telegramWebhookStack.webhookUrl,
-  description: 'Telegram webhook Lambda Function URL (for runtime GLITCH_TELEGRAM_WEBHOOK_URL)',
-});
-telegramSsmStack.addDependency(telegramWebhookStack);
+telegramWebhookStack.addDependency(foundationStack);
 
 // Edge stack (us-east-1): WAF WebACL for CloudFront IP allowlisting.
 //
@@ -196,24 +158,14 @@ const uiHostingStack = new GlitchUiHostingStack(app, 'GlitchUiHostingStack', {
 uiHostingStack.addDependency(gatewayStack);
 uiHostingStack.addDependency(edgeStack);
 
-// AgentCore policies stack (attaches policies to runtime role)
+// AgentCore policies stack (attaches policies to runtime role — includes ops capabilities)
 const agentCoreStack = new AgentCoreStack(app, 'GlitchAgentCoreStack', {
   env,
   runtimeRole: foundationStack.runtimeRole,
-  sentinelRuntimeArn,
-  description: 'AgentCore runtime policies (Glitch agent, PUBLIC mode)',
+  description: 'AgentCore runtime policies (Glitch merged agent, PUBLIC mode)',
 });
 agentCoreStack.addDependency(foundationStack);
 
-// Sentinel agent policies stack
-const sentinelStack = new GlitchSentinelStack(app, 'GlitchSentinelStack', {
-  env,
-  runtimeRole: foundationStack.runtimeRole,
-  glitchRuntimeArn: agentCoreRuntimeArn,
-  description: 'Sentinel operations agent runtime policies',
-});
-sentinelStack.addDependency(foundationStack);
-sentinelStack.addDependency(agentCoreStack);
 
 cdk.Tags.of(app).add('Project', 'AgentCore-Glitch');
 cdk.Tags.of(app).add('ManagedBy', 'CDK');

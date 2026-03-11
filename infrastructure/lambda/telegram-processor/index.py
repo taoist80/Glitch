@@ -21,6 +21,8 @@ from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
 from urllib.parse import quote
 
+from agentcore_utils import get_data_plane_endpoint as _get_data_plane_endpoint, parse_runtime_arn as _parse_runtime_arn
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
@@ -29,24 +31,6 @@ _boto_session = boto3.Session()
 
 TELEGRAM_SECRET_NAME = os.environ['TELEGRAM_SECRET_NAME']
 AGENTCORE_RUNTIME_ARN = os.environ.get('AGENTCORE_RUNTIME_ARN', '')
-
-
-def _get_data_plane_endpoint(region: str) -> str:
-    return f"https://bedrock-agentcore.{region}.amazonaws.com"
-
-
-def _parse_runtime_arn(runtime_arn: str) -> dict:
-    parts = runtime_arn.split(':')
-    if len(parts) != 6:
-        raise ValueError(f"Invalid runtime ARN: {runtime_arn}")
-    resource = parts[5]
-    if not resource.startswith('runtime/'):
-        raise ValueError(f"Invalid runtime ARN resource: {resource}")
-    return {
-        'region': parts[3],
-        'account_id': parts[4],
-        'runtime_id': resource.split('/', 1)[1],
-    }
 
 
 def _get_bot_token() -> str:
