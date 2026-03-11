@@ -17,6 +17,14 @@ from strands import tool
 
 logger = logging.getLogger(__name__)
 
+
+def _parse_iso(s: str) -> datetime:
+    """Parse ISO-8601 string, tolerating the trailing 'Z' that Python 3.10 rejects."""
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    return datetime.fromisoformat(s)
+
+
 _monitoring_processor = None
 
 
@@ -104,20 +112,24 @@ async def protect_get_cameras() -> str:
             }
             result.append(cam_info)
 
-        # Sync to DB as a fire-and-forget background task so the tool
-        # returns immediately regardless of DB connectivity.
         async def _sync_cameras():
-            for cam in cameras:
-                cam_id = cam.get("id", "")
-                if cam_id:
-                    try:
-                        await protect_db.upsert_camera(
-                            camera_id=cam_id,
-                            name=cam.get("name", cam_id),
-                            camera_type=cam.get("type"),
-                        )
-                    except Exception as db_exc:
-                        logger.warning("protect_get_cameras DB sync failed for %s: %s", cam_id, db_exc)
+            async def _do_sync():
+                for cam in cameras:
+                    cam_id = cam.get("id", "")
+                    if cam_id:
+                        try:
+                            await protect_db.upsert_camera(
+                                camera_id=cam_id,
+                                name=cam.get("name", cam_id),
+                                camera_type=cam.get("type"),
+                            )
+                        except Exception as db_exc:
+                            logger.warning("protect_get_cameras DB sync failed for %s: %s", cam_id, db_exc)
+
+            try:
+                await protect_db.run_in_pool_loop(_do_sync)
+            except Exception as e:
+                logger.warning("protect_get_cameras DB sync dispatch failed: %s", e)
 
         asyncio.create_task(_sync_cameras())
 
@@ -152,22 +164,23 @@ async def protect_get_events(
         return _not_configured_msg()
 
     try:
-        from glitch.protect.db import get_recent_events, is_pool_available
+        from glitch.protect.db import get_recent_events, is_pool_available, run_in_pool_loop
 
         if not is_pool_available():
             return json.dumps({"error": "Protect DB not ready yet — please retry in a moment", "events": [], "count": 0})
 
-        start_dt = datetime.fromisoformat(start_time) if start_time else datetime.now() - timedelta(hours=1)
-        end_dt = datetime.fromisoformat(end_time) if end_time else datetime.now()
+        start_dt = _parse_iso(start_time) if start_time else datetime.now() - timedelta(hours=1)
+        end_dt = _parse_iso(end_time) if end_time else datetime.now()
         cam_list = [c.strip() for c in camera_ids.split(",")] if camera_ids else None
         type_list = [t.strip() for t in event_types.split(",")] if event_types else None
 
-        events = await get_recent_events(
-            start_time=start_dt,
-            end_time=end_dt,
-            camera_ids=cam_list,
-            entity_types=type_list,
-            limit=limit,
+        events = await run_in_pool_loop(
+            get_recent_events,
+            start_dt,
+            end_dt,
+            cam_list,
+            type_list,
+            limit,
         )
 
         result = []
@@ -211,7 +224,7 @@ async def protect_get_snapshot(
         from glitch.protect.recognition import image_to_base64
 
         client = get_client()
-        ts_dt = datetime.fromisoformat(timestamp) if timestamp else None
+        ts_dt = _parse_iso(timestamp) if timestamp else None
         snapshot_bytes = await client.get_snapshot(camera_id, ts_dt)
 
         b64 = image_to_base64(snapshot_bytes)
@@ -268,8 +281,8 @@ async def protect_get_video_clip(
             else:
                 return "Cannot determine time range from event"
         elif camera_id and start_time and end_time:
-            start_dt = datetime.fromisoformat(start_time)
-            end_dt = datetime.fromisoformat(end_time)
+            start_dt = _parse_iso(start_time)
+            end_dt = _parse_iso(end_time)
         else:
             return "Provide either event_id or (camera_id + start_time + end_time)"
 
@@ -375,7 +388,7 @@ async def protect_db_store_observation(
     try:
         from glitch.protect import db as protect_db
 
-        ts_dt = datetime.fromisoformat(timestamp)
+        ts_dt = _parse_iso(timestamp)
         cls_dict = json.loads(classifications) if isinstance(classifications, str) else classifications
         entities = json.loads(entities_detected) if isinstance(entities_detected, str) else entities_detected
         scores = json.loads(confidence_scores) if isinstance(confidence_scores, str) else confidence_scores
@@ -713,7 +726,7 @@ async def protect_should_alert(
         in_quiet_hours = False
         if prefs.get("quiet_hours_start") is not None and ts:
             try:
-                hour = datetime.fromisoformat(ts).hour
+                hour = _parse_iso(ts).hour
                 qs = prefs["quiet_hours_start"]
                 qe = prefs["quiet_hours_end"]
                 if qs <= qe:
@@ -1209,8 +1222,8 @@ async def protect_manual_review(
     try:
         from glitch.protect import db as protect_db
 
-        start_dt = datetime.fromisoformat(start_time)
-        end_dt = datetime.fromisoformat(end_time)
+        start_dt = _parse_iso(start_time)
+        end_dt = _parse_iso(end_time)
 
         events = await protect_db.query_events(
             camera_id=camera_id,
@@ -1321,7 +1334,7 @@ async def protect_mark_missed_event(
         from glitch.protect import db as protect_db
 
         event_id = f"missed_{uuid.uuid4().hex[:8]}"
-        ts_dt = datetime.fromisoformat(timestamp)
+        ts_dt = _parse_iso(timestamp)
 
         await protect_db.insert_event(
             event_id=event_id,
@@ -1806,7 +1819,7 @@ async def protect_track_entity(
 
         start_time = datetime.now() - timedelta(hours=lookback_hours)
         if origin_time:
-            start_time = datetime.fromisoformat(origin_time) - timedelta(hours=1)
+            start_time = _parse_iso(origin_time) - timedelta(hours=1)
 
         sightings = await protect_db.query_sightings(
             entity_id=entity_id,
@@ -2202,8 +2215,8 @@ async def protect_generate_report(
     try:
         from glitch.protect import db as protect_db
 
-        start_dt = datetime.fromisoformat(start_date)
-        end_dt = datetime.fromisoformat(end_date)
+        start_dt = _parse_iso(start_date)
+        end_dt = _parse_iso(end_date)
         cam_list = [c.strip() for c in camera_ids.split(",")] if camera_ids else None
 
         pool = await protect_db.get_pool()

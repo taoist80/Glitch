@@ -56,7 +56,7 @@ async def security_correlation_scan(
     # --- Protect events (from DB — WS poller persists events in real time) ---
     if is_protect_configured():
         try:
-            from glitch.protect.db import get_recent_events, is_pool_available
+            from glitch.protect.db import get_recent_events, is_pool_available, run_in_pool_loop
 
             if not is_pool_available():
                 errors["protect"] = "DB not ready"
@@ -65,11 +65,13 @@ async def security_correlation_scan(
                 end_dt = datetime.now()
                 cam_list = [c.strip() for c in camera_ids.split(",")] if camera_ids else None
 
-                events = await get_recent_events(
-                    start_time=start_dt,
-                    end_time=end_dt,
-                    camera_ids=cam_list,
-                    limit=100,
+                events = await run_in_pool_loop(
+                    get_recent_events,
+                    start_dt,
+                    end_dt,
+                    cam_list,
+                    None,
+                    100,
                 )
                 for ev in events:
                     ts = ev.get("timestamp")
@@ -197,7 +199,7 @@ async def analyze_and_alert(
 
     # Step 1: Fetch events from DB (WS poller persists events in real time)
     try:
-        from glitch.protect.db import get_recent_events, is_pool_available
+        from glitch.protect.db import get_recent_events, is_pool_available, run_in_pool_loop
 
         if not is_pool_available():
             return json.dumps({"error": "Protect DB not ready yet — please retry in a moment"})
@@ -206,11 +208,13 @@ async def analyze_and_alert(
         end_dt = datetime.now()
         cam_list = [c.strip() for c in camera_ids.split(",")] if camera_ids else None
 
-        raw_events = await get_recent_events(
-            start_time=start_dt,
-            end_time=end_dt,
-            camera_ids=cam_list,
-            limit=50,
+        raw_events = await run_in_pool_loop(
+            get_recent_events,
+            start_dt,
+            end_dt,
+            cam_list,
+            None,
+            50,
         )
     except Exception as e:
         return json.dumps({"error": f"Failed to fetch events: {e}"})
@@ -235,28 +239,29 @@ async def analyze_and_alert(
             if is_db_configured():
                 from glitch.protect import db as protect_db
 
-                event = await protect_db.get_event(event_id)
-                if not event:
-                    # Fall back to raw event data
-                    event = {
-                        "camera_id": ev.get("camera", ""),
-                        "timestamp": ev.get("start") or ev.get("timestamp"),
-                        "entity_type": ev.get("type", ""),
-                        "anomaly_score": score,
-                        "anomaly_factors": {},
-                        "classifications": {},
-                    }
-                ts = event.get("timestamp")
-                if isinstance(ts, datetime):
-                    hour = ts.hour
-                    dow = ts.weekday()
-                else:
-                    hour = 12
-                    dow = 0
+                async def _fetch_event_context(_eid, _score, _ev):
+                    _event = await protect_db.get_event(_eid)
+                    if not _event:
+                        _event = {
+                            "camera_id": _ev.get("camera", ""),
+                            "timestamp": _ev.get("start") or _ev.get("timestamp"),
+                            "entity_type": _ev.get("type", ""),
+                            "anomaly_score": _score,
+                            "anomaly_factors": {},
+                            "classifications": {},
+                        }
+                    ts = _event.get("timestamp")
+                    h = ts.hour if isinstance(ts, datetime) else 12
+                    d = ts.weekday() if isinstance(ts, datetime) else 0
+                    cam = _event.get("camera_id", "")
+                    _baseline = await protect_db.get_baseline(cam, h, d)
+                    _prefs = await protect_db.get_alert_preferences(cam)
+                    _fp = await protect_db.get_camera_fp_rate(cam)
+                    return _event, _baseline, _prefs, _fp
 
-                baseline = await protect_db.get_baseline(event.get("camera_id", ""), hour, dow)
-                prefs = await protect_db.get_alert_preferences(event.get("camera_id", ""))
-                fp_rate = await protect_db.get_camera_fp_rate(event.get("camera_id", ""))
+                event, baseline, prefs, fp_rate = await run_in_pool_loop(
+                    _fetch_event_context, event_id, score, ev,
+                )
                 anomaly_score = event.get("anomaly_score", score)
             else:
                 # No DB — use raw score and default prefs

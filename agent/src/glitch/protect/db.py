@@ -5,16 +5,20 @@ Schema is applied on first connect if tables don't exist.
 """
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
 
 logger = logging.getLogger(__name__)
 
+T = TypeVar("T")
+
 _pool = None
+_pool_loop: Optional[asyncio.AbstractEventLoop] = None
 _schema_applied = False
 _pool_available = False  # True once a pool has been successfully created
 
@@ -42,6 +46,35 @@ async def get_pool():
     )
 
 
+async def run_in_pool_loop(coro_fn: Callable[..., Awaitable[T]], *args: Any) -> T:
+    """Execute *coro_fn(*args)* on the event loop that owns the asyncpg pool.
+
+    Strands' ConcurrentToolExecutor schedules async tool functions on a
+    different thread / event loop than the one that created the pool.  asyncpg
+    binds its internal futures to the creating loop, so calling ``pool.acquire``
+    from another loop raises ``RuntimeError: ... attached to a different loop``.
+
+    This helper detects the mismatch and uses ``run_coroutine_threadsafe`` to
+    dispatch the coroutine to the pool's loop, then awaits the future from the
+    calling loop via ``asyncio.wrap_future``.
+
+    When there is no mismatch (same loop), the coroutine runs directly.
+    """
+    if _pool_loop is None:
+        raise RuntimeError("Pool loop not initialised yet")
+
+    try:
+        calling_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        calling_loop = None
+
+    if calling_loop is _pool_loop:
+        return await coro_fn(*args)
+
+    future = asyncio.run_coroutine_threadsafe(coro_fn(*args), _pool_loop)
+    return await asyncio.wrap_future(future)
+
+
 async def init_pool_background() -> None:
     """Initialize the asyncpg pool with exponential-backoff retries.
 
@@ -51,7 +84,7 @@ async def init_pool_background() -> None:
     For RDS IAM auth the token is refreshed on every attempt (tokens expire
     after 15 min).  SSL is required by RDS for IAM auth connections.
     """
-    global _pool, _pool_available
+    global _pool, _pool_available, _pool_loop
 
     try:
         import asyncpg
@@ -108,6 +141,7 @@ async def init_pool_background() -> None:
                 )
 
             _pool = await asyncpg.create_pool(**pool_kwargs)
+            _pool_loop = asyncio.get_running_loop()
             _pool_available = True
             logger.info("Protect DB pool created: %s:%s/%s", config.host, config.port, config.dbname)
             await _apply_schema(_pool)
@@ -149,10 +183,11 @@ async def _apply_schema(pool) -> None:
 
 async def close_pool() -> None:
     """Close the connection pool."""
-    global _pool, _pool_available, _schema_applied
+    global _pool, _pool_available, _pool_loop, _schema_applied
     if _pool is not None:
         await _pool.close()
         _pool = None
+        _pool_loop = None
         _pool_available = False
         _schema_applied = False
 
