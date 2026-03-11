@@ -880,6 +880,87 @@ async def get_cameras_with_capability(capability: str) -> List[Dict]:
 
 
 # ============================================================
+# CAMERA PATROLS
+# ============================================================
+
+async def insert_patrol(
+    camera_id: str,
+    scene_description: Optional[str] = None,
+    detected_objects: Optional[List] = None,
+    anomaly_detected: bool = False,
+    anomaly_description: Optional[str] = None,
+    confidence: float = 0.0,
+    model_used: str = "llava",
+    processing_ms: Optional[int] = None,
+    error: Optional[str] = None,
+) -> str:
+    pool = await get_pool()
+    patrol_id = str(uuid.uuid4())
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO camera_patrols
+                (patrol_id, camera_id, scene_description, detected_objects,
+                 anomaly_detected, anomaly_description, confidence,
+                 model_used, processing_ms, error)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            """,
+            patrol_id, camera_id, scene_description,
+            json.dumps(detected_objects or []),
+            anomaly_detected, anomaly_description, confidence,
+            model_used, processing_ms, error,
+        )
+    return patrol_id
+
+
+async def get_latest_patrols() -> List[Dict]:
+    """Return the most recent patrol result per camera."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT DISTINCT ON (cp.camera_id)
+                cp.*, c.name AS camera_name
+            FROM camera_patrols cp
+            LEFT JOIN cameras c ON c.camera_id = cp.camera_id
+            ORDER BY cp.camera_id, cp.timestamp DESC
+            """
+        )
+        return [dict(r) for r in rows]
+
+
+async def get_patrols(
+    camera_id: Optional[str] = None,
+    hours: int = 24,
+    limit: int = 100,
+) -> List[Dict]:
+    """Return recent patrol results, optionally filtered by camera."""
+    pool = await get_pool()
+    conditions = ["cp.timestamp > NOW() - ($1 || ' hours')::interval"]
+    params: List[Any] = [str(hours)]
+    idx = 2
+
+    if camera_id:
+        conditions.append(f"cp.camera_id = ${idx}")
+        params.append(camera_id)
+        idx += 1
+
+    params.append(limit)
+    where = " AND ".join(conditions)
+    sql = f"""
+        SELECT cp.*, c.name AS camera_name
+        FROM camera_patrols cp
+        LEFT JOIN cameras c ON c.camera_id = cp.camera_id
+        WHERE {where}
+        ORDER BY cp.timestamp DESC
+        LIMIT ${idx}
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *params)
+        return [dict(r) for r in rows]
+
+
+# ============================================================
 # RETENTION / CLEANUP
 # ============================================================
 

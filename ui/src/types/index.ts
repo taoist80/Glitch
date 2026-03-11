@@ -28,6 +28,7 @@ export interface ProtectEntity {
 export interface ProtectEvent {
   event_id: string;
   camera_id: string;
+  camera_name?: string;
   timestamp: string;
   entity_type?: string;
   score?: number;
@@ -108,7 +109,7 @@ export interface ProtectAlertsResponse {
 }
 
 
-export interface SentinelHealth {
+export interface ProtectHealth {
   status: string;
   protect_db: string;
   protect_poller: string;
@@ -117,6 +118,44 @@ export interface SentinelHealth {
   uptime_seconds: number | null;
   updated_at: string | null;
   source: string;
+}
+
+export type SentinelHealth = ProtectHealth;
+
+export interface PatrolResult {
+  patrol_id?: string;
+  camera_id: string;
+  camera_name?: string;
+  /** Present in DB-backed patrol results; absent in live scan results. */
+  timestamp?: string;
+  scene_description?: string;
+  detected_objects: string[];
+  anomaly_detected: boolean;
+  anomaly_description?: string;
+  confidence: number;
+  /** Present in DB-backed patrol results; absent in live scan results. */
+  model_used?: string;
+  processing_ms?: number;
+  error?: string;
+}
+
+export interface ProtectPatrolsResponse {
+  patrols: PatrolResult[];
+  total: number;
+}
+
+export interface ProtectScanResult {
+  status: string;
+  results: PatrolResult[];
+  count: number;
+}
+
+export interface ProtectBackfillResult {
+  status: string;
+  days: number;
+  inserted: number;
+  skipped: number;
+  errors: number;
 }
 
 export interface AgentInfo {

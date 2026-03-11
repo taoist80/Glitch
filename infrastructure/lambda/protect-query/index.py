@@ -4,12 +4,14 @@ Bypasses both LLMs entirely for the /api/protect/* structured-data endpoints,
 reducing response latency from ~5-10s to <500ms.
 
 Routes:
-    GET /api/protect/summary   → entities_total, events_24h, alerts_unack, cameras_online
+    GET /api/protect/summary   → entities_total, events_24h, alerts_unack, cameras_online/total
     GET /api/protect/cameras   → ?limit=N  (default 20)
     GET /api/protect/entities  → ?limit=N  (default 50)
-    GET /api/protect/events    → ?hours=N&limit=N  (default 24h, 30 events)
+    GET /api/protect/events    → ?hours=N&days=N&limit=N  (default 24h, 30 events)
+    GET /api/protect/patrols   → ?hours=N&limit=N  (default 24h, 50 patrols)
     GET /api/protect/alerts    → ?limit=N&unack_only=true  (default 20)
     GET /api/protect/patterns  → ?limit=N  (default 20)
+    GET /api/protect/health    → sentinel/protect system health
 
 Connection: RDS IAM authentication via boto3 generate_db_auth_token.
 The IAM token is generated locally (no network call) and used as the Postgres password.
@@ -137,24 +139,30 @@ def query_entities(conn, limit: int) -> Dict[str, Any]:
     return {"entities": entities, "total": total}
 
 
-def query_events(conn, hours: int, limit: int) -> Dict[str, Any]:
-    hours = max(1, min(hours, 168))
-    limit = max(1, min(limit, 100))
+def query_events(conn, hours: int = 24, days: int = 0, limit: int = 30) -> Dict[str, Any]:
+    if days > 0:
+        lookback_hours = days * 24
+    else:
+        lookback_hours = max(1, min(hours, 168))
+    limit = max(1, min(limit, 500))
     rows = conn.run(
         """
-        SELECT event_id, camera_id, timestamp, entity_type, score,
-               anomaly_score, snapshot_url, video_clip_url, processed
-        FROM events
-        WHERE timestamp > NOW() - (:hours * INTERVAL '1 hour')
-        ORDER BY timestamp DESC
+        SELECT e.event_id, e.camera_id, e.timestamp, e.entity_type, e.score,
+               e.anomaly_score, e.snapshot_url, e.video_clip_url, e.processed,
+               c.name AS camera_name
+        FROM events e
+        LEFT JOIN cameras c ON c.camera_id = e.camera_id
+        WHERE e.timestamp > NOW() - (:hours * INTERVAL '1 hour')
+        ORDER BY e.timestamp DESC
         LIMIT :limit
         """,
-        hours=hours,
+        hours=lookback_hours,
         limit=limit,
     )
     columns = [
         "event_id", "camera_id", "timestamp", "entity_type", "score",
         "anomaly_score", "snapshot_url", "video_clip_url", "processed",
+        "camera_name",
     ]
     events = []
     for row in rows:
@@ -166,7 +174,7 @@ def query_events(conn, hours: int, limit: int) -> Dict[str, Any]:
         events.append(d)
     count_rows = conn.run(
         "SELECT COUNT(*) FROM events WHERE timestamp > NOW() - (:hours * INTERVAL '1 hour')",
-        hours=hours,
+        hours=lookback_hours,
     )
     total = int(count_rows[0][0]) if count_rows else len(events)
     return {"events": events, "total": total}
@@ -274,6 +282,45 @@ def query_cameras(conn, limit: int) -> Dict[str, Any]:
     return {"cameras": cameras, "total": total}
 
 
+def query_patrols(conn, hours: int = 24, limit: int = 50) -> Dict[str, Any]:
+    hours = max(1, min(hours, 168 * 4))
+    limit = max(1, min(limit, 200))
+    rows = conn.run(
+        """
+        SELECT cp.patrol_id, cp.camera_id, c.name AS camera_name,
+               cp.timestamp, cp.scene_description, cp.detected_objects,
+               cp.anomaly_detected, cp.anomaly_description, cp.confidence,
+               cp.model_used, cp.processing_ms, cp.error
+        FROM camera_patrols cp
+        LEFT JOIN cameras c ON c.camera_id = cp.camera_id
+        WHERE cp.timestamp > NOW() - (:hours * INTERVAL '1 hour')
+        ORDER BY cp.timestamp DESC
+        LIMIT :limit
+        """,
+        hours=hours,
+        limit=limit,
+    )
+    columns = [
+        "patrol_id", "camera_id", "camera_name", "timestamp",
+        "scene_description", "detected_objects", "anomaly_detected",
+        "anomaly_description", "confidence", "model_used",
+        "processing_ms", "error",
+    ]
+    patrols = []
+    for row in rows:
+        d = dict(zip(columns, row))
+        d["timestamp"] = _iso(d["timestamp"])
+        d["anomaly_detected"] = bool(d["anomaly_detected"])
+        d["confidence"] = float(d["confidence"] or 0)
+        if isinstance(d["detected_objects"], str):
+            try:
+                d["detected_objects"] = json.loads(d["detected_objects"])
+            except Exception:
+                d["detected_objects"] = []
+        patrols.append(d)
+    return {"patrols": patrols, "total": len(patrols)}
+
+
 def query_patterns(conn, limit: int) -> Dict[str, Any]:
     limit = max(1, min(limit, 100))
     rows = conn.run(
@@ -325,8 +372,15 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             body = query_cameras(conn, int(query.get("limit", 20)))
         elif path.endswith("/entities"):
             body = query_entities(conn, int(query.get("limit", 50)))
+        elif path.endswith("/patrols"):
+            body = query_patrols(conn, int(query.get("hours", 24)), int(query.get("limit", 50)))
         elif path.endswith("/events"):
-            body = query_events(conn, int(query.get("hours", 24)), int(query.get("limit", 30)))
+            body = query_events(
+                conn,
+                hours=int(query.get("hours", 24)),
+                days=int(query.get("days", 0)),
+                limit=int(query.get("limit", 30)),
+            )
         elif path.endswith("/alerts"):
             body = query_alerts(
                 conn,

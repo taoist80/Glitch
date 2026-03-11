@@ -19,7 +19,10 @@ import type {
   ProtectEventsResponse,
   ProtectAlertsResponse,
   ProtectSummary,
-  SentinelHealth,
+  ProtectHealth,
+  ProtectPatrolsResponse,
+  ProtectScanResult,
+  ProtectBackfillResult,
 } from '../types';
 
 // API base URL: use environment variable for Lambda Function URL, or default to relative path
@@ -121,9 +124,10 @@ export const api = {
     return fetchJson<ProtectEntitiesResponse>(`${API_BASE}/protect/entities${q}`);
   },
 
-  async getProtectEvents(params?: { hours?: number; limit?: number }): Promise<ProtectEventsResponse> {
+  async getProtectEvents(params?: { hours?: number; days?: number; limit?: number }): Promise<ProtectEventsResponse> {
     const sp = new URLSearchParams();
-    if (params?.hours != null) sp.set('hours', String(params.hours));
+    if (params?.days != null) sp.set('days', String(params.days));
+    else if (params?.hours != null) sp.set('hours', String(params.hours));
     if (params?.limit != null) sp.set('limit', String(params.limit));
     const q = sp.toString() ? `?${sp}` : '';
     return fetchJson<ProtectEventsResponse>(`${API_BASE}/protect/events${q}`);
@@ -137,8 +141,29 @@ export const api = {
     return fetchJson<ProtectAlertsResponse>(`${API_BASE}/protect/alerts${q}`);
   },
 
-  async getSentinelHealth(): Promise<SentinelHealth> {
-    return fetchJson<SentinelHealth>(`${API_BASE}/protect/health`);
+  async getProtectHealth(): Promise<ProtectHealth> {
+    return fetchJson<ProtectHealth>(`${API_BASE}/protect/health`);
+  },
+
+  async getSentinelHealth(): Promise<ProtectHealth> {
+    return this.getProtectHealth();
+  },
+
+  async getProtectPatrols(params?: { hours?: number; limit?: number }): Promise<ProtectPatrolsResponse> {
+    const sp = new URLSearchParams();
+    if (params?.hours != null) sp.set('hours', String(params.hours));
+    if (params?.limit != null) sp.set('limit', String(params.limit));
+    const q = sp.toString() ? `?${sp}` : '';
+    return fetchJson<ProtectPatrolsResponse>(`${API_BASE}/protect/patrols${q}`);
+  },
+
+  async triggerProtectScan(): Promise<ProtectScanResult> {
+    return fetchJson<ProtectScanResult>(`${API_BASE}/protect/scan`, { method: 'POST' });
+  },
+
+  async triggerProtectBackfill(days?: number): Promise<ProtectBackfillResult> {
+    const sp = days != null ? `?days=${days}` : '';
+    return fetchJson<ProtectBackfillResult>(`${API_BASE}/protect/backfill${sp}`, { method: 'POST' });
   },
 
   async getMCPServers(): Promise<MCPServersResponse> {

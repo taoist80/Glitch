@@ -249,6 +249,7 @@ _protect_health: dict = {
 
 _protect_poller: _Optional[object] = None
 _protect_processor: _Optional[object] = None
+_protect_patrol: _Optional[object] = None
 
 
 async def _start_protect_subsystem() -> None:
@@ -331,12 +332,39 @@ async def _start_protect_subsystem() -> None:
             "Failed to start event processor: %s — continuing without it", exc, exc_info=True
         )
 
+    # Camera patrol: periodic snapshot + LLaVA analysis
+    global _protect_patrol
+    try:
+        from glitch.protect.patrol import CameraPatrol
+        patrol = CameraPatrol(protect_client=client, interval_seconds=120)
+        await patrol.start(camera_ids)
+        _protect_patrol = patrol
+        logger.info("Camera patrol started for %d cameras", len(camera_ids))
+    except Exception as exc:
+        logger.warning("Failed to start camera patrol: %s — continuing without it", exc, exc_info=True)
+
+    # Fire-and-forget backfill of historical events (7 days)
+    async def _backfill_wrapper():
+        from glitch.protect.db import is_pool_available
+        for _ in range(30):
+            if is_pool_available():
+                break
+            await asyncio.sleep(10)
+        try:
+            from glitch.protect.poller import backfill_events
+            result = await backfill_events(days=7)
+            logger.info("Event backfill complete: %s", result)
+        except Exception as exc:
+            logger.warning("Event backfill failed: %s", exc)
+
+    asyncio.create_task(_backfill_wrapper(), name="protect-backfill")
+
     asyncio.create_task(_daily_report_loop(), name="daily-report")
     asyncio.create_task(_daily_briefing_loop(), name="daily-briefing")
     asyncio.create_task(_weekly_fp_learning_loop(), name="weekly-fp-learning")
     asyncio.create_task(_weekly_threshold_optimization_loop(), name="weekly-threshold-opt")
     asyncio.create_task(_health_writer_loop(), name="health-writer")
-    logger.info("Protect subsystem started (poller + processor + daily-report + daily-briefing + weekly-learning + health-writer)")
+    logger.info("Protect subsystem started (poller + processor + patrol + backfill + daily-report + daily-briefing + weekly-learning + health-writer)")
 
 
 async def _daily_report_loop() -> None:
@@ -514,11 +542,16 @@ async def _health_writer_loop() -> None:
 
 
 async def _shutdown_protect_subsystem() -> None:
-    """Gracefully stop the Protect poller, processor, and DB pool."""
-    global _protect_processor, _protect_poller
+    """Gracefully stop the Protect poller, processor, patrol, and DB pool."""
+    global _protect_processor, _protect_poller, _protect_patrol
     if _protect_processor is not None:
         try:
             await _protect_processor.stop()
+        except Exception:
+            pass
+    if _protect_patrol is not None:
+        try:
+            _protect_patrol.stop()
         except Exception:
             pass
     if _protect_poller is not None:

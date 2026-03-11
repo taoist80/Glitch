@@ -2537,6 +2537,32 @@ async def protect_learn_from_fps(
 
 
 # ============================================================
+# GROUP 15: Backfill
+# ============================================================
+
+@tool
+async def protect_backfill_events(days: int = 7) -> str:
+    """Backfill historical events from the UniFi Protect API.
+
+    Fetches events in 1-day chunks and inserts them into the database
+    (duplicates are safely ignored via ON CONFLICT DO NOTHING).
+
+    Args:
+        days: Number of days to backfill (default 7)
+
+    Returns:
+        JSON summary with inserted count, skipped, and errors.
+    """
+    try:
+        from glitch.protect.poller import backfill_events
+        result = await backfill_events(days=days)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error("protect_backfill_events error: %s", e, exc_info=True)
+        return f"Error: {e}"
+
+
+# ============================================================
 # CORE (13): Essential daily surveillance loop
 # ============================================================
 # Covers the minimum required for the standard event-processing workflow:
@@ -2563,6 +2589,8 @@ CORE_PROTECT_TOOLS = [
     # Group 9: Entity core
     protect_register_entity,
     protect_search_entities,
+    # Group 15: Backfill
+    protect_backfill_events,
 ]
 
 # ============================================================

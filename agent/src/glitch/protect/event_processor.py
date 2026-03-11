@@ -7,10 +7,13 @@ Each worker runs: snapshot -> LLaVA -> recognition -> DB match -> anomaly -> ale
 import asyncio
 import logging
 import time
+from collections import deque
 from datetime import datetime, timedelta
-from typing import Any, Dict, List
+from typing import Any, Deque, Dict, List
 
 logger = logging.getLogger(__name__)
+
+_SEEN_DEQUE_SIZE = 20  # per-camera dedup window
 
 
 class ProtectEventProcessor:
@@ -23,7 +26,7 @@ class ProtectEventProcessor:
         self._camera_ids: List[str] = []
         self._check_interval: float = 2.0
         self._alert_profile: str = "balanced"
-        self._last_event_ids: Dict[str, str] = {}
+        self._seen_event_ids: Dict[str, Deque[str]] = {}
         self._stats = {
             "processed": 0,
             "errors": 0,
@@ -121,13 +124,16 @@ class ProtectEventProcessor:
                     if not event_id:
                         continue
 
-                    # Deduplicate
+                    # Deduplicate: track last N event IDs per camera to avoid
+                    # re-processing events that reappear in overlapping poll windows.
                     camera_id = event.get("camera") or event.get("camera_id", "unknown")
-                    last_id = self._last_event_ids.get(camera_id)
-                    if event_id == last_id:
+                    seen = self._seen_event_ids.setdefault(
+                        camera_id, deque(maxlen=_SEEN_DEQUE_SIZE)
+                    )
+                    if event_id in seen:
                         continue
 
-                    self._last_event_ids[camera_id] = event_id
+                    seen.append(event_id)
                     await self.enqueue(event)
 
             except Exception as e:
@@ -199,19 +205,25 @@ class ProtectEventProcessor:
         except Exception as e:
             logger.warning(f"Could not fetch snapshot for event {event_id}: {e}")
 
-        # Vision analysis (LLaVA) - only for person/vehicle events
+        # Vision analysis (LLaVA) — optional: fall back to heuristic if Ollama unreachable
         classifications: Dict[str, Any] = {}
+        vision_attempted = False
         if snapshot_bytes and entity_type in ("person", "vehicle", "motion"):
+            vision_attempted = True
             try:
                 classifications = await self._run_vision_analysis(
                     snapshot_bytes, camera_id, timestamp, entity_type
                 )
             except Exception as e:
-                logger.warning(f"Vision analysis failed for event {event_id}: {e}")
+                logger.warning(f"Vision analysis failed for event {event_id} (heuristic fallback): {e}")
 
-        # Compute anomaly score from entity type and vision output
         anomaly_score = _compute_anomaly_score(entity_type, classifications)
-        anomaly_factors = {"entity_type": entity_type, "has_classifications": bool(classifications)}
+        anomaly_factors = {
+            "entity_type": entity_type,
+            "has_classifications": bool(classifications),
+            "vision_attempted": vision_attempted,
+            "vision_available": bool(classifications),
+        }
 
         # Persist classifications + score + timing metadata (best-effort)
         try:
@@ -228,7 +240,7 @@ class ProtectEventProcessor:
         from glitch.protect.config import PROTECT_ALERT_THRESHOLD
         if anomaly_score >= PROTECT_ALERT_THRESHOLD and classifications:
             try:
-                from glitch.tools.telegram_tools import send_telegram_alert
+                from glitch.tools.ops_telegram_tools import send_telegram_alert
                 camera_name = event_data.get("camera_name", camera_id)
                 summary = (
                     classifications.get("summary")

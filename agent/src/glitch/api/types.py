@@ -271,6 +271,7 @@ class ProtectSummaryResponse(BaseModel):
     events_24h: int = 0
     alerts_unack: int = 0
     cameras_online: int = 0
+    cameras_total: int = 0
 
 
 class ProtectEntitiesResponse(BaseModel):
@@ -297,8 +298,8 @@ class ProtectPatternsResponse(BaseModel):
     total: int = 0
 
 
-class SentinelHealthResponse(BaseModel):
-    """Response from GET /api/protect/health — Sentinel component health from DB."""
+class ProtectHealthResponse(BaseModel):
+    """Response from GET /api/protect/health — agent component health from DB."""
     status: str = "unknown"
     protect_db: str = "no_data"
     protect_poller: str = "no_data"
@@ -307,3 +308,64 @@ class SentinelHealthResponse(BaseModel):
     uptime_seconds: Optional[int] = None
     updated_at: Optional[str] = None
     source: str = "db"
+
+
+# Keep old name as alias for backward compat
+SentinelHealthResponse = ProtectHealthResponse
+
+
+class ProtectCameraModel(BaseModel):
+    """Single camera from Protect DB."""
+    camera_id: str = ""
+    name: str = ""
+    mac: Optional[str] = None
+    model_key: Optional[str] = None
+    state: Optional[str] = None
+    type: Optional[str] = None
+    zone: Optional[str] = None
+    is_mic_enabled: Optional[bool] = None
+    mic_volume: Optional[int] = None
+    video_mode: Optional[str] = None
+    hdr_type: Optional[str] = None
+    has_hdr: Optional[bool] = None
+    has_mic: Optional[bool] = None
+    has_speaker: Optional[bool] = None
+    has_led_status: Optional[bool] = None
+    has_full_hd_snapshot: Optional[bool] = None
+    video_modes: List[str] = []
+    smart_detect_types: List[str] = []
+    smart_detect_audio_types: List[str] = []
+    smart_detect_object_types: List[str] = []
+    smart_detect_audio_config: List[str] = []
+    led_settings: Optional[Dict[str, Any]] = None
+    osd_settings: Optional[Dict[str, Any]] = None
+    lcd_message: Optional[Dict[str, Any]] = None
+    updated_at: Optional[str] = None
+
+
+class ProtectCamerasResponse(BaseModel):
+    """Response from GET /api/protect/cameras."""
+    cameras: List[ProtectCameraModel] = []
+    total: int = 0
+
+
+class PatrolResultModel(BaseModel):
+    """Single patrol result from camera_patrols table."""
+    patrol_id: str = ""
+    camera_id: str = ""
+    camera_name: Optional[str] = None
+    timestamp: str = ""
+    scene_description: Optional[str] = None
+    detected_objects: List[str] = []
+    anomaly_detected: bool = False
+    anomaly_description: Optional[str] = None
+    confidence: float = 0.0
+    model_used: str = "llava"
+    processing_ms: Optional[int] = None
+    error: Optional[str] = None
+
+
+class ProtectPatrolsResponse(BaseModel):
+    """Response from GET /api/protect/patrols."""
+    patrols: List[PatrolResultModel] = []
+    total: int = 0

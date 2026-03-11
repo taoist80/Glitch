@@ -39,7 +39,10 @@ from glitch.api.types import (
     ProtectEventsResponse,
     ProtectAlertsResponse,
     ProtectPatternsResponse,
+    ProtectHealthResponse,
     SentinelHealthResponse,
+    ProtectCamerasResponse,
+    ProtectPatrolsResponse,
 )
 
 if TYPE_CHECKING:
@@ -787,14 +790,14 @@ async def list_modes() -> ModesResponse:
 def _invoke_protect_query(path: str, query_params: dict) -> dict:
     """Invoke the protect-query Lambda directly, same as the gateway does."""
     import json
-    import boto3
     import os
+    from glitch.aws_utils import get_client
 
     fn = os.environ.get("PROTECT_QUERY_FUNCTION_NAME", "")
     if not fn:
         raise HTTPException(status_code=503, detail="PROTECT_QUERY_FUNCTION_NAME not configured")
     try:
-        client = boto3.client("lambda", region_name=os.environ.get("AWS_REGION", "us-west-2"))
+        client = get_client("lambda")
         payload = json.dumps({"path": path, "queryStringParameters": query_params or {}}).encode()
         response = client.invoke(FunctionName=fn, InvocationType="RequestResponse", Payload=payload)
         result = json.loads(response["Payload"].read())
@@ -850,6 +853,46 @@ async def get_protect_patterns(limit: int = 20) -> ProtectPatternsResponse:
     """Get behaviour patterns from the Protect DB."""
     data = _invoke_protect_query("/api/protect/patterns", {"limit": str(limit)})
     return ProtectPatternsResponse(**data)
+
+
+@router.get("/protect/cameras", response_model=ProtectCamerasResponse)
+async def get_protect_cameras() -> ProtectCamerasResponse:
+    """Get cameras from the Protect DB."""
+    data = _invoke_protect_query("/api/protect/cameras", {})
+    return ProtectCamerasResponse(**data)
+
+
+@router.get("/protect/patrols", response_model=ProtectPatrolsResponse)
+async def get_protect_patrols(hours: int = 24, limit: int = 50) -> ProtectPatrolsResponse:
+    """Get camera patrol results."""
+    data = _invoke_protect_query("/api/protect/patrols", {"hours": str(hours), "limit": str(limit)})
+    return ProtectPatrolsResponse(**data)
+
+
+@router.post("/protect/scan")
+async def trigger_protect_scan():
+    """Trigger an on-demand snapshot + LLaVA scan of all cameras."""
+    import main as _main
+    if _main._protect_patrol is None:
+        raise HTTPException(status_code=503, detail="Camera patrol not running")
+    try:
+        results = await _main._protect_patrol.scan_now()
+        return {"status": "complete", "results": results, "count": len(results)}
+    except Exception as e:
+        logger.error("protect scan failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/protect/backfill")
+async def trigger_protect_backfill(days: int = 7):
+    """Trigger a historical event backfill from the Protect API."""
+    try:
+        from glitch.protect.poller import backfill_events
+        result = await backfill_events(days=days)
+        return {"status": "complete", **result}
+    except Exception as e:
+        logger.error("protect backfill failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 def add_cors_middleware(app) -> None:

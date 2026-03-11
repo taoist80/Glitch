@@ -383,6 +383,26 @@ CREATE TABLE IF NOT EXISTS camera_topology (
     UNIQUE (camera_a, camera_b)
 );
 
+-- ============================================================
+-- CAMERA PATROLS
+-- Periodic snapshot + LLaVA analysis results
+-- ============================================================
+CREATE TABLE IF NOT EXISTS camera_patrols (
+    patrol_id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    camera_id           TEXT REFERENCES cameras(camera_id) ON DELETE CASCADE,
+    timestamp           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    scene_description   TEXT,
+    detected_objects    JSONB DEFAULT '[]'::jsonb,
+    anomaly_detected    BOOLEAN DEFAULT FALSE,
+    anomaly_description TEXT,
+    confidence          FLOAT DEFAULT 0.0,
+    model_used          TEXT DEFAULT 'llava',
+    processing_ms       INT,
+    error               TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_patrols_camera_ts ON camera_patrols(camera_id, timestamp DESC);
+
 -- sentinel_health: single-row table written by Sentinel on startup and periodically.
 -- Allows the UI (via protect-query Lambda) to see the agent-side DB / poller status
 -- without requiring a direct network path from the UI to the Sentinel agent.
