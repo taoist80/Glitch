@@ -250,6 +250,7 @@ _protect_health: dict = {
 _protect_poller: _Optional[object] = None
 _protect_processor: _Optional[object] = None
 _protect_patrol: _Optional[object] = None
+_protect_camera_ids: list = []
 
 
 async def _start_protect_subsystem() -> None:
@@ -259,7 +260,7 @@ async def _start_protect_subsystem() -> None:
     /ping health check can respond immediately while SSM, DB, and WS connections
     complete in the background.
     """
-    global _protect_poller, _protect_processor
+    global _protect_poller, _protect_processor, _protect_camera_ids
 
     # Wait for the health check to pass before making outbound connections.
     await asyncio.sleep(10)
@@ -314,6 +315,7 @@ async def _start_protect_subsystem() -> None:
     try:
         cameras = await client.get_cameras()
         camera_ids = [c["id"] for c in cameras if isinstance(c, dict)]
+        _protect_camera_ids = camera_ids
         logger.info("Protect cameras fetched: %d", len(camera_ids))
     except Exception as exc:
         logger.warning("Failed to fetch cameras (will retry in poller seed): %s", exc)
@@ -360,7 +362,67 @@ async def _start_protect_subsystem() -> None:
     asyncio.create_task(_weekly_fp_learning_loop(), name="weekly-fp-learning")
     asyncio.create_task(_weekly_threshold_optimization_loop(), name="weekly-threshold-opt")
     asyncio.create_task(_health_writer_loop(), name="health-writer")
-    logger.info("Protect subsystem started (poller + processor + patrol + daily-report + daily-briefing + weekly-learning + health-writer)")
+    asyncio.create_task(_protect_watchdog_loop(), name="protect-watchdog")
+    logger.info("Protect subsystem started (poller + processor + patrol + daily-report + daily-briefing + weekly-learning + health-writer + watchdog)")
+
+
+async def _protect_watchdog_loop() -> None:
+    """Watchdog: check Protect subsystem health every 60s and restart stopped components.
+
+    Detects:
+    - Event processor stopped (running=False or all workers done)
+    - Poller tasks all completed/cancelled (WS lost and not reconnecting)
+    - Camera patrol stopped
+    Restarts each component independently using the stored camera IDs.
+    """
+    global _protect_poller, _protect_processor, _protect_patrol, _protect_camera_ids
+
+    _WATCHDOG_INTERVAL = int(os.environ.get("GLITCH_PROTECT_WATCHDOG_INTERVAL", "60"))
+
+    while True:
+        await asyncio.sleep(_WATCHDOG_INTERVAL)
+
+        # --- Event processor ---
+        if _protect_processor is not None:
+            try:
+                status = _protect_processor.get_status()
+            except Exception:
+                status = {"running": False}
+            if not status.get("running"):
+                logger.warning("Watchdog: event processor stopped — restarting")
+                try:
+                    await _protect_processor.start(
+                        camera_ids=_protect_camera_ids,
+                        check_interval=float(os.environ.get("GLITCH_PROTECT_CHECK_INTERVAL", "120")),
+                    )
+                    _protect_health["protect_processor"] = "running"
+                    logger.info("Watchdog: event processor restarted")
+                except Exception as exc:
+                    _protect_health["protect_processor"] = f"watchdog_error: {exc}"
+                    logger.error("Watchdog: failed to restart event processor: %s", exc)
+
+        # --- Poller: check if all WS tasks have died ---
+        if _protect_poller is not None:
+            tasks = getattr(_protect_poller, "_tasks", [])
+            if tasks and all(t.done() for t in tasks):
+                logger.warning("Watchdog: all poller tasks are done — restarting WS streams")
+                try:
+                    await _protect_poller.start()
+                    _protect_health["protect_poller"] = "running"
+                    logger.info("Watchdog: poller restarted")
+                except Exception as exc:
+                    _protect_health["protect_poller"] = f"watchdog_error: {exc}"
+                    logger.error("Watchdog: failed to restart poller: %s", exc)
+
+        # --- Camera patrol ---
+        if _protect_patrol is not None:
+            if not getattr(_protect_patrol, "_running", False) and _protect_camera_ids:
+                logger.warning("Watchdog: camera patrol stopped — restarting")
+                try:
+                    await _protect_patrol.start(_protect_camera_ids)
+                    logger.info("Watchdog: camera patrol restarted")
+                except Exception as exc:
+                    logger.error("Watchdog: failed to restart camera patrol: %s", exc)
 
 
 async def _daily_report_loop() -> None:
