@@ -28,6 +28,19 @@ _ssm_poet_soul_key: str | None = None
 _ssm_story_book_key: str | None = None
 
 
+def _is_placeholder_bucket(value: str | None) -> bool:
+    """Return True for obvious non-real placeholder bucket values."""
+    if not value:
+        return False
+    v = value.strip().lower()
+    return (
+        v == "placeholder"
+        or v == "changeme"
+        or v.startswith("dummy-value-for-")
+        or v.startswith("${")
+    )
+
+
 def _get_soul_s3_config_from_ssm() -> Tuple[str | None, str]:
     """Fetch SOUL S3 bucket/key from SSM. Returns (None, default_key) on failure."""
     global _ssm_soul_config
@@ -81,11 +94,21 @@ def get_soul_s3_config() -> Tuple[str | None, str]:
     """
     bucket = (os.environ.get("GLITCH_SOUL_S3_BUCKET") or "").strip() or None
     key = (os.environ.get("GLITCH_SOUL_S3_KEY") or DEFAULT_SOUL_KEY).strip() or DEFAULT_SOUL_KEY
-    if bucket:
+    if bucket and not _is_placeholder_bucket(bucket):
         return bucket, key
+    if bucket and _is_placeholder_bucket(bucket):
+        logger.warning(
+            "Ignoring placeholder GLITCH_SOUL_S3_BUCKET value: %s; falling back to SSM/identity lookup",
+            bucket,
+        )
     bucket, key = _get_soul_s3_config_from_ssm()
-    if bucket:
+    if bucket and not _is_placeholder_bucket(bucket):
         return bucket, key
+    if bucket and _is_placeholder_bucket(bucket):
+        logger.warning(
+            "Ignoring placeholder SSM soul bucket value: %s; falling back to identity-derived bucket",
+            bucket,
+        )
     # Fallback: same naming convention as GlitchStorageStack
     derived = _get_soul_bucket_from_identity()
     return (derived, key) if derived else (None, key)

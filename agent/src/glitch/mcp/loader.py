@@ -23,8 +23,38 @@ def get_default_mcp_config_path() -> Path:
     Returns:
         Path to agent/mcp_servers.yaml
     """
-    # From agent/src/glitch/mcp/loader.py -> agent/src/glitch/mcp -> agent/src/glitch -> agent/src -> agent
-    return Path(__file__).parent.parent.parent.parent / "mcp_servers.yaml"
+    # Runtime packaging layout can differ (source tree, wheel/site-packages, container).
+    # Prefer the first existing file from common locations, then return the most likely
+    # project-root path for diagnostics.
+    env_path = (os.environ.get("GLITCH_MCP_CONFIG_PATH") or "").strip()
+    if env_path:
+        return Path(env_path).expanduser()
+
+    candidates = []
+    cwd = Path.cwd()
+    candidates.extend(
+        [
+            cwd / "mcp_servers.yaml",
+            cwd / "agent" / "mcp_servers.yaml",
+            Path("/app/mcp_servers.yaml"),
+            Path("/app/agent/mcp_servers.yaml"),
+        ]
+    )
+
+    here = Path(__file__).resolve()
+    for parent in [here.parent, *here.parents]:
+        candidates.append(parent / "mcp_servers.yaml")
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate.exists():
+            return candidate
+
+    # Fallback path used in warning messages if nothing exists.
+    return here.parent.parent.parent.parent / "mcp_servers.yaml"
 
 
 def _expand_env_vars(value: str, strict_env: bool = False) -> str:

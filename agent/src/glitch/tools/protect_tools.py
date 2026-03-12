@@ -63,6 +63,44 @@ def _is_db_ready() -> bool:
     return is_pool_available()
 
 
+def _extract_recording_fields(cam: Dict[str, Any]) -> tuple[Optional[bool], str]:
+    """Best-effort recording status extraction across API variants."""
+    if cam.get("isRecording") is not None:
+        return bool(cam.get("isRecording")), str(cam.get("recordingMode") or "unknown")
+
+    if cam.get("recordingEnabled") is not None:
+        return bool(cam.get("recordingEnabled")), str(cam.get("recordingMode") or "unknown")
+
+    if cam.get("isRecordingEnabled") is not None:
+        return bool(cam.get("isRecordingEnabled")), str(cam.get("recordingMode") or "unknown")
+
+    recording_settings = cam.get("recordingSettings")
+    if isinstance(recording_settings, dict):
+        mode = (
+            recording_settings.get("mode")
+            or recording_settings.get("recordingMode")
+            or recording_settings.get("recordingType")
+            or "unknown"
+        )
+        mode_str = str(mode)
+        disabled_modes = {"never", "off", "disabled", "none"}
+        if mode_str.lower() in disabled_modes:
+            return False, mode_str
+        if mode_str.lower() != "unknown":
+            return True, mode_str
+        return None, mode_str
+
+    # Fallback: some payloads expose top-level recordingMode.
+    top_level_mode = cam.get("recordingMode")
+    if top_level_mode:
+        mode_str = str(top_level_mode)
+        if mode_str.lower() in {"never", "off", "disabled", "none"}:
+            return False, mode_str
+        return True, mode_str
+
+    return None, "unknown"
+
+
 # ============================================================
 # GROUP 1: Core Protect Access (5 tools)
 # ============================================================
@@ -79,26 +117,38 @@ async def protect_get_cameras() -> str:
         return _not_configured_msg()
 
     try:
-        from glitch.protect.client import get_client
+        from glitch.protect.client import get_client_for_config
+        from glitch.protect.config import get_all_site_configs
         from glitch.protect import db as protect_db
 
-        client = get_client()
-        cameras = await client.get_cameras()
+        site_configs = get_all_site_configs()
+        all_cameras: List[Dict[str, Any]] = []
+        for site_cfg in site_configs:
+            try:
+                site_client = get_client_for_config(site_cfg.site_id, site_cfg.protect)
+                site_cameras = await site_client.get_cameras()
+                for cam in site_cameras:
+                    if isinstance(cam, dict):
+                        cam = dict(cam)
+                        cam["_site_id"] = site_cfg.site_id
+                        all_cameras.append(cam)
+            except Exception as site_exc:
+                logger.warning("protect_get_cameras: failed for site %s: %s", site_cfg.site_id, site_exc)
+
+        cameras = all_cameras
 
         import asyncio
 
         result = []
         for cam in cameras:
             cam_id = cam.get("id", "")
+            site_id = cam.get("_site_id", "site1")
             state = cam.get("state", "UNKNOWN")
             is_connected = cam.get("isConnected", state == "CONNECTED")
-            is_recording = cam.get(
-                "isRecording",
-                cam.get("recordingSettings", {}).get("mode", "") != "never"
-                if isinstance(cam.get("recordingSettings"), dict) else None,
-            )
+            is_recording, recording_mode = _extract_recording_fields(cam)
             cam_info = {
                 "camera_id": cam_id,
+                "site_id": site_id,
                 "name": cam.get("name", ""),
                 "type": cam.get("type", ""),
                 "state": state,
@@ -107,8 +157,7 @@ async def protect_get_cameras() -> str:
                 "last_motion": cam.get("lastMotion"),
                 "smart_detect_types": cam.get("smartDetectSettings", {}).get("objectTypes", [])
                     if isinstance(cam.get("smartDetectSettings"), dict) else [],
-                "recording_mode": cam.get("recordingSettings", {}).get("mode")
-                    if isinstance(cam.get("recordingSettings"), dict) else None,
+                "recording_mode": recording_mode,
             }
             result.append(cam_info)
 
@@ -116,12 +165,14 @@ async def protect_get_cameras() -> str:
             async def _do_sync():
                 for cam in cameras:
                     cam_id = cam.get("id", "")
+                    site_id = cam.get("_site_id", "site1")
                     if cam_id:
                         try:
                             await protect_db.upsert_camera(
                                 camera_id=cam_id,
                                 name=cam.get("name", cam_id),
                                 camera_type=cam.get("type"),
+                                site_id=site_id,
                             )
                         except Exception as db_exc:
                             logger.warning("protect_get_cameras DB sync failed for %s: %s", cam_id, db_exc)

@@ -1094,11 +1094,12 @@ export class GlitchUiHostingStack extends Stack {
 
     const s3Origin = S3BucketOrigin.withOriginAccessControl(this.uiBucket);
 
-    // Origin response timeout 60s so agent invocations (chat) don't 504; default is 30s.
+    // Origin response timeout 120s: chat responses can take 30-90s; API calls fail-fast
+    // at 25s in the gateway Lambda so they always return well within this window.
     const lambdaOrigin = new HttpOrigin(lambdaUrlHostname, {
       protocolPolicy: OriginProtocolPolicy.HTTPS_ONLY,
       originId: 'GlitchGatewayLambda',
-      readTimeout: Duration.seconds(60),
+      readTimeout: Duration.seconds(120),
     });
 
     // ========== CloudFront Distribution ==========

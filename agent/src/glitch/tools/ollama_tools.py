@@ -179,6 +179,7 @@ def _vision_model_name() -> str:
     return os.environ.get("GLITCH_LLAVA_OLLAMA_MODEL", "llava-v1.6-mistral-7b")
 
 
+@tool
 async def vision_agent(
     image_url: str,
     prompt: str,

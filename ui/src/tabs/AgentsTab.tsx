@@ -26,7 +26,8 @@ export function AgentsTab() {
   useEffect(() => {
     fetchAgents();
     fetchModes();
-  }, [fetchAgents, fetchModes]);
+    if (!sessionId) fetchStatus();
+  }, [fetchAgents, fetchModes, fetchStatus, sessionId]);
 
   useEffect(() => {
     if (sessionId) {

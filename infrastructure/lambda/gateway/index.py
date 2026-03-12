@@ -168,7 +168,10 @@ def invoke_api(path: str, method: str, body: dict, session_id: str, query_params
         req = urllib.request.Request(
             url, data=req_body, headers=dict(aws_request.headers), method='POST'
         )
-        with urllib.request.urlopen(req, timeout=280) as response:
+        # 25s timeout: UI API calls (status, agents, protect, etc.) must be fast.
+        # This ensures the Lambda returns an error response well within CloudFront's
+        # readTimeout, preventing 504s during container startup/scaling events.
+        with urllib.request.urlopen(req, timeout=25) as response:
             result = json.loads(response.read().decode())
             return result if isinstance(result, dict) else {"data": result}
     except urllib.error.HTTPError as e:
@@ -275,11 +278,18 @@ def handler(event, context):
             else:
                 response_body = invoke_agent(prompt, session_id, stream=stream, agent_id=agent_id, mode_id=mode_id)
 
-        # Protect API: bypass LLM — query Postgres directly via protect-query Lambda
+        # Protect API: bypass LLM — query Postgres directly via protect-query Lambda.
+        # scan/backfill are runtime actions and must be forwarded to AgentCore instead.
         elif path.startswith('/api/protect/'):
-            query_params = _normalize_query_params(event.get('queryStringParameters'))
-            logger.info(f"Gateway routing to protect-query: {http_method} {path} query={query_params}")
-            response_body = invoke_protect_query(path, query_params)
+            if path in ('/api/protect/scan', '/api/protect/backfill'):
+                api_path = '/' + path[5:]
+                query_params = _normalize_query_params(event.get('queryStringParameters'))
+                logger.info(f"Gateway forwarding protect action to AgentCore: {http_method} {api_path}")
+                response_body = invoke_api(api_path, http_method, body, session_id, query_params)
+            else:
+                query_params = _normalize_query_params(event.get('queryStringParameters'))
+                logger.info(f"Gateway routing to protect-query: {http_method} {path} query={query_params}")
+                response_body = invoke_protect_query(path, query_params)
 
         # API proxy routes: /api/* (from nginx) or direct paths (from UI with Lambda base URL)
         elif path.startswith('/api/'):

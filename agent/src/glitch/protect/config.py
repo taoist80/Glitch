@@ -230,11 +230,20 @@ def get_db_config() -> ProtectDBConfig:
         logger.info("Loaded Protect DB config from DSN: host=%s", _db_config.host)
         return _db_config
 
-    # Common: host / port / dbname from env or SSM
-    host = (
-        os.environ.get("GLITCH_PROTECT_DB_HOST")
-        or _get_ssm_parameter("/glitch/protect-db/host")
-    )
+    # Common: host / port / dbname from env or SSM.
+    # Prefer SSM host when both are present but differ so DB instance replacements
+    # (which update /glitch/protect-db/host) do not require an immediate runtime redeploy.
+    env_host = (os.environ.get("GLITCH_PROTECT_DB_HOST") or "").strip()
+    ssm_host = (_get_ssm_parameter("/glitch/protect-db/host") or "").strip()
+    if env_host and ssm_host and env_host != ssm_host:
+        logger.warning(
+            "GLITCH_PROTECT_DB_HOST (%s) differs from SSM /glitch/protect-db/host (%s); preferring SSM",
+            env_host,
+            ssm_host,
+        )
+        host = ssm_host
+    else:
+        host = env_host or ssm_host
     port_str = (
         os.environ.get("GLITCH_PROTECT_DB_PORT")
         or _get_ssm_parameter("/glitch/protect-db/port")
