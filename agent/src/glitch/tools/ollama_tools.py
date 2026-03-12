@@ -174,7 +174,6 @@ class HealthCheckResult:
         return base
 
 
-@tool
 def _vision_model_name() -> str:
     """Return the configured LLaVA model name, matching llava_agent.py."""
     return os.environ.get("GLITCH_LLAVA_OLLAMA_MODEL", "llava-v1.6-mistral-7b")

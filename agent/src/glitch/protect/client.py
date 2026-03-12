@@ -229,9 +229,10 @@ class ProtectClient:
     ) -> List[Dict[str, Any]]:
         """Query events from the integration API.
 
-        Note: the UniFi Protect integration API does not support filtering by
-        camera_ids via query parameter — passing it causes a 404. Camera
-        filtering must be done client-side after fetching.
+        The UniFi Protect integration API does not expose a REST /events endpoint
+        (returns 404). Events are delivered via WebSocket and persisted by the
+        poller; use the DB (e.g. get_recent_events / get_unprocessed_events) for
+        event queries. This method returns [] on 404 for backward compatibility.
         """
         params: Dict[str, Any] = {"limit": limit}
         if start:
@@ -241,7 +242,15 @@ class ProtectClient:
         if event_types:
             params["types"] = ",".join(event_types)
 
-        data = await self._request("GET", f"{self._api_prefix}/events", params=params)
+        try:
+            data = await self._request("GET", f"{self._api_prefix}/events", params=params)
+        except ProtectAPIError as e:
+            if e.status_code == 404:
+                logger.debug(
+                    "Protect integration API has no REST events endpoint; events come via WebSocket/DB."
+                )
+                return []
+            raise
         events = data if isinstance(data, list) else data.get("data", [])
 
         # Client-side camera filter if requested

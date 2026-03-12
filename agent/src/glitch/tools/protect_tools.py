@@ -947,10 +947,7 @@ async def protect_classify_snapshot(
         ts_str = timestamp or datetime.now().strftime("%Y-%m-%d %I:%M %p")
         prompt = format_general_prompt(camera_location, ts_str)
 
-        result = await vision_agent.__wrapped__(
-            image_url=image_url,
-            prompt=prompt,
-        ) if hasattr(vision_agent, "__wrapped__") else str(vision_agent(image_url=image_url, prompt=prompt))
+        result = await vision_agent(image_url=image_url, prompt=prompt)
 
         classifications = extract_general_classifications(str(result))
         return json.dumps(classifications, indent=2)
@@ -1004,12 +1001,7 @@ Return ONLY valid JSON:
   "summary": "..."
 }}"""
 
-        result = await vision_agent.__wrapped__(
-            image_url=current_snapshot,
-            prompt=prompt,
-        ) if hasattr(vision_agent, "__wrapped__") else str(
-            vision_agent(image_url=current_snapshot, prompt=prompt)
-        )
+        result = await vision_agent(image_url=current_snapshot, prompt=prompt)
 
         import re
         json_match = re.search(r"\{.*\}", str(result), re.DOTALL)

@@ -251,17 +251,19 @@ _protect_pollers: dict = {}
 _protect_processors: dict = {}
 _protect_patrols: dict = {}
 _protect_camera_ids_by_site: dict = {}
+_protect_site_configs: dict = {}
 
 
 async def _start_protect_site(site_cfg) -> None:
     """Start poller, event processor, and patrol for a single Protect site."""
-    global _protect_pollers, _protect_processors, _protect_patrols, _protect_camera_ids_by_site
+    global _protect_pollers, _protect_processors, _protect_patrols, _protect_camera_ids_by_site, _protect_site_configs
 
     from glitch.protect.client import get_client_for_config
     from glitch.protect.config import SiteConfig
 
     site_id = site_cfg.site_id
     protect_cfg = site_cfg.protect
+    _protect_site_configs[site_id] = site_cfg
 
     client = get_client_for_config(site_id, protect_cfg)
 
@@ -310,12 +312,12 @@ async def _start_protect_site(site_cfg) -> None:
             interval_seconds=int(os.environ.get("GLITCH_PROTECT_PATROL_INTERVAL", "600")),
             site_id=site_id,
         )
+        _protect_patrols[site_id] = patrol
         if camera_ids:
             await patrol.start(camera_ids)
-            _protect_patrols[site_id] = patrol
             logger.info("[%s] Camera patrol started for %d cameras", site_id, len(camera_ids))
         else:
-            logger.warning("[%s] No camera IDs — camera patrol not started", site_id)
+            logger.warning("[%s] No camera IDs — camera patrol not started (watchdog will retry seed)", site_id)
     except Exception as exc:
         logger.warning("[%s] Failed to start camera patrol: %s", site_id, exc, exc_info=True)
 
@@ -385,14 +387,55 @@ async def _protect_watchdog_loop() -> None:
     - Event processor stopped (running=False or all workers done)
     - Poller tasks all completed/cancelled (WS lost and not reconnecting)
     - Camera patrol stopped
+    - Sites with 0 cameras (e.g. port forward not ready at startup): retries camera
+      seed and starts processor/patrol when cameras appear.
     Restarts each component independently using the stored camera IDs.
     """
-    global _protect_pollers, _protect_processors, _protect_patrols, _protect_camera_ids_by_site
+    global _protect_pollers, _protect_processors, _protect_patrols, _protect_camera_ids_by_site, _protect_site_configs
 
     _WATCHDOG_INTERVAL = int(os.environ.get("GLITCH_PROTECT_WATCHDOG_INTERVAL", "60"))
+    _check_interval = float(os.environ.get("GLITCH_PROTECT_CHECK_INTERVAL", "120"))
 
     while True:
         await asyncio.sleep(_WATCHDOG_INTERVAL)
+
+        # Retry camera seed for sites that have 0 cameras (e.g. site2 when port forward wasn't ready).
+        for site_id in list(_protect_pollers.keys()):
+            if _protect_camera_ids_by_site.get(site_id):
+                continue
+            site_cfg = _protect_site_configs.get(site_id)
+            if not site_cfg:
+                continue
+            try:
+                from glitch.protect.client import get_client_for_config
+                client = get_client_for_config(site_id, site_cfg.protect)
+                cameras = await client.get_cameras()
+                new_ids = [c["id"] for c in cameras if isinstance(c, dict)]
+                if not new_ids:
+                    continue
+                _protect_camera_ids_by_site[site_id] = new_ids
+                processor = _protect_processors.get(site_id)
+                if processor:
+                    await processor.start(camera_ids=new_ids, check_interval=_check_interval)
+                    _protect_health["protect_processor"] = "running"
+                # Create patrol if not yet started for this site
+                if site_id not in _protect_patrols:
+                    from glitch.protect.patrol import CameraPatrol
+                    patrol = CameraPatrol(
+                        protect_client=client,
+                        interval_seconds=int(os.environ.get("GLITCH_PROTECT_PATROL_INTERVAL", "600")),
+                        site_id=site_id,
+                    )
+                    await patrol.start(new_ids)
+                    _protect_patrols[site_id] = patrol
+                else:
+                    await _protect_patrols[site_id].start(new_ids)
+                logger.info(
+                    "Watchdog[%s]: camera seed succeeded (%d cameras) — processor and patrol started",
+                    site_id, len(new_ids),
+                )
+            except Exception as exc:
+                logger.debug("Watchdog[%s]: camera seed retry failed: %s", site_id, exc)
 
         for site_id, processor in list(_protect_processors.items()):
             try:
@@ -405,7 +448,7 @@ async def _protect_watchdog_loop() -> None:
                     camera_ids = _protect_camera_ids_by_site.get(site_id, [])
                     await processor.start(
                         camera_ids=camera_ids,
-                        check_interval=float(os.environ.get("GLITCH_PROTECT_CHECK_INTERVAL", "120")),
+                        check_interval=_check_interval,
                     )
                     _protect_health["protect_processor"] = "running"
                     logger.info("Watchdog[%s]: event processor restarted", site_id)
