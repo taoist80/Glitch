@@ -519,7 +519,7 @@ def create_glitch_agent(
     session_id: Optional[str] = None,
     memory_id: Optional[str] = None,
     region: Optional[str] = None,
-    window_size: int = 20,
+    window_size: Optional[int] = None,
 ) -> GlitchAgent:
     """Factory function to create a Glitch agent instance.
     
@@ -541,11 +541,12 @@ def create_glitch_agent(
         or os.getenv("MEMORY_ID")
         or _DEFAULT_AGENTCORE_MEMORY_ID
     )
+    _window_size = window_size if window_size is not None else int(os.getenv("GLITCH_WINDOW_SIZE", "10"))
     config = AgentConfig(
         session_id=session_id or os.getenv("GLITCH_SESSION_ID", str(uuid.uuid4())),
         memory_id=_memory_id,
         region=region or os.getenv("AWS_REGION", "us-west-2"),
-        window_size=window_size,
+        window_size=_window_size,
     )
 
     return GlitchAgent(config)

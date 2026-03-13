@@ -495,3 +495,63 @@ def update_story_book(contents: str) -> str:
     if err == "AccessDenied":
         return "Story-book update failed: access denied to the S3 bucket."
     return f"Story-book update failed (S3 error: {err}). Check logs and bucket permissions."
+
+
+@tool
+async def remember_auri(content: str, source: str = "agent") -> str:
+    """Store a persistent Auri memory for semantic recall across future sessions.
+
+    Call this during roleplay to record important facts, preferences, story beats,
+    relationship details, or anything Auri should remember. Memories are embedded
+    with Bedrock Titan and stored in pgvector for semantic retrieval.
+
+    Args:
+        content: The memory to store — 1 to 3 self-contained sentences work best.
+        source:  Who generated this — 'agent' (default), 'user', or 'auto'.
+
+    Returns:
+        Confirmation or error message.
+    """
+    from glitch.auri_memory import store_memory
+
+    if not content or not content.strip():
+        return "Error: content cannot be empty."
+
+    try:
+        await store_memory(None, content.strip(), source=source)
+        return f"Memory stored ({len(content)} chars)."
+    except Exception as e:
+        logger.warning("remember_auri failed: %s", e)
+        return f"Failed to store memory: {e}"
+
+
+@tool
+async def search_auri_memory(query: str, k: int = 5) -> str:
+    """Search Auri's persistent vector memory for relevant past memories.
+
+    Use this during roleplay when you need to recall facts, past interactions,
+    or context that may not be in the current session. Returns the most
+    semantically similar stored memories to the query.
+
+    Args:
+        query: Natural language description of what to recall.
+        k:     Number of memories to return (default 5, max 20).
+
+    Returns:
+        Newline-separated memories, or a message if none found.
+    """
+    from glitch.auri_memory import retrieve_memories
+
+    if not query or not query.strip():
+        return "Error: query cannot be empty."
+
+    k = max(1, min(int(k), 20))
+
+    try:
+        results = await retrieve_memories(None, query.strip(), k=k)
+        if not results:
+            return "No memories found matching that query."
+        return "\n---\n".join(results)
+    except Exception as e:
+        logger.warning("search_auri_memory failed: %s", e)
+        return f"Failed to search memories: {e}"

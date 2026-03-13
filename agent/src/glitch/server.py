@@ -388,7 +388,7 @@ async def invoke(payload: InvocationRequest, context: RequestContext) -> Invocat
 
         invoke_step = "resolve_agent_and_mode"
         from glitch.agent_registry import get_agent as registry_get_agent, get_default_agent_id
-        from glitch.modes import apply_mode_to_prompt, MODE_DEFAULT
+        from glitch.modes import apply_mode_with_memories, MODE_DEFAULT
         agent_id = (payload.get("agent_id") or "").strip().lower() or get_default_agent_id()
         mode_id = (payload.get("mode_id") or "").strip().lower() or MODE_DEFAULT
         agent = registry_get_agent(agent_id)
@@ -405,7 +405,7 @@ async def invoke(payload: InvocationRequest, context: RequestContext) -> Invocat
                 memory_id="",
             )
 
-        prompt_out, system_prompt_out = apply_mode_to_prompt(mode_id, prompt, system_prompt=None)
+        prompt_out, system_prompt_out = await apply_mode_with_memories(mode_id, prompt, system_prompt=None)
         logger.info(
             "Invocation routed to agent",
             extra={

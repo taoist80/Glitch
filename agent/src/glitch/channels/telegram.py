@@ -28,7 +28,7 @@ from glitch.channels.bootstrap import OwnerBootstrap
 from glitch.channels.config_manager import ConfigManager
 from glitch.channels.telegram_commands import TelegramCommandHandler
 from glitch.agent_registry import get_agent as registry_get_agent, get_default_agent_id
-from glitch.modes import apply_mode_to_prompt, MODE_DEFAULT, MODE_POET, MODE_ROLEPLAY
+from glitch.modes import apply_mode_to_prompt, apply_mode_with_memories, MODE_DEFAULT, MODE_POET, MODE_ROLEPLAY
 
 logger = logging.getLogger(__name__)
 
@@ -205,7 +205,7 @@ class TelegramChannel(ChannelAdapter):
         logger.info("Session mode selected", extra={"session_id": session_id, "mode_id": MODE_ROLEPLAY, "channel": "telegram"})
         if context.args:
             prompt = " ".join(context.args)
-            prompt_out, system_prompt_out = apply_mode_to_prompt(MODE_ROLEPLAY, prompt, system_prompt=None)
+            prompt_out, system_prompt_out = await apply_mode_with_memories(MODE_ROLEPLAY, prompt, system_prompt=None)
             agent = self._get_agent(session_id)
             if agent:
                 try:
@@ -484,7 +484,7 @@ class TelegramChannel(ChannelAdapter):
         session_id = self.get_session_id(update)
         message_text = update.message.text
         mode_id = self._get_mode_id(session_id)
-        prompt_out, system_prompt_out = apply_mode_to_prompt(mode_id, message_text, system_prompt=None)
+        prompt_out, system_prompt_out = await apply_mode_with_memories(mode_id, message_text, system_prompt=None)
 
         agent = self._get_agent(session_id)
         if agent:
@@ -620,7 +620,7 @@ class TelegramChannel(ChannelAdapter):
         else:
             prompt = "[Image attached] Please describe this image in detail."
         mode_id = self._get_mode_id(session_id)
-        prompt_out, system_prompt_out = apply_mode_to_prompt(mode_id, prompt, system_prompt=None)
+        prompt_out, system_prompt_out = await apply_mode_with_memories(mode_id, prompt, system_prompt=None)
         image_urls = None
         if media.media_data:
             image_urls = [f"data:image/jpeg;base64,{media.media_data}"]

@@ -84,6 +84,55 @@ def _iso(val) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Auri memory action handlers (invoked directly via lambda:InvokeFunction,
+# not via the HTTP path routing used by the gateway).
+#
+# Caller (auri_memory.py in PUBLIC mode) generates the embedding via Bedrock,
+# then invokes this Lambda to handle the actual RDS read/write inside the VPC.
+# ---------------------------------------------------------------------------
+
+def action_auri_memory_store(conn, event):
+    import uuid as _uuid
+    content = event.get("content", "")
+    embedding = event.get("embedding", [])
+    session_id = event.get("session_id", "")
+    source = event.get("source", "agent")
+    metadata = event.get("metadata", {})
+    if not content or not embedding:
+        return {"statusCode": 400, "error": "content and embedding required"}
+    vec_str = "[" + ",".join(str(float(x)) for x in embedding) + "]"
+    conn.run(
+        """
+        INSERT INTO auri_memory
+            (memory_id, content, embedding, session_id, source, metadata)
+        VALUES (:mem_id, :content, :vec::vector, :session_id, :source, :metadata)
+        """,
+        mem_id=str(_uuid.uuid4()),
+        content=content,
+        vec=vec_str,
+        session_id=session_id or "",
+        source=source,
+        metadata=json.dumps(metadata or {}),
+    )
+    logger.info("auri_memory: stored (source=%s, len=%d)", source, len(content))
+    return {"statusCode": 200, "result": "ok"}
+
+
+def action_auri_memory_search(conn, event):
+    embedding = event.get("embedding", [])
+    k = max(1, min(int(event.get("k", 5)), 20))
+    if not embedding:
+        return {"statusCode": 400, "error": "embedding required"}
+    vec_str = "[" + ",".join(str(float(x)) for x in embedding) + "]"
+    rows = conn.run(
+        "SELECT content FROM auri_memory ORDER BY embedding <=> :vec::vector LIMIT :k",
+        vec=vec_str,
+        k=k,
+    )
+    return {"statusCode": 200, "memories": [r[0] for r in rows]}
+
+
+# ---------------------------------------------------------------------------
 # Query helpers
 # ---------------------------------------------------------------------------
 
@@ -354,7 +403,24 @@ def query_patterns(conn, limit: int) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
-    """Route /api/protect/* to direct Postgres queries."""
+    """Route /api/protect/* to direct Postgres queries, or dispatch action-based calls."""
+    global _conn
+    # Action-based dispatch (direct Lambda invocations from the agent runtime).
+    action = event.get("action")
+    if action:
+        try:
+            conn = _get_connection()
+            if action == "auri_memory_store":
+                return action_auri_memory_store(conn, event)
+            elif action == "auri_memory_search":
+                return action_auri_memory_search(conn, event)
+            else:
+                return {"statusCode": 400, "error": f"Unknown action: {action}"}
+        except Exception as exc:
+            logger.error("auri_memory action %s error: %s", action, exc, exc_info=True)
+            _conn = None
+            return {"statusCode": 503, "error": str(exc)}
+
     path = event.get("path", "")
     query = event.get("queryStringParameters") or {}
 
@@ -401,7 +467,6 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     except Exception as exc:
         logger.error("protect-query error: %s", exc, exc_info=True)
         # Reset connection so next invocation gets a fresh one
-        global _conn
         _conn = None
         return {
             "statusCode": 503,

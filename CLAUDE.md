@@ -95,3 +95,25 @@ Tools in `agent/src/glitch/tools/` are registered in `registry.py` by group: `ol
 - Lambda logs → `/aws/lambda/glitch-*`
 
 When debugging, query the AgentCore log group first.
+
+### Auri memory (Protect DB) — verify migration
+
+The `auri_memory` table is created by `db._run_migrations()` when the Protect DB pool is first established (inside `_apply_schema`). That only runs when **Protect is configured** and `init_pool_background()` succeeds. If you don’t see the migration in logs, either Protect isn’t configured or the DB connection never succeeded.
+
+**CloudWatch (AgentCore log group):**
+
+- Search for: `Protect not configured` — if present, the DB init task is never started; no migration runs.
+- Search for: `Protect DB pool initialised` or `Connecting to Protect DB` — confirms the pool (and thus schema + migrations) ran.
+- Search for: `auri_memory table not found` and `auri_memory migration complete` — confirms the auri_memory migration ran.
+
+**Manual check/create on Protect RDS:**
+
+1. **Check if the table exists** (any user with read access to `information_schema`):
+   ```sql
+   SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'auri_memory');
+   ```
+2. **Create the table if needed** (same SQL the runtime uses; idempotent):
+   ```bash
+   psql "$GLITCH_PROTECT_DB_URI" -f agent/scripts/auri_memory_migration.sql
+   ```
+   The script requires the `vector` extension; if missing, create it as the RDS master user: `CREATE EXTENSION IF NOT EXISTS vector;`

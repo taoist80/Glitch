@@ -31,7 +31,14 @@ from glitch.tools.telemetry_tools import (
     create_cloudwatch_metric,
     query_persistent_telemetry,
 )
-from glitch.tools.soul_tools import update_soul, update_auri
+from glitch.tools.soul_tools import (
+    update_soul,
+    update_auri,
+    update_story_book,
+    get_story_book,
+    remember_auri,
+    search_auri_memory,
+)
 from glitch.tools.ssh_tools import (
     ssh_list_hosts,
     ssh_install_key,
@@ -145,7 +152,14 @@ class ToolRegistry:
             create_cloudwatch_metric,
             query_persistent_telemetry,
         ]
-        self._groups["soul"] = [update_soul, update_auri]
+        self._groups["soul"] = [
+            update_soul,
+            update_auri,
+            update_story_book,
+            get_story_book,
+            remember_auri,
+            search_auri_memory,
+        ]
         self._groups["ssh"] = [
             ssh_list_hosts,
             ssh_install_key,

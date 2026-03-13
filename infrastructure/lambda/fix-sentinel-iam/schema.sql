@@ -425,20 +425,17 @@ CREATE TABLE IF NOT EXISTS sentinel_health (
 -- ============================================================
 -- AURI MEMORY
 -- Vector memory store for Auri roleplay persona recall.
--- Requires pgvector (already enabled for entities table).
--- On existing DBs this table is created by db._run_migrations().
 -- ============================================================
 CREATE TABLE IF NOT EXISTS auri_memory (
     memory_id   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     content     TEXT NOT NULL,
     embedding   vector(1024) NOT NULL,
     session_id  TEXT NOT NULL DEFAULT '',
-    source      TEXT NOT NULL DEFAULT 'agent',  -- agent | user | auto
+    source      TEXT NOT NULL DEFAULT 'agent',
     metadata    JSONB DEFAULT '{}'::jsonb,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- IVFFlat cosine index (lists=50 suits < 50k rows)
 CREATE INDEX IF NOT EXISTS idx_auri_memory_embedding
     ON auri_memory USING ivfflat (embedding vector_cosine_ops) WITH (lists = 50);
 

@@ -20,7 +20,7 @@ def create_glitch_agent(
     session_id: Optional[str] = None,
     memory_id: Optional[str] = None,
     region: Optional[str] = None,
-    window_size: int = 20,
+    window_size: Optional[int] = None,
 ) -> GlitchAgent:
     """Create a Glitch orchestrator agent and log creation."""
     agent = _create_glitch_agent(

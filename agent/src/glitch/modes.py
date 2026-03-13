@@ -3,7 +3,7 @@
 import logging
 import os
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Coroutine, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -96,3 +96,34 @@ def apply_mode_to_prompt(
             context = _ROLEPLAY_FALLBACK
         return _inject_context(context, prompt, system_prompt)
     return prompt, system_prompt
+
+
+async def apply_mode_with_memories(
+    mode_id: str,
+    prompt: str,
+    system_prompt: Optional[str] = None,
+) -> Tuple[str, Optional[str]]:
+    """Like apply_mode_to_prompt, but also injects retrieved Auri memories for roleplay mode.
+
+    Memory retrieval is non-fatal — any DB error is logged as a warning and the
+    invocation proceeds normally with just the auri.md persona.
+    """
+    prompt_out, sys_out = apply_mode_to_prompt(mode_id, prompt, system_prompt)
+    if mode_id != MODE_ROLEPLAY:
+        return prompt_out, sys_out
+
+    from glitch.auri_memory import retrieve_memories
+
+    try:
+        memories = await retrieve_memories(None, prompt, k=8)
+        if memories:
+            block = (
+                "\n\n## Auri's recalled memories\n\n"
+                + "\n---\n".join(f"- {m}" for m in memories)
+            )
+            sys_out = (sys_out or "") + block
+            logger.debug("auri_memory: injected %d memories into roleplay context", len(memories))
+    except Exception as e:
+        logger.warning("auri_memory: non-fatal injection error: %s", e)
+
+    return prompt_out, sys_out

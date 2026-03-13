@@ -182,7 +182,45 @@ async def _apply_schema(pool) -> None:
         else:
             logger.debug("Protect DB schema already applied")
 
+        # Always run additive migrations (idempotent — all use IF NOT EXISTS checks)
+        await _run_migrations(conn)
+
     _schema_applied = True
+
+
+async def _run_migrations(conn) -> None:
+    """Idempotent additive migrations — runs on every startup after schema check.
+
+    Each migration checks for existence before creating, so it is safe to run
+    against both fresh and existing databases.
+    """
+    # auri_memory: vector memory store for Auri roleplay recall
+    auri_mem_exists = await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
+        "WHERE table_name = 'auri_memory' AND table_schema = 'public')"
+    )
+    if not auri_mem_exists:
+        logger.info("auri_memory table not found — running migration")
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS auri_memory (
+                memory_id   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                content     TEXT NOT NULL,
+                embedding   vector(1024) NOT NULL,
+                session_id  TEXT NOT NULL DEFAULT '',
+                source      TEXT NOT NULL DEFAULT 'agent',
+                metadata    JSONB DEFAULT '{}'::jsonb,
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_auri_memory_embedding
+                ON auri_memory USING ivfflat (embedding vector_cosine_ops) WITH (lists = 50)
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_auri_memory_created_at
+                ON auri_memory (created_at DESC)
+        """)
+        logger.info("auri_memory migration complete")
 
 
 async def close_pool() -> None:

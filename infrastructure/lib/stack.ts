@@ -36,6 +36,8 @@ const BEDROCK_MODEL_ARNS = [
   'arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-20250514-v1:0',
   'arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0',
   'arn:aws:bedrock:*::foundation-model/anthropic.claude-opus-4-20250514-v1:0',
+  // Titan Embed Text v2 — used by auri_memory.py for pgvector embeddings
+  'arn:aws:bedrock:*::foundation-model/amazon.titan-embed-text-v2:0',
 ] as const;
 
 
@@ -1386,6 +1388,13 @@ export class AgentCoreStack extends Stack {
             effect: Effect.ALLOW,
             actions: ['lambda:GetFunctionUrlConfig'],
             resources: [`arn:aws:lambda:${this.region}:${this.account}:function:glitch-telegram-webhook`],
+          }),
+          new PolicyStatement({
+            sid: 'ProtectQueryLambdaInvoke',
+            effect: Effect.ALLOW,
+            actions: ['lambda:InvokeFunction'],
+            // protect-query is the VPC bridge for auri_memory RDS read/write
+            resources: [`arn:aws:lambda:${this.region}:${this.account}:function:glitch-protect-query`],
           }),
           new PolicyStatement({
             sid: 'CodeBuildDeployStatusRead',
