@@ -74,7 +74,7 @@ def bootstrap_agents_and_register() -> GlitchAgent:
     llava = create_llava_agent()
 
     register_agent("glitch", glitch, {"name": "Glitch", "description": "Primary orchestrator (Strands + Bedrock)"})
-    register_agent("mistral", mistral, {"name": "Mistral", "description": "Local chat (mistral-nemo:12b)"})
+    register_agent("mistral", mistral, {"name": "Mistral", "description": "Local chat (hf.co/.../dolphin-2.9.3-mistral-7B-32k-Q4_K_M-GGUF)"})
     register_agent("llava", llava, {"name": "LLaVA", "description": "Vision (image processing)"})
 
     default_id = os.getenv(ENV_DEFAULT_AGENT, "mistral").strip().lower()

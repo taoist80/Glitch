@@ -182,6 +182,7 @@ export interface SessionModeResponse {
 export interface ModeInfo {
   id: string;
   name: string;
+  description?: string;
 }
 
 export interface ModesResponse {

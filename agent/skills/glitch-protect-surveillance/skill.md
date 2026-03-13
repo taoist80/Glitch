@@ -7,7 +7,7 @@ You own all UniFi Protect, UniFi Network, Pi-hole DNS, and security operations d
 | Category | Tools |
 |---|---|
 | Cameras | `protect_get_cameras`, `protect_get_camera_snapshot` |
-| Events | `protect_get_events`, `protect_get_recent_events` |
+| Events | `protect_get_events`, `protect_get_recent_events`, `protect_camera_report` |
 | Entities | `protect_get_entities`, `protect_register_entity`, `protect_get_entity_dossier` |
 | Alerts | `protect_get_alerts`, `protect_get_unacknowledged_alerts`, `protect_acknowledge_alert` |
 | Analysis | `analyze_and_alert`, `security_correlation_scan` |
@@ -21,6 +21,9 @@ You own all UniFi Protect, UniFi Network, Pi-hole DNS, and security operations d
 
 **"Any motion in the last hour?"**
 → Call `protect_get_recent_events` with appropriate time window.
+
+**"Give me a camera report for the last 8 hours"**
+→ Call `protect_camera_report(hours=8)` and present per-site activity + notable events.
 
 **"Who is at the front door?"**
 → Call `protect_get_events` filtered by camera, then `protect_get_entity_dossier` for matches.

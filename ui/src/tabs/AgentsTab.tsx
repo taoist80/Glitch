@@ -50,7 +50,7 @@ export function AgentsTab() {
             Agents
           </h2>
           <p className="text-sm text-base-content/60">
-            Agent registry: choose chat agent (Glitch, Mistral, LLaVA) and mode (Default, Poet) for this session
+            Choose agent and persona mode for this session
           </p>
         </div>
         <button
@@ -147,21 +147,29 @@ export function AgentsTab() {
                   Mode
                 </h3>
                 <p className="text-sm text-base-content/60 mb-3">
-                  Personality mode (e.g. Poet) applied to the selected agent.
+                  Personality mode applied to the selected agent.
                 </p>
                 <div className="flex flex-wrap gap-2">
-                  {modes.modes.map((mode) => (
-                    <button
-                      key={mode.id}
-                      className={`btn btn-sm ${
-                        sessionAgent?.mode_id === mode.id ? 'btn-primary' : 'btn-ghost'
-                      }`}
-                      onClick={() => sessionId && putSessionMode(sessionId, mode.id)}
-                      disabled={!sessionId}
-                    >
-                      {mode.name}
-                    </button>
-                  ))}
+                  {modes.modes.map((mode) => {
+                    const active = sessionAgent?.mode_id === mode.id;
+                    return (
+                      <button
+                        key={mode.id}
+                        className={`btn btn-sm flex-col h-auto py-2 px-4 gap-0.5 ${
+                          active ? 'btn-primary' : 'btn-ghost'
+                        }`}
+                        onClick={() => sessionId && putSessionMode(sessionId, mode.id)}
+                        disabled={!sessionId}
+                      >
+                        <span>{mode.name}</span>
+                        {mode.description && (
+                          <span className={`text-xs font-normal normal-case ${active ? 'text-primary-content/70' : 'text-base-content/50'}`}>
+                            {mode.description}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
             </div>

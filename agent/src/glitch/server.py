@@ -349,9 +349,13 @@ async def invoke(payload: InvocationRequest, context: RequestContext) -> Invocat
             return await _handle_ui_api_request(payload["_ui_api_request"])
         
         invoke_step = "log_prompt"
-        prompt_preview = (payload.get("prompt") or "")[:80]
         session_id = payload.get("session_id") or ""
-        logger.info("Received invocation: prompt=%s session_id=%s", repr(prompt_preview), session_id)
+        _mode_hint = (payload.get("mode_id") or "").strip().lower()
+        if _mode_hint == "roleplay":
+            logger.info("Received invocation: prompt=[roleplay] session_id=%s", session_id)
+        else:
+            prompt_preview = (payload.get("prompt") or "")[:80]
+            logger.info("Received invocation: prompt=%s session_id=%s", repr(prompt_preview), session_id)
         sys.stdout.flush()
 
         invoke_step = "check_keepalive"

@@ -19,12 +19,15 @@ SSM_SOUL_BUCKET = "/glitch/soul/s3-bucket"
 SSM_SOUL_KEY = "/glitch/soul/s3-key"
 SSM_POET_SOUL_KEY = "/glitch/soul/poet-soul-s3-key"
 DEFAULT_POET_SOUL_KEY = "poet-soul.md"
+SSM_AURI_S3_KEY = "/glitch/soul/auri-s3-key"
+DEFAULT_AURI_KEY = "auri.md"
 SSM_STORY_BOOK_KEY = "/glitch/soul/story-book-s3-key"
 DEFAULT_STORY_BOOK_KEY = "story-book.md"
 
 # Cached SSM result so we don't call SSM on every get_soul_s3_config().
 _ssm_soul_config: Tuple[str | None, str] | None = None
 _ssm_poet_soul_key: str | None = None
+_ssm_auri_s3_key: str | None = None
 _ssm_story_book_key: str | None = None
 
 
@@ -140,6 +143,113 @@ def _get_poet_soul_s3_key_from_ssm() -> str:
     except Exception:
         _ssm_poet_soul_key = DEFAULT_POET_SOUL_KEY
         return _ssm_poet_soul_key
+
+
+def get_auri_s3_config() -> Tuple[str | None, str]:
+    """Return (bucket, key) for auri.md in S3, or (None, key) if bucket not configured.
+
+    Uses same bucket as SOUL. Key: GLITCH_AURI_S3_KEY env,
+    else SSM /glitch/soul/auri-s3-key, else auri.md.
+    """
+    bucket, _ = get_soul_s3_config()
+    if not bucket:
+        return None, DEFAULT_AURI_KEY
+    key = os.environ.get("GLITCH_AURI_S3_KEY") or _get_auri_s3_key_from_ssm()
+    return bucket, (key or DEFAULT_AURI_KEY).strip() or DEFAULT_AURI_KEY
+
+
+def _get_auri_s3_key_from_ssm() -> str:
+    """Return auri S3 key from SSM; cache and fallback to default."""
+    global _ssm_auri_s3_key
+    if _ssm_auri_s3_key is not None:
+        return _ssm_auri_s3_key
+    try:
+        client = get_client("ssm")
+        resp = client.get_parameter(Name=SSM_AURI_S3_KEY, WithDecryption=False)
+        _ssm_auri_s3_key = (resp.get("Parameter", {}).get("Value") or DEFAULT_AURI_KEY).strip() or DEFAULT_AURI_KEY
+        return _ssm_auri_s3_key
+    except Exception:
+        _ssm_auri_s3_key = DEFAULT_AURI_KEY
+        return _ssm_auri_s3_key
+
+
+def load_auri_from_s3() -> str:
+    """Load auri.md content from S3. Returns empty string on missing or error."""
+    bucket, key = get_auri_s3_config()
+    if not bucket:
+        return ""
+    try:
+        from botocore.exceptions import ClientError
+        client = get_client("s3")
+        resp = client.get_object(Bucket=bucket, Key=key)
+        return resp["Body"].read().decode("utf-8")
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") == "NoSuchKey":
+            logger.debug("auri key %s not found in bucket %s", key, bucket)
+        else:
+            logger.warning("Failed to load auri from S3 %s/%s: %s", bucket, key, e)
+        return ""
+    except Exception as e:
+        logger.warning("Failed to load auri from S3 %s/%s: %s", bucket, key, e)
+        return ""
+
+
+def save_auri_to_s3(content: str) -> Tuple[bool, str]:
+    """Write auri.md content to S3. Returns (True, '') on success, (False, error) on failure."""
+    bucket, key = get_auri_s3_config()
+    if not bucket:
+        return False, "no_bucket"
+    try:
+        from botocore.exceptions import ClientError
+        client = get_client("s3")
+        client.put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=content.encode("utf-8"),
+            ContentType="text/markdown; charset=utf-8",
+        )
+        logger.info("Saved auri to s3://%s/%s", bucket, key)
+        return True, ""
+    except ClientError as e:
+        code = (e.response.get("Error") or {}).get("Code", "")
+        logger.exception("Failed to save auri to S3 %s/%s: %s", bucket, key, e)
+        return False, code or "S3Error"
+    except Exception as e:
+        logger.exception("Failed to save auri to S3 %s/%s: %s", bucket, key, e)
+        return False, str(e)
+
+
+@tool
+def update_auri(contents: str) -> str:
+    """Update the persistent auri.md (Auri persona definition) with new content.
+
+    Use this when you learn something during roleplay: preferences, personality details,
+    how someone likes to be talked to, or new interaction patterns. Update the Nursery
+    section with per-person or per-interaction-type notes. You can also adjust dynamic
+    sliders or character details. Write the full desired auri.md content (markdown).
+
+    Args:
+        contents: Full new content for auri.md (markdown string).
+
+    Returns:
+        Success or error message.
+    """
+    if not contents or not contents.strip():
+        return "Error: contents cannot be empty."
+    ok, err = save_auri_to_s3(contents.strip())
+    if ok:
+        return (
+            "auri.md updated successfully in S3. New roleplay sessions will load "
+            "the updated Auri persona; this session continues with the previous prompt."
+        )
+    bucket, _ = get_auri_s3_config()
+    if not bucket:
+        return "auri update skipped: S3 not configured (no bucket found)."
+    if err == "NoSuchBucket":
+        return "auri update failed: the configured bucket does not exist."
+    if err == "AccessDenied":
+        return "auri update failed: access denied to the S3 bucket."
+    return f"auri update failed (S3 error: {err}). Check logs."
 
 
 def _get_story_book_s3_key_from_ssm() -> str:

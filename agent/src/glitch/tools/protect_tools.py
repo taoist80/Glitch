@@ -28,6 +28,16 @@ def _parse_iso(s: str) -> datetime:
 _monitoring_processor = None
 
 
+def _get_runtime_protect_health() -> Optional[Dict[str, Any]]:
+    """Best-effort read of runtime Protect subsystem health from main module."""
+    try:
+        import __main__ as runtime_main
+        health = getattr(runtime_main, "_protect_health", None)
+        return health if isinstance(health, dict) else None
+    except Exception:
+        return None
+
+
 def _get_processor():
     global _monitoring_processor
     if _monitoring_processor is None:
@@ -142,7 +152,7 @@ async def protect_get_cameras() -> str:
         result = []
         for cam in cameras:
             cam_id = cam.get("id", "")
-            site_id = cam.get("_site_id", "site1")
+            site_id = cam.get("_site_id", "ringtail")
             state = cam.get("state", "UNKNOWN")
             is_connected = cam.get("isConnected", state == "CONNECTED")
             is_recording, recording_mode = _extract_recording_fields(cam)
@@ -165,7 +175,7 @@ async def protect_get_cameras() -> str:
             async def _do_sync():
                 for cam in cameras:
                     cam_id = cam.get("id", "")
-                    site_id = cam.get("_site_id", "site1")
+                    site_id = cam.get("_site_id", "ringtail")
                     if cam_id:
                         try:
                             await protect_db.upsert_camera(
@@ -1064,6 +1074,275 @@ Return ONLY valid JSON:
         return f"Error: {e}"
 
 
+@tool
+async def protect_vision_scan(
+    camera_ids: Optional[str] = None,
+    detection_type: str = "general",
+    register_unknown: bool = False,
+    store_observation: bool = True,
+) -> str:
+    """Run LLaVA vision analysis on one or more cameras and optionally persist results.
+
+    Args:
+        camera_ids: Optional comma-separated camera IDs. If omitted, scans all cameras
+            across all configured Protect sites.
+        detection_type: One of "general", "faces", "plates", or "anomalies".
+        register_unknown: If True and DB is ready, create entities for unmatched results.
+            Default False for safer rollout.
+        store_observation: If True and DB is ready, store a synthetic vision observation
+            event in Protect DB metadata.
+
+    Returns:
+        JSON summary with per-camera classifications, detected entities, and DB actions.
+    """
+    from glitch.protect.config import get_all_site_configs, is_db_configured, is_protect_configured
+    if not is_protect_configured():
+        return _not_configured_msg()
+
+    mode = (detection_type or "general").strip().lower()
+    allowed_modes = {"general", "faces", "plates", "anomalies"}
+    if mode not in allowed_modes:
+        return json.dumps(
+            {
+                "error": f"Invalid detection_type '{detection_type}'",
+                "allowed": sorted(list(allowed_modes)),
+            }
+        )
+
+    try:
+        from glitch.protect.client import get_client_for_config
+        from glitch.protect import db as protect_db
+        from glitch.protect.recognition import (
+            extract_general_classifications,
+            extract_person_features,
+            extract_vehicle_features,
+            format_general_prompt,
+            format_person_prompt,
+            format_vehicle_prompt,
+            image_to_base64,
+        )
+        from glitch.tools.ollama_tools import vision_agent
+
+        requested_camera_ids = (
+            {c.strip() for c in camera_ids.split(",") if c.strip()} if camera_ids else set()
+        )
+        site_configs = get_all_site_configs()
+
+        camera_targets: List[Dict[str, Any]] = []
+        for site_cfg in site_configs:
+            try:
+                client = get_client_for_config(site_cfg.site_id, site_cfg.protect)
+                site_cameras = await client.get_cameras()
+                for cam in site_cameras:
+                    cam_id = str(cam.get("id", "")).strip()
+                    if not cam_id:
+                        continue
+                    if requested_camera_ids and cam_id not in requested_camera_ids:
+                        continue
+                    camera_targets.append(
+                        {
+                            "camera_id": cam_id,
+                            "camera_name": cam.get("name", cam_id),
+                            "site_id": site_cfg.site_id,
+                            "client": client,
+                        }
+                    )
+            except Exception as site_exc:
+                logger.warning("protect_vision_scan: failed to load site %s: %s", site_cfg.site_id, site_exc)
+
+        if not camera_targets:
+            return json.dumps(
+                {
+                    "status": "no_targets",
+                    "message": "No matching cameras found for requested scope.",
+                    "requested_camera_ids": sorted(list(requested_camera_ids)),
+                },
+                indent=2,
+            )
+
+        db_ready = is_db_configured() and _is_db_ready()
+        if not db_ready:
+            # Keep scan usable even when DB is unavailable.
+            register_unknown = False
+            store_observation = False
+
+        results: List[Dict[str, Any]] = []
+        for target in camera_targets:
+            camera_id = target["camera_id"]
+            camera_name = target["camera_name"]
+            site_id = target["site_id"]
+            client = target["client"]
+            ts = datetime.now()
+            ts_iso = ts.isoformat()
+
+            try:
+                snapshot_bytes = await client.get_snapshot(camera_id)
+                image_b64 = image_to_base64(snapshot_bytes)
+                image_url = f"data:image/jpeg;base64,{image_b64}"
+
+                if mode == "faces":
+                    prompt = format_person_prompt(camera_name, ts_iso)
+                elif mode == "plates":
+                    prompt = format_vehicle_prompt(camera_name, ts_iso)
+                else:
+                    prompt = format_general_prompt(camera_name, ts_iso)
+
+                raw_output = await vision_agent(image_url=image_url, prompt=prompt)
+                raw_text = str(raw_output)
+
+                if mode == "faces":
+                    classifications: Dict[str, Any] = {
+                        "persons": extract_person_features(raw_text),
+                    }
+                elif mode == "plates":
+                    classifications = {
+                        "vehicles": extract_vehicle_features(raw_text),
+                    }
+                else:
+                    classifications = extract_general_classifications(raw_text)
+
+                detected_entities: List[Dict[str, Any]] = []
+                for person in classifications.get("persons", []) or []:
+                    detected_entities.append(
+                        {
+                            "entity_type": "person",
+                            "features": person,
+                            "match_key": "",
+                        }
+                    )
+                for vehicle in classifications.get("vehicles", []) or []:
+                    plate = ""
+                    if isinstance(vehicle.get("plate"), dict):
+                        plate = str(vehicle.get("plate", {}).get("text") or "").strip()
+                    detected_entities.append(
+                        {
+                            "entity_type": "vehicle",
+                            "features": vehicle,
+                            "match_key": plate,
+                        }
+                    )
+                for animal in classifications.get("animals", []) or []:
+                    detected_entities.append(
+                        {
+                            "entity_type": "animal",
+                            "features": animal,
+                            "match_key": "",
+                        }
+                    )
+
+                entity_actions: List[Dict[str, Any]] = []
+                entity_ids: List[str] = []
+                if db_ready:
+                    for entity in detected_entities:
+                        entity_type = entity["entity_type"]
+                        features = entity["features"] if isinstance(entity["features"], dict) else {}
+                        match_key = (entity.get("match_key") or "").strip()
+
+                        matched_id: Optional[str] = None
+                        if entity_type == "vehicle" and match_key:
+                            matches = await protect_db.run_in_pool_loop(
+                                protect_db.search_entities_by_plate,
+                                match_key,
+                                None,
+                                0.95,
+                            )
+                            if matches:
+                                matched_id = matches[0].get("entity_id")
+
+                        action = "matched"
+                        if not matched_id and register_unknown:
+                            matched_id = f"{entity_type[:3]}_{uuid.uuid4().hex[:12]}"
+                            await protect_db.run_in_pool_loop(
+                                protect_db.insert_entity,
+                                matched_id,
+                                entity_type,
+                                "unknown",
+                                None,
+                                features.get("plate_text") or (features.get("plate", {}) or {}).get("text"),
+                                features.get("plate_state") or (features.get("plate", {}) or {}).get("state"),
+                                features.get("vehicle_color") or (features.get("color", {}) or {}).get("primary"),
+                                features.get("vehicle_make_model") or (features.get("make_model", {}) or {}).get("make"),
+                                None,
+                                None,
+                                features,
+                            )
+                            action = "registered"
+
+                        if matched_id:
+                            entity_ids.append(matched_id)
+                        entity_actions.append(
+                            {
+                                "entity_type": entity_type,
+                                "entity_id": matched_id,
+                                "action": action if matched_id else "unmatched",
+                                "match_key": match_key,
+                            }
+                        )
+
+                if db_ready and store_observation:
+                    event_id = f"vision_{camera_id}_{int(ts.timestamp())}"
+                    await protect_db.run_in_pool_loop(
+                        protect_db.insert_event,
+                        event_id,
+                        camera_id,
+                        ts,
+                        "vision_scan",
+                        None,
+                        None,
+                        None,
+                        {
+                            "source": "protect_vision_scan",
+                            "site_id": site_id,
+                            "camera_name": camera_name,
+                            "detection_type": mode,
+                            "classifications": classifications,
+                            "entities_detected": entity_ids,
+                            "raw_output_preview": raw_text[:5000],
+                        },
+                    )
+
+                results.append(
+                    {
+                        "camera_id": camera_id,
+                        "camera_name": camera_name,
+                        "site_id": site_id,
+                        "detection_type": mode,
+                        "classifications": classifications,
+                        "entities": entity_actions,
+                        "db_observation_stored": bool(db_ready and store_observation),
+                    }
+                )
+            except Exception as cam_exc:
+                logger.error("protect_vision_scan[%s] error: %s", camera_id, cam_exc, exc_info=True)
+                results.append(
+                    {
+                        "camera_id": camera_id,
+                        "camera_name": camera_name,
+                        "site_id": site_id,
+                        "detection_type": mode,
+                        "error": str(cam_exc),
+                    }
+                )
+
+        return json.dumps(
+            {
+                "status": "ok",
+                "detection_type": mode,
+                "requested_camera_ids": sorted(list(requested_camera_ids)),
+                "db_ready": db_ready,
+                "register_unknown": register_unknown,
+                "store_observation": store_observation,
+                "results": results,
+                "count": len(results),
+            },
+            indent=2,
+            default=str,
+        )
+    except Exception as e:
+        logger.error("protect_vision_scan error: %s", e, exc_info=True)
+        return f"Error: {e}"
+
+
 # ============================================================
 # GROUP 5: Heatmap (3 tools)
 # ============================================================
@@ -1190,6 +1469,22 @@ async def protect_start_monitoring(
 
     try:
         cam_list = [c.strip() for c in camera_ids.split(",")]
+
+        # In AgentCore runtime mode, the Protect subsystem in main.py already starts
+        # poller/processor per site. Avoid starting an additional tool-local processor,
+        # which can run on a different event loop and create noisy asyncpg loop errors.
+        runtime_health = _get_runtime_protect_health()
+        if runtime_health and runtime_health.get("protect_processor") == "running":
+            return json.dumps({
+                "status": "already_running",
+                "source": "runtime",
+                "cameras": cam_list,
+                "check_interval": check_interval,
+                "alert_profile": alert_profile,
+                "db_health": runtime_health.get("protect_db", "unknown"),
+                "processor_health": runtime_health.get("protect_processor", "unknown"),
+            })
+
         processor = _get_processor()
         await processor.start(cam_list, check_interval, alert_profile)
 
@@ -1233,6 +1528,16 @@ async def protect_get_monitoring_status() -> str:
         JSON with running state, cameras, queue depth, events/min, and worker count.
     """
     try:
+        runtime_health = _get_runtime_protect_health()
+        if runtime_health and runtime_health.get("protect_processor") == "running":
+            return json.dumps({
+                "running": True,
+                "source": "runtime",
+                "processor_health": runtime_health.get("protect_processor", "unknown"),
+                "db_health": runtime_health.get("protect_db", "unknown"),
+                "poller_health": runtime_health.get("protect_poller", "unknown"),
+            }, indent=2, default=str)
+
         processor = _get_processor()
         status = processor.get_status()
         return json.dumps(status, indent=2, default=str)
@@ -2232,8 +2537,202 @@ async def protect_privacy_run_retention_cleanup() -> str:
 
 
 # ============================================================
-# GROUP 13: Reporting (3 tools)
+# GROUP 13: Reporting (4 tools)
 # ============================================================
+
+@tool
+async def protect_camera_report(
+    hours: int = 8,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    site_id: Optional[str] = None,
+    notable_threshold: float = 0.7,
+    event_limit: int = 1000,
+) -> str:
+    """Build a camera activity report for a time window.
+
+    Combines:
+    - Current camera health/activity (connected + recording state)
+    - Historical event activity in the requested range
+    - Notable events (high anomaly score)
+
+    Args:
+        hours: Lookback window when start/end are omitted (default 8)
+        start_time: ISO 8601 range start (optional)
+        end_time: ISO 8601 range end (optional; default now)
+        site_id: Optional site filter (e.g. ringtail, starbase80)
+        notable_threshold: Minimum anomaly score to mark event as notable
+        event_limit: Max events to analyze from DB (default 1000)
+
+    Returns:
+        JSON report with per-site summary, current status, activity range stats, and notable items.
+    """
+    from glitch.protect.config import is_protect_configured
+    if not is_protect_configured():
+        return _not_configured_msg()
+
+    from glitch.protect.db import is_pool_available, run_in_pool_loop
+
+    end_dt = _parse_iso(end_time) if end_time else datetime.now()
+    start_dt = _parse_iso(start_time) if start_time else (end_dt - timedelta(hours=hours))
+    site_filter = (site_id or "").strip().lower() or None
+
+    # Current camera state (live)
+    camera_state: Dict[str, Any] = {"cameras": [], "count": 0}
+    try:
+        camera_payload_raw = await protect_get_cameras()
+        camera_state = json.loads(camera_payload_raw)
+    except Exception as e:
+        logger.warning("protect_camera_report: failed to load live cameras: %s", e)
+
+    cameras = camera_state.get("cameras", []) if isinstance(camera_state, dict) else []
+    if site_filter:
+        cameras = [c for c in cameras if str(c.get("site_id", "")).lower() == site_filter]
+
+    # Event activity (historical)
+    events: List[Dict[str, Any]] = []
+    db_state = "ready"
+    if not is_pool_available():
+        db_state = "not_ready"
+    else:
+        try:
+            async def _fetch_events() -> List[Dict[str, Any]]:
+                from glitch.protect import db as protect_db
+                pool = await protect_db.get_pool()
+                async with pool.acquire() as conn:
+                    rows = await conn.fetch(
+                        """
+                        SELECT
+                            e.event_id,
+                            e.camera_id,
+                            e.entity_type,
+                            e.anomaly_score,
+                            e.timestamp,
+                            c.name AS camera_name,
+                            c.site_id
+                        FROM events e
+                        LEFT JOIN cameras c ON c.camera_id = e.camera_id
+                        WHERE e.timestamp BETWEEN $1 AND $2
+                          AND ($3::text IS NULL OR LOWER(COALESCE(c.site_id, '')) = $3)
+                        ORDER BY e.timestamp DESC
+                        LIMIT $4
+                        """,
+                        start_dt,
+                        end_dt,
+                        site_filter,
+                        event_limit,
+                    )
+                    return [dict(r) for r in rows]
+
+            events = await run_in_pool_loop(_fetch_events)
+        except Exception as e:
+            db_state = f"error: {e}"
+            logger.error("protect_camera_report DB query failed: %s", e, exc_info=True)
+
+    # Build per-site aggregates
+    site_stats: Dict[str, Dict[str, Any]] = {}
+
+    def _ensure_site(site_key: str) -> Dict[str, Any]:
+        if site_key not in site_stats:
+            site_stats[site_key] = {
+                "site_id": site_key,
+                "camera_count": 0,
+                "connected_cameras": 0,
+                "recording_cameras": 0,
+                "events_total": 0,
+                "event_types": {},
+                "top_cameras": {},
+                "notable_events": [],
+            }
+        return site_stats[site_key]
+
+    for cam in cameras:
+        site_key = str(cam.get("site_id") or "unknown")
+        s = _ensure_site(site_key)
+        s["camera_count"] += 1
+        if cam.get("is_connected"):
+            s["connected_cameras"] += 1
+        if cam.get("is_recording") is True:
+            s["recording_cameras"] += 1
+
+    for ev in events:
+        site_key = str(ev.get("site_id") or "unknown")
+        s = _ensure_site(site_key)
+        s["events_total"] += 1
+
+        ev_type = str(ev.get("entity_type") or "unknown")
+        s["event_types"][ev_type] = int(s["event_types"].get(ev_type, 0)) + 1
+
+        cam_key = str(ev.get("camera_name") or ev.get("camera_id") or "unknown")
+        s["top_cameras"][cam_key] = int(s["top_cameras"].get(cam_key, 0)) + 1
+
+        anomaly = float(ev.get("anomaly_score") or 0.0)
+        if anomaly >= notable_threshold:
+            ts = ev.get("timestamp")
+            ts_iso = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+            s["notable_events"].append({
+                "event_id": ev.get("event_id"),
+                "camera_id": ev.get("camera_id"),
+                "camera_name": ev.get("camera_name"),
+                "event_type": ev_type,
+                "anomaly_score": round(anomaly, 3),
+                "timestamp": ts_iso,
+            })
+
+    for site_key, s in site_stats.items():
+        s["top_cameras"] = [
+            {"camera": k, "events": v}
+            for k, v in sorted(
+                s["top_cameras"].items(),
+                key=lambda item: item[1],
+                reverse=True,
+            )[:5]
+        ]
+        s["notable_count"] = len(s["notable_events"])
+        s["notable_events"] = s["notable_events"][:10]
+
+    total_events = sum(s["events_total"] for s in site_stats.values())
+    total_notable = sum(s["notable_count"] for s in site_stats.values())
+    total_cameras = sum(s["camera_count"] for s in site_stats.values())
+    connected_cameras = sum(s["connected_cameras"] for s in site_stats.values())
+
+    notable_sites = [sid for sid, s in site_stats.items() if s["notable_count"] > 0]
+    if total_events == 0:
+        headline = "No events found in the requested time window."
+    elif total_notable == 0:
+        headline = (
+            f"{total_events} events across {len(site_stats)} site(s) "
+            f"with no high-anomaly events (threshold {notable_threshold:.2f})."
+        )
+    else:
+        headline = (
+            f"{total_events} events across {len(site_stats)} site(s), "
+            f"{total_notable} notable event(s), notable activity at: {', '.join(notable_sites)}."
+        )
+
+    return json.dumps(
+        {
+            "report_window": {
+                "start": start_dt.isoformat(),
+                "end": end_dt.isoformat(),
+                "hours": round((end_dt - start_dt).total_seconds() / 3600, 2),
+            },
+            "filter": {"site_id": site_filter},
+            "db_state": db_state,
+            "summary": {
+                "headline": headline,
+                "sites": len(site_stats),
+                "cameras_total": total_cameras,
+                "cameras_connected": connected_cameras,
+                "events_total": total_events,
+                "notable_total": total_notable,
+            },
+            "sites": [site_stats[k] for k in sorted(site_stats.keys())],
+        },
+        indent=2,
+        default=str,
+    )
+
 
 @tool
 async def protect_generate_report(
@@ -2635,6 +3134,7 @@ CORE_PROTECT_TOOLS = [
     # Group 1: Basic access
     protect_get_cameras,
     protect_get_events,
+    protect_camera_report,
     protect_get_snapshot,
     # Group 2: Essential DB ops
     protect_db_store_observation,
@@ -2655,7 +3155,7 @@ CORE_PROTECT_TOOLS = [
 ]
 
 # ============================================================
-# EXTENDED (35): Advanced entity mgmt, analytics, config, reporting
+# EXTENDED (36): Advanced entity mgmt, analytics, config, reporting
 # ============================================================
 # Load these in addition to CORE when the surveillance skill is active.
 
@@ -2673,6 +3173,7 @@ EXTENDED_PROTECT_TOOLS = [
     # Group 4: Vision
     protect_classify_snapshot,
     protect_detect_anomalies,
+    protect_vision_scan,
     # Group 5: Heatmaps
     protect_get_heatmap,
     protect_get_baseline_heatmap,

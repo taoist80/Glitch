@@ -23,6 +23,7 @@ COPY src/main.py /app/main.py
 COPY skills/ /app/skills/
 COPY SOUL.md /app/SOUL.md
 COPY poet-soul.md /app/poet-soul.md
+COPY auri.md /app/auri.md
 
 EXPOSE 8080
 

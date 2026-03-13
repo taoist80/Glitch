@@ -46,6 +46,38 @@ def handler(event, context):
 
     results = []
 
+    # Create extensions required by schema.sql (must be done by master/rds_superuser)
+    for ext in ('vector', 'pg_trgm'):
+        try:
+            conn.run(f"CREATE EXTENSION IF NOT EXISTS {ext}")
+            results.append(f"Extension {ext} ready")
+            logger.info("Extension %s ready", ext)
+        except Exception as e:
+            results.append(f"Extension {ext} failed: {e}")
+            logger.warning("Extension %s failed: %s", ext, e)
+
+    # Apply schema.sql (all DDL uses IF NOT EXISTS, safe to re-run)
+    try:
+        import pathlib
+        schema_path = pathlib.Path(__file__).parent / "schema.sql"
+        if schema_path.exists():
+            schema_sql = schema_path.read_text()
+            # pg8000 native .run() executes one statement at a time
+            statements = [s.strip() for s in schema_sql.split(';') if s.strip()]
+            for stmt in statements:
+                lines = [l for l in stmt.split('\n') if l.strip() and not l.strip().startswith('--')]
+                if lines:
+                    conn.run(stmt)
+            results.append(f"Schema applied ({len(statements)} statements)")
+            logger.info("Schema applied (%d statements)", len(statements))
+        else:
+            results.append("schema.sql not found in Lambda package")
+            logger.warning("schema.sql not found")
+    except Exception as e:
+        results.append(f"Schema application failed: {e}")
+        logger.warning("Schema application failed: %s", e)
+
+    # Create/verify sentinel_iam (read-write, used by agent runtime)
     rows = conn.run("SELECT rolname FROM pg_roles WHERE rolname = 'sentinel_iam'")
     if rows:
         results.append("sentinel_iam already exists")
@@ -63,8 +95,26 @@ def handler(event, context):
     results.append("Granted ALL PRIVILEGES to sentinel_iam")
     logger.info("Granted privileges to sentinel_iam")
 
+    # Create/verify glitch_iam (read-only, used by protect-query Lambda)
+    rows = conn.run("SELECT rolname FROM pg_roles WHERE rolname = 'glitch_iam'")
+    if rows:
+        results.append("glitch_iam already exists")
+        logger.info("glitch_iam already exists")
+    else:
+        conn.run("CREATE USER glitch_iam")
+        conn.run("GRANT rds_iam TO glitch_iam")
+        results.append("Created glitch_iam with rds_iam")
+        logger.info("Created glitch_iam")
+
+    conn.run("GRANT SELECT ON ALL TABLES IN SCHEMA public TO glitch_iam")
+    conn.run("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO glitch_iam")
+    results.append("Granted SELECT to glitch_iam")
+    logger.info("Granted SELECT privileges to glitch_iam")
+
     rows = conn.run("SELECT rolname FROM pg_roles WHERE rolname = 'sentinel_iam'")
     results.append(f"Verification: sentinel_iam exists = {bool(rows)}")
+    rows = conn.run("SELECT rolname FROM pg_roles WHERE rolname = 'glitch_iam'")
+    results.append(f"Verification: glitch_iam exists = {bool(rows)}")
 
     conn.close()
     return {"statusCode": 200, "body": json.dumps({"results": results})}

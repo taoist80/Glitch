@@ -302,6 +302,10 @@ def handler(event, context):
             query_params = _normalize_query_params(event.get('queryStringParameters'))
             logger.info(f"Gateway forwarding to AgentCore: {http_method} {path} query={query_params}")
             response_body = invoke_api(path, http_method, body, session_id, query_params)
+            # So the UI uses the same session_id for /sessions/{id}/agent and /sessions/{id}/mode as we use for
+            # /invocations, overwrite session_id in /status with the gateway's session_id (per client).
+            if path == '/status' and isinstance(response_body, dict) and 'error' not in response_body:
+                response_body = {**response_body, 'session_id': session_id}
         else:
             response_body = {'error': f'Unknown path: {path}'}
             status_code = 404

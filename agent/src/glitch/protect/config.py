@@ -53,6 +53,16 @@ _protect_config: Optional["ProtectConfig"] = None
 _db_config: Optional["ProtectDBConfig"] = None
 
 
+def _normalize_site_label(label: str) -> str:
+    """Map legacy generic labels to human-readable site names."""
+    normalized = (label or "").strip().lower()
+    if normalized == "site1":
+        return "ringtail"
+    if normalized == "site2":
+        return "starbase80"
+    return label
+
+
 @dataclass
 class ProtectConfig:
     """Configuration for UniFi Protect API access."""
@@ -244,16 +254,28 @@ def get_db_config() -> ProtectDBConfig:
         host = ssm_host
     else:
         host = env_host or ssm_host
-    port_str = (
-        os.environ.get("GLITCH_PROTECT_DB_PORT")
-        or _get_ssm_parameter("/glitch/protect-db/port")
-        or "5432"
-    )
+    env_port = (os.environ.get("GLITCH_PROTECT_DB_PORT") or "").strip()
+    ssm_port = (_get_ssm_parameter("/glitch/protect-db/port") or "").strip()
+    port_str = env_port or ssm_port or "5432"
     dbname = (
         os.environ.get("GLITCH_PROTECT_DB_NAME")
         or _get_ssm_parameter("/glitch/protect-db/dbname")
         or "glitch_protect"
     )
+
+    # Defensive: if host was provided as "hostname:port", split it safely.
+    # This prevents DNS lookup failures caused by passing "host:port" as host.
+    if host and ":" in host:
+        parsed_host, parsed_port = parse_host_port(host, int(port_str))
+        if not env_port and not ssm_port:
+            port_str = str(parsed_port)
+        elif int(port_str) != parsed_port:
+            logger.warning(
+                "Protect DB host includes port (%s) but GLITCH_PROTECT_DB_PORT/SSM port is %s; using explicit port",
+                host,
+                port_str,
+            )
+        host = parsed_host
 
     if not host:
         raise RuntimeError(
@@ -348,8 +370,9 @@ def get_all_site_configs() -> "list[SiteConfig]":
 
     # Site 1 — existing config path, no changes to get_protect_config()
     try:
+        site1_label = _normalize_site_label(os.environ.get("GLITCH_PROTECT_LABEL", "ringtail"))
         sites.append(SiteConfig(
-            site_id=os.environ.get("GLITCH_PROTECT_LABEL", "site1"),
+            site_id=site1_label,
             protect=get_protect_config(),
         ))
     except RuntimeError as exc:
@@ -360,7 +383,7 @@ def get_all_site_configs() -> "list[SiteConfig]":
     if host2:
         api_key2 = os.environ.get("GLITCH_PROTECT_2_API_KEY", "").strip() or None
         port_str2 = os.environ.get("GLITCH_PROTECT_2_PORT", "443")
-        site_id2 = os.environ.get("GLITCH_PROTECT_2_LABEL", "site2")
+        site_id2 = _normalize_site_label(os.environ.get("GLITCH_PROTECT_2_LABEL", "starbase80"))
         if api_key2:
             host2_parsed, port2 = parse_host_port(host2, int(port_str2))
             sites.append(SiteConfig(

@@ -2,6 +2,7 @@
 import json
 import os
 import logging
+import random
 import boto3
 from datetime import datetime, timedelta
 
@@ -15,6 +16,9 @@ lambda_client = boto3.client('lambda')
 CONFIG_TABLE_NAME = os.environ['CONFIG_TABLE_NAME']
 TELEGRAM_SECRET_NAME = os.environ['TELEGRAM_SECRET_NAME']
 PROCESSOR_FUNCTION_NAME = os.environ.get('PROCESSOR_FUNCTION_NAME', '')
+MODE_DEFAULT = "default"
+MODE_POET = "poet"
+MODE_ROLEPLAY = "roleplay"
 
 table = dynamodb.Table(CONFIG_TABLE_NAME)
 
@@ -86,6 +90,45 @@ def is_group_chat(chat: dict) -> bool:
 
 def is_private_chat(chat: dict) -> bool:
     return (chat or {}).get('type') == 'private'
+
+
+def build_session_id(chat: dict) -> str:
+    chat_id = (chat or {}).get('id')
+    base_session = (
+        f"telegram:dm:{chat_id}"
+        if is_private_chat(chat)
+        else f"telegram:group:{chat_id}"
+    )
+    return base_session.ljust(33, '0')
+
+
+def get_session_mode(session_id: str) -> str:
+    """Load persisted session mode from DynamoDB, defaulting to standard mode."""
+    try:
+        response = table.get_item(Key={'pk': 'SESSION_AGENT', 'sk': session_id})
+        if 'Item' in response:
+            return response['Item'].get('mode_id') or MODE_DEFAULT
+    except Exception as e:
+        logger.warning("Failed to read session mode for %s: %s", session_id, e)
+    return MODE_DEFAULT
+
+
+def set_session_mode(session_id: str, mode_id: str) -> bool:
+    """Persist mode selection; preserve existing session agent if present."""
+    try:
+        response = table.get_item(Key={'pk': 'SESSION_AGENT', 'sk': session_id})
+        current_item = response.get('Item', {})
+        table.put_item(Item={
+            'pk': 'SESSION_AGENT',
+            'sk': session_id,
+            'agent_id': current_item.get('agent_id') or 'glitch',
+            'mode_id': mode_id,
+        })
+        logger.info("Persisted session mode: session_id=%s mode_id=%s", session_id, mode_id)
+        return True
+    except Exception as e:
+        logger.error("Failed to persist session mode: session_id=%s mode_id=%s err=%s", session_id, mode_id, e)
+        return False
 
 
 def is_bot_mentioned(message: dict, bot_username: str, bot_id) -> bool:
@@ -370,6 +413,11 @@ def handler(event, context):
     if not chat_id or not text:
         logger.info("Telegram webhook: update_id=%s chat_id=%s empty text, ack", update_id, chat_id)
         return {'statusCode': 200, 'body': 'OK'}
+    chat = message.get('chat', {})
+    # In group chats, strip the bot @mention early so commands like "@Bot /auri" are recognized.
+    if is_group_chat(chat):
+        bot_info_early = get_bot_info(bot_token)
+        text = strip_bot_mention_from_text(message, bot_info_early.get('username'), bot_info_early.get('id')) or text
     logger.info("Telegram webhook: message from user_id=%s chat_id=%s text=%s", user_id, chat_id, text[:80])
     try:
         config = get_config()
@@ -385,11 +433,20 @@ def handler(event, context):
             send_telegram_message(chat_id, "\u274c Bot not configured. Send the pairing code from startup logs.", bot_token)
         return {'statusCode': 200, 'body': 'OK'}
     if text.startswith('/'):
-        cmd = text.split()[0].lower()
+        first_token = text.split()[0].lower()
+        cmd = first_token.split('@', 1)[0]
         owner_id = _int_or(config.get('owner_id'))
         is_owner = (user_id is not None and owner_id is not None and user_id == owner_id)
+        session_id = build_session_id(chat)
         if cmd == '/help' or cmd == '/start':
-            help_text = "\U0001f916 *Glitch Bot*\n\n/new - New conversation\n/status - Status\n/help - This message"
+            help_text = (
+                "\U0001f916 *Glitch Bot*\n\n"
+                "/new - New conversation\n"
+                "/status - Status\n"
+                "/auri - Switch to Auri roleplay mode\n"
+                "/default - Switch to default mode\n"
+                "/help - This message"
+            )
             if is_owner:
                 help_text += "\n/allow <user_id> - Allow DM\n/revoke <user_id> - Revoke DM\n/allowed - List allowed"
             send_telegram_message(chat_id, help_text, bot_token)
@@ -423,10 +480,42 @@ def handler(event, context):
             allowed = list_allowed_dm_user_ids()
             send_telegram_message(chat_id, "Allowed to DM: " + (", ".join(str(u) for u in allowed) if allowed else "Only owner"), bot_token)
             return {'statusCode': 200, 'body': 'OK'}
-    chat = message.get('chat', {})
+        elif cmd in ('/auri', '/default', '/normal', '/poet'):
+            mode_map = {
+                '/auri': MODE_ROLEPLAY,
+                '/poet': MODE_POET,
+                '/default': MODE_DEFAULT,
+                '/normal': MODE_DEFAULT,
+            }
+            mode_id = mode_map[cmd]
+            if not set_session_mode(session_id, mode_id):
+                send_telegram_message(chat_id, "⚠️ Failed to switch mode right now. Try again.", bot_token)
+                return {'statusCode': 200, 'body': 'OK'}
+
+            # Support one-shot command prompts, e.g. "/auri hello there".
+            parts = text.split(maxsplit=1)
+            if len(parts) >= 2 and parts[1].strip():
+                text = parts[1].strip()
+            else:
+                # In-character reply so it feels like Auri/Poet took over, not Glitch announcing a switch
+                if mode_id == MODE_ROLEPLAY:
+                    auri_ack = random.choice([
+                        "Hey. Auri's here — whenever you're ready.",
+                        "Mm, I'm here. What do you need?",
+                        "Auri's got you. Say when.",
+                    ])
+                    send_telegram_message(chat_id, auri_ack, bot_token)
+                elif mode_id == MODE_POET:
+                    send_telegram_message(chat_id, "Poet mode. Words at the ready.", bot_token)
+                else:
+                    send_telegram_message(chat_id, "✅ Switched to default mode.", bot_token)
+                return {'statusCode': 200, 'body': 'OK'}
+    session_id = build_session_id(chat)
     if is_group_chat(chat):
         bot_info = get_bot_info(bot_token)
-        if not is_bot_mentioned(message, bot_info.get('username'), bot_info.get('id')):
+        mode_id = get_session_mode(session_id)
+        # In Auri (roleplay) mode, respond to all group messages without requiring @mention
+        if mode_id != MODE_ROLEPLAY and not is_bot_mentioned(message, bot_info.get('username'), bot_info.get('id')):
             logger.info("Telegram webhook: group chat but bot not mentioned, ack update_id=%s", update_id)
             return {'statusCode': 200, 'body': 'OK'}
         text = strip_bot_mention_from_text(message, bot_info.get('username'), bot_info.get('id'))
@@ -440,8 +529,7 @@ def handler(event, context):
             return {'statusCode': 200, 'body': 'OK'}
     if not claim_update(update_id):
         return {'statusCode': 200, 'body': 'OK'}
-    base_session = f"telegram:dm:{chat_id}" if is_private_chat(chat) else f"telegram:group:{chat_id}"
-    session_id = base_session.ljust(33, '0')
+    mode_id = get_session_mode(session_id)
     if not PROCESSOR_FUNCTION_NAME:
         logger.error("Telegram webhook: PROCESSOR_FUNCTION_NAME not set update_id=%s", update_id)
         return {'statusCode': 200, 'body': 'OK'}
@@ -453,10 +541,16 @@ def handler(event, context):
                 'chat_id': chat_id,
                 'text': text,
                 'session_id': session_id,
+                'mode_id': mode_id,
                 'update_id': update_id,
             }).encode(),
         )
-        logger.info("Telegram webhook: dispatched to processor update_id=%s session_id=%s", update_id, session_id)
+        logger.info(
+            "Telegram webhook: dispatched to processor update_id=%s session_id=%s mode_id=%s",
+            update_id,
+            session_id,
+            mode_id,
+        )
     except Exception as e:
         logger.error("Telegram webhook: failed to dispatch to processor update_id=%s: %s", update_id, e)
     return {'statusCode': 200, 'body': 'OK'}

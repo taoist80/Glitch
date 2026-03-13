@@ -252,7 +252,7 @@ async def vision_agent(
 @tool
 async def local_chat(
     prompt: str,
-    model: str = "mistral-nemo:12b",
+    model: str = "hf.co/huggingkot/dolphin-2.9.3-mistral-7B-32k-Q4_K_M-GGUF",
     system_prompt: Optional[str] = None,
     temperature: float = 0.7,
 ) -> str:
@@ -306,7 +306,7 @@ async def local_chat(
 
 @tool
 def test_ollama_model(
-    model: str = "mistral-nemo:12b",
+    model: str = "hf.co/huggingkot/dolphin-2.9.3-mistral-7B-32k-Q4_K_M-GGUF",
     prompt: str = "Reply with exactly one word: hello",
     endpoint: str = "chat",
 ) -> str:
@@ -502,7 +502,7 @@ async def check_ollama_health() -> str:
     # Chat: Ollama native (11434, /api/tags). Vision: OpenAI-compatible (8080, /v1/models).
     # Expected models match the defaults used by local_chat and vision_agent respectively.
     tasks = [
-        _check_single_host("Chat", config.chat_host, config, expected_models=["mistral-nemo:12b"]),
+        _check_single_host("Chat", config.chat_host, config, expected_models=["hf.co/huggingkot/dolphin-2.9.3-mistral-7B-32k-Q4_K_M-GGUF"]),
         _check_single_host("Vision", config.vision_host, config, port_override=config.vision_port, use_openai_format=True, expected_models=[_vision_model_name()]),
     ]
     results = await asyncio.gather(*tasks)

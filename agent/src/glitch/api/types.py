@@ -201,6 +201,7 @@ class ModeInfo(BaseModel):
     """Single mode in GET /api/modes."""
     id: str
     name: str
+    description: str = ""
 
 
 class ModesResponse(BaseModel):

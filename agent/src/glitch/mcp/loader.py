@@ -54,7 +54,8 @@ def get_default_mcp_config_path() -> Path:
             return candidate
 
     # Fallback path used in warning messages if nothing exists.
-    return here.parent.parent.parent.parent / "mcp_servers.yaml"
+    # In packaged runtimes this should still point to /app/mcp_servers.yaml.
+    return Path("/app/mcp_servers.yaml")
 
 
 def _expand_env_vars(value: str, strict_env: bool = False) -> str:

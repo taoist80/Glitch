@@ -1,7 +1,7 @@
 """OpenAI Chat Completions–compatible types for local models (Mistral, LLaVA).
 
 Follows https://platform.openai.com/docs/api-reference/chat (POST /v1/chat/completions).
-Host mapping: 10.10.110.202 (mistral-nemo:12b), 10.10.110.137 (llava-v1.6-mistral-7b).
+Host mapping: 10.10.110.202 (hf.co/.../dolphin-2.9.3-mistral-7B-32k-Q4_K_M-GGUF), 10.10.110.137 (llava-v1.6-mistral-7b).
 Port: 8080 for OpenAI-compatible server; 11434 for native Ollama.
 """
 

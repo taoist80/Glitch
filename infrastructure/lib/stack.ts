@@ -200,6 +200,21 @@ export class GlitchFoundationStack extends Stack {
       resources: [`arn:aws:ecr:${this.region}:${this.account}:repository/bedrock-agentcore-*`],
     }));
 
+    // Soul bucket: allow deploy script (e.g. make deploy) to upload auri.md when run in CodeBuild
+    this.codeBuildRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ['s3:ListBucket', 's3:GetObject', 's3:PutObject'],
+      resources: [
+        `arn:aws:s3:::${soulBucketName(this.account, this.region)}`,
+        `arn:aws:s3:::${soulBucketName(this.account, this.region)}/*`,
+      ],
+    }));
+    this.codeBuildRole.addToPolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ['ssm:GetParameter'],
+      resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter/glitch/soul/s3-bucket`],
+    }));
+
     // ========== SSM Parameters (for cross-stack references) ==========
     new StringParameter(this, 'SsmVpcId', {
       parameterName: SSM_PARAMS.VPC_ID,

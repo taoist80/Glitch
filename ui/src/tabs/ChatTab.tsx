@@ -3,10 +3,63 @@ import { Send, Trash2, Loader2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { useAppStore } from '../store/useAppStore';
 
+// Persona-specific loading phrases (match telegram-processor); show one at random when waiting.
+const LOADING_PHRASES: Record<string, string[]> = {
+  roleplay: [
+    "Mm, give me a moment...",
+    "Thinking... (don't go anywhere)",
+    "One second, love...",
+    "Let me sit with that...",
+    "Still here, just gathering my thoughts...",
+    "Almost...",
+    "Hang on...",
+    "Just a little longer...",
+    "Thinking it through...",
+    "Stay with me...",
+    "Working on a diaper bag...",
+    "This place smells like a nursery...",
+    "Where did I put the paci...",
+    "One sec, someone's fussing...",
+    "Hang on, checking the crib...",
+    "Just a moment — wipes are in the other room...",
+  ],
+  poet: [
+    "Mulling it over...",
+    "Let the words settle...",
+    "One moment...",
+    "Turning it over...",
+    "Still composing...",
+    "Almost there...",
+    "Patience, patience...",
+    "Gathering the lines...",
+    "Thinking...",
+    "Just a moment...",
+  ],
+  default: [
+    "Working on it...",
+    "Thinking it over...",
+    "One moment...",
+    "Give me a sec...",
+    "Still on it...",
+    "Almost there...",
+    "Hang tight...",
+    "Putting it together...",
+    "Checking a few things...",
+    "Still working...",
+  ],
+};
+
+function getLoadingPhrase(modeId: string | undefined): string {
+  const key = modeId === 'roleplay' ? 'roleplay' : modeId === 'poet' ? 'poet' : 'default';
+  const list = LOADING_PHRASES[key] ?? LOADING_PHRASES.default;
+  return list[Math.floor(Math.random() * list.length)];
+}
+
 export function ChatTab() {
   const [input, setInput] = useState('');
+  const [loadingPhrase, setLoadingPhrase] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const { chatMessages, chatLoading, chatError, sendMessage, clearChat } = useAppStore();
+  const { chatMessages, chatLoading, chatError, sendMessage, clearChat, sessionAgent } = useAppStore();
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -15,6 +68,15 @@ export function ChatTab() {
   useEffect(() => {
     scrollToBottom();
   }, [chatMessages]);
+
+  // Pick one loading phrase when loading starts so it doesn’t change mid-request
+  useEffect(() => {
+    if (chatLoading) {
+      setLoadingPhrase((prev) => prev || getLoadingPhrase(sessionAgent?.mode_id));
+    } else {
+      setLoadingPhrase('');
+    }
+  }, [chatLoading, sessionAgent?.mode_id]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -103,8 +165,9 @@ export function ChatTab() {
                     <span className="text-primary-content font-bold">G</span>
                   </div>
                 </div>
-                <div className="chat-bubble chat-bubble-primary">
-                  <Loader2 className="animate-spin" size={20} />
+                <div className="chat-bubble chat-bubble-primary flex items-center gap-2">
+                  <Loader2 className="animate-spin shrink-0" size={20} />
+                  <span>{loadingPhrase || getLoadingPhrase(sessionAgent?.mode_id)}</span>
                 </div>
               </div>
             )}

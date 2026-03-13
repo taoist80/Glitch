@@ -1,6 +1,6 @@
 """Mistral chat agent — one per process, session-keyed conversation buffer.
 
-Backend: 10.10.110.202, model mistral-nemo:12b.
+Backend: 10.10.110.202, model hf.co/huggingkot/dolphin-2.9.3-mistral-7B-32k-Q4_K_M-GGUF.
 Prefer OpenAI-format /v1/chat/completions (port 8080); fallback Ollama native (port 11434).
 """
 
@@ -22,7 +22,7 @@ from glitch.types import InvocationResponse, create_error_response
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MISTRAL_MODEL = "mistral-nemo:12b"
+DEFAULT_MISTRAL_MODEL = "hf.co/huggingkot/dolphin-2.9.3-mistral-7B-32k-Q4_K_M-GGUF"
 ENV_MISTRAL_MODEL = "GLITCH_MISTRAL_OLLAMA_MODEL"
 ENV_USE_OPENAI_FORMAT = "GLITCH_MISTRAL_OPENAI_FORMAT"  # "1" or "true" to use port 8080
 ENV_MISTRAL_TIMEOUT = "GLITCH_MISTRAL_TIMEOUT"  # seconds for request (connect + read); default 180
@@ -77,7 +77,7 @@ def _load_soul_system_prompt() -> str:
 
 
 class MistralAgent:
-    """Chat agent backed by Mistral (mistral-nemo:12b) at 10.10.110.202.
+    """Chat agent backed by Dolphin-Mistral (hf.co/huggingkot/dolphin-2.9.3-mistral-7B-32k-Q4_K_M-GGUF) at 10.10.110.202.
 
     Option A: one agent per process; conversation history keyed by session_id.
     """

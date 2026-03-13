@@ -93,8 +93,7 @@ async def init_pool_background() -> None:
         logger.error("asyncpg not installed — Protect DB unavailable")
         return
 
-    from glitch.protect.config import get_db_config
-    config = get_db_config()
+    from glitch.protect.config import get_db_config, reset_config_cache
 
     attempt = 0
     backoff = 15
@@ -102,8 +101,11 @@ async def init_pool_background() -> None:
     while True:
         attempt += 1
         try:
+            # Re-resolve DB config on every retry attempt so SSM/env updates can
+            # recover without a full runtime restart.
+            reset_config_cache()
+            config = get_db_config()
             if config.use_iam_auth:
-                token = config.get_iam_token()
                 ssl_ctx = _ssl.create_default_context()
                 ssl_ctx.check_hostname = False
                 ssl_ctx.verify_mode = _ssl.CERT_NONE
@@ -112,7 +114,9 @@ async def init_pool_background() -> None:
                     port=config.port,
                     database=config.dbname,
                     user=config.username,
-                    password=token,
+                    # Important: use callable so asyncpg can fetch a fresh IAM token
+                    # whenever it opens a new DB connection from the pool.
+                    password=config.get_iam_token,
                     ssl=ssl_ctx,
                     min_size=1,
                     max_size=10,
@@ -475,6 +479,22 @@ async def update_entity_sighting(entity_id: str, timestamp: datetime) -> None:
             WHERE entity_id = $1
             """,
             entity_id, timestamp,
+        )
+
+
+async def update_entity_role(entity_id: str, role: str) -> None:
+    """Update entity role label (resident/regular_visitor/etc)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE entities
+            SET role = $2,
+                updated_at = NOW()
+            WHERE entity_id = $1
+            """,
+            entity_id,
+            role,
         )
 
 

@@ -8,6 +8,7 @@ __pycache__/
 *.md
 !SOUL.md
 !poet-soul.md
+!auri.md
 .pytest_cache/
 .mypy_cache/
 .coverage

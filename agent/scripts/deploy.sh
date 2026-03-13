@@ -99,6 +99,43 @@ else
     log "Skipping pre-deploy configuration (--skip-pre-check)"
 fi
 
+# Step 1.5: Upload auri.md to soul bucket (so runtime loads latest Auri persona from S3)
+# When run locally, the AWS identity (profile/credentials) must have s3:PutObject and s3:GetObject
+# on the soul bucket; when run in CodeBuild, the CodeBuild role has this via GlitchFoundationStack.
+# If SSM has "placeholder", derive bucket name: glitch-agent-state-${account}-${region}.
+ENV_DEPLOY_FILE="$AGENT_DIR/.env.deploy"
+SOUL_BUCKET=""
+if [ -f "$ENV_DEPLOY_FILE" ]; then
+    SOUL_BUCKET=$(grep -E '^GLITCH_SOUL_S3_BUCKET=' "$ENV_DEPLOY_FILE" | cut -d= -f2- | tr -d '"' | tr -d "'")
+fi
+if [ -z "$SOUL_BUCKET" ] || [ "$SOUL_BUCKET" = "placeholder" ] || [ "$SOUL_BUCKET" = "changeme" ]; then
+    ACCOUNT=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || true)
+    # aws configure get region exits non-zero when unset; guard with || true so set -e doesn't abort
+    REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
+    if [ -z "$REGION" ]; then
+        REGION=$(aws configure get region 2>/dev/null || true)
+    fi
+    REGION="${REGION:-us-west-2}"
+    if [ -n "$ACCOUNT" ]; then
+        SOUL_BUCKET="glitch-agent-state-${ACCOUNT}-${REGION}"
+        log "Using derived soul bucket: $SOUL_BUCKET"
+    fi
+fi
+if [ -n "$SOUL_BUCKET" ] && [ -f "$AGENT_DIR/auri.md" ]; then
+    log ""
+    log "=== Uploading auri.md to S3 ==="
+    if aws s3 cp "$AGENT_DIR/auri.md" "s3://${SOUL_BUCKET}/auri.md" --content-type "text/markdown"; then
+        log_success "auri.md uploaded to s3://${SOUL_BUCKET}/auri.md"
+    else
+        log_error "Failed to upload auri.md to S3 (check AWS credentials and bucket permissions)"
+        exit 1
+    fi
+elif [ -n "$SOUL_BUCKET" ] && [ ! -f "$AGENT_DIR/auri.md" ]; then
+    log "Skipping auri.md upload (file not found)"
+else
+    log "Skipping auri.md upload (no GLITCH_SOUL_S3_BUCKET in .env.deploy)"
+fi
+
 # Step 2: AgentCore deployment
 log ""
 log "=== Step 2: AgentCore Deployment ==="

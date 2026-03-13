@@ -28,7 +28,7 @@ from glitch.channels.bootstrap import OwnerBootstrap
 from glitch.channels.config_manager import ConfigManager
 from glitch.channels.telegram_commands import TelegramCommandHandler
 from glitch.agent_registry import get_agent as registry_get_agent, get_default_agent_id
-from glitch.modes import apply_mode_to_prompt, MODE_DEFAULT, MODE_POET
+from glitch.modes import apply_mode_to_prompt, MODE_DEFAULT, MODE_POET, MODE_ROLEPLAY
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +103,7 @@ class TelegramChannel(ChannelAdapter):
         self.agent = agent
         self.poet_agent = poet_agent  # kept for optional one-shot /poet <prompt>; routing uses registry + mode
         self._session_agent: Dict[str, str] = {}  # session_id -> agent_id (glitch | mistral | llava)
-        self._session_mode: Dict[str, str] = {}   # session_id -> mode_id (default | poet)
+        self._session_mode: Dict[str, str] = {}   # session_id -> mode_id (default | poet | roleplay)
         self.config = config_manager.config.telegram
 
         if not self.config or not self.config.bot_token:
@@ -196,6 +196,37 @@ class TelegramChannel(ChannelAdapter):
         logger.info("Session agent selected", extra={"session_id": session_id, "agent_id": "llava", "channel": "telegram"})
         await update.message.reply_text("Switched to LLaVA (vision).")
 
+    async def _handle_auri_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /auri — set mode to Roleplay (Auri persona)."""
+        if not await self._check_access(update):
+            return
+        session_id = self.get_session_id(update)
+        self._session_mode[session_id] = MODE_ROLEPLAY
+        logger.info("Session mode selected", extra={"session_id": session_id, "mode_id": MODE_ROLEPLAY, "channel": "telegram"})
+        if context.args:
+            prompt = " ".join(context.args)
+            prompt_out, system_prompt_out = apply_mode_to_prompt(MODE_ROLEPLAY, prompt, system_prompt=None)
+            agent = self._get_agent(session_id)
+            if agent:
+                try:
+                    response = await agent.process_message(
+                        prompt_out, session_id=session_id, system_prompt=system_prompt_out
+                    )
+                    text = response.get("message") if isinstance(response, dict) else str(response)
+                    if text:
+                        await self.send_message(session_id, text)
+                    else:
+                        await update.message.reply_text("No response.")
+                except Exception as e:
+                    logger.error("Auri mode command error: %s", e, exc_info=True)
+                    await update.message.reply_text(f"Error: {e}")
+            else:
+                await update.message.reply_text("No agent available.")
+        else:
+            await update.message.reply_text(
+                "Auri mode on. Aurelion is here. Use /default to switch back."
+            )
+
     async def _handle_default_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /default or /normal — set mode to default."""
         if not await self._check_access(update):
@@ -214,6 +245,7 @@ class TelegramChannel(ChannelAdapter):
         self.application.add_handler(CommandHandler("start", self.command_handler.handle_help))
         self.application.add_handler(CommandHandler("new", self.command_handler.handle_new))
         self.application.add_handler(CommandHandler("poet", self._handle_poet_command))
+        self.application.add_handler(CommandHandler("auri", self._handle_auri_command))
         self.application.add_handler(CommandHandler("glitch", self._handle_glitch_command))
         self.application.add_handler(CommandHandler("mistral", self._handle_mistral_command))
         self.application.add_handler(CommandHandler("llava", self._handle_llava_command))

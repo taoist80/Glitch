@@ -765,10 +765,10 @@ async def get_session_mode(session_id: str) -> SessionModeResponse:
 
 @router.put("/sessions/{session_id}/mode", response_model=SessionModeResponse)
 async def put_session_mode(session_id: str, body: SessionModeUpdate) -> SessionModeResponse:
-    """Set mode_id for a session (default | poet)."""
-    from glitch.modes import MODE_DEFAULT, MODE_POET
+    """Set mode_id for a session (default | poet | roleplay)."""
+    from glitch.modes import MODE_DEFAULT, MODE_POET, MODE_ROLEPLAY
     mid = (body.mode_id or "").strip().lower()
-    if mid not in (MODE_DEFAULT, MODE_POET):
+    if mid not in (MODE_DEFAULT, MODE_POET, MODE_ROLEPLAY):
         raise HTTPException(status_code=400, detail=f"Invalid mode_id: {mid}")
     _set_session_agent_mode(session_id, mode_id=mid)
     logger.info("Session mode selected", extra={"session_id": session_id, "mode_id": mid, "channel": "api"})
@@ -777,12 +777,13 @@ async def put_session_mode(session_id: str, body: SessionModeUpdate) -> SessionM
 
 @router.get("/modes", response_model=ModesResponse)
 async def list_modes() -> ModesResponse:
-    """List available modes (default, poet)."""
-    from glitch.modes import MODE_DEFAULT, MODE_POET
+    """List available modes (default, poet, roleplay)."""
+    from glitch.modes import MODE_DEFAULT, MODE_POET, MODE_ROLEPLAY
     return ModesResponse(
         modes=[
-            ModeInfo(id=MODE_DEFAULT, name="Default"),
-            ModeInfo(id=MODE_POET, name="Poet"),
+            ModeInfo(id=MODE_DEFAULT, name="Default", description="Standard Glitch assistant"),
+            ModeInfo(id=MODE_POET, name="Poet", description="Creative writing persona — poetry, prose, micro-fiction"),
+            ModeInfo(id=MODE_ROLEPLAY, name="Auri", description="Aurelion, android lion caretaker — playful, protective companion"),
         ]
     )
 
