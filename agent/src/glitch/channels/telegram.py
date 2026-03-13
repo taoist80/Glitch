@@ -205,12 +205,15 @@ class TelegramChannel(ChannelAdapter):
         logger.info("Session mode selected", extra={"session_id": session_id, "mode_id": MODE_ROLEPLAY, "channel": "telegram"})
         if context.args:
             prompt = " ".join(context.args)
-            prompt_out, system_prompt_out = await apply_mode_with_memories(MODE_ROLEPLAY, prompt, system_prompt=None)
+            prompt_out, system_prompt_out, mode_context = await apply_mode_with_memories(
+                MODE_ROLEPLAY, prompt, system_prompt=None, session_id=session_id,
+            )
             agent = self._get_agent(session_id)
             if agent:
                 try:
                     response = await agent.process_message(
-                        prompt_out, session_id=session_id, system_prompt=system_prompt_out
+                        prompt_out, session_id=session_id, system_prompt=system_prompt_out,
+                        mode_context=mode_context,
                     )
                     text = response.get("message") if isinstance(response, dict) else str(response)
                     if text:
@@ -484,13 +487,15 @@ class TelegramChannel(ChannelAdapter):
         session_id = self.get_session_id(update)
         message_text = update.message.text
         mode_id = self._get_mode_id(session_id)
-        prompt_out, system_prompt_out = await apply_mode_with_memories(mode_id, message_text, system_prompt=None)
+        prompt_out, system_prompt_out, mode_context = await apply_mode_with_memories(
+            mode_id, message_text, system_prompt=None, session_id=session_id,
+        )
 
         agent = self._get_agent(session_id)
         if agent:
             try:
                 if hasattr(agent, "process_message_stream"):
-                    stream = agent.process_message_stream(prompt_out)
+                    stream = agent.process_message_stream(prompt_out, mode_context=mode_context)
                     await _consume_stream_and_send(
                         self.send_message,
                         session_id,
@@ -500,7 +505,8 @@ class TelegramChannel(ChannelAdapter):
                     )
                     return
                 response = await agent.process_message(
-                    prompt_out, session_id=session_id, system_prompt=system_prompt_out
+                    prompt_out, session_id=session_id, system_prompt=system_prompt_out,
+                    mode_context=mode_context,
                 )
                 # Send response (InvocationResponse uses "message" key)
                 if isinstance(response, dict):
@@ -620,7 +626,9 @@ class TelegramChannel(ChannelAdapter):
         else:
             prompt = "[Image attached] Please describe this image in detail."
         mode_id = self._get_mode_id(session_id)
-        prompt_out, system_prompt_out = await apply_mode_with_memories(mode_id, prompt, system_prompt=None)
+        prompt_out, system_prompt_out, mode_context = await apply_mode_with_memories(
+            mode_id, prompt, system_prompt=None, session_id=session_id,
+        )
         image_urls = None
         if media.media_data:
             image_urls = [f"data:image/jpeg;base64,{media.media_data}"]
@@ -629,7 +637,7 @@ class TelegramChannel(ChannelAdapter):
         if agent:
             try:
                 if hasattr(agent, "process_message_stream"):
-                    stream = agent.process_message_stream(prompt_out)
+                    stream = agent.process_message_stream(prompt_out, mode_context=mode_context)
                     await _consume_stream_and_send(
                         self.send_message,
                         session_id,
@@ -638,7 +646,7 @@ class TelegramChannel(ChannelAdapter):
                         lambda msg: update.message.reply_text(msg),
                     )
                     return
-                kwargs = {"session_id": session_id, "system_prompt": system_prompt_out}
+                kwargs = {"session_id": session_id, "system_prompt": system_prompt_out, "mode_context": mode_context}
                 if image_urls is not None and hasattr(agent, "process_message"):
                     import inspect
                     sig = inspect.signature(agent.process_message)

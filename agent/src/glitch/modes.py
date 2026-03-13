@@ -36,9 +36,23 @@ def get_poet_context() -> str:
 
 
 def get_roleplay_context() -> str:
-    """Load auri.md from S3 (preferred) or local file fallback."""
+    """Load Auri persona from split files (core + rules) or monolithic auri.md fallback."""
     try:
-        from glitch.tools.soul_tools import get_auri_s3_config, load_auri_from_s3
+        from glitch.tools.soul_tools import (
+            load_auri_core_from_s3, load_auri_rules_from_s3,
+            get_auri_s3_config, load_auri_from_s3,
+        )
+        # Try layered files first (Phase 2+)
+        core = load_auri_core_from_s3()
+        rules = load_auri_rules_from_s3()
+        if core and core.strip():
+            parts = [core.strip()]
+            if rules and rules.strip():
+                parts.append(rules.strip())
+            logger.info("Loaded layered Auri context: core=%d rules=%d chars",
+                        len(core), len(rules) if rules else 0)
+            return "\n\n".join(parts)
+        # Fallback to monolithic auri.md
         bucket, _ = get_auri_s3_config()
         if bucket:
             content = load_auri_from_s3()
@@ -47,7 +61,7 @@ def get_roleplay_context() -> str:
         for path in (_AURI_PATH, Path("/app/auri.md"), Path.home() / "auri.md"):
             if path.exists():
                 return path.read_text().strip()
-        logger.warning("auri.md not found (tried S3, %s, /app/auri.md)", _AURI_PATH)
+        logger.warning("auri persona not found (tried core+rules, auri.md S3, %s)", _AURI_PATH)
         return ""
     except Exception as e:
         logger.warning("Failed to load roleplay context: %s", e)
@@ -102,16 +116,43 @@ async def apply_mode_with_memories(
     mode_id: str,
     prompt: str,
     system_prompt: Optional[str] = None,
-) -> Tuple[str, Optional[str]]:
-    """Like apply_mode_to_prompt, but also injects retrieved Auri memories for roleplay mode.
+    session_id: Optional[str] = None,
+    active_members: Optional[list] = None,
+) -> Tuple[str, Optional[str], Optional[list]]:
+    """Like apply_mode_to_prompt, but also assembles full layered Auri context.
 
-    Memory retrieval is non-fatal — any DB error is logged as a warning and the
-    invocation proceeds normally with just the auri.md persona.
+    Uses AuriContextComposer when split files exist (core+rules in S3), otherwise
+    falls back to monolithic auri.md + memory retrieval.
+
+    Returns:
+        (prompt, system_prompt, mode_context) — mode_context is a list of
+        SystemContentBlock for GlitchAgent injection, or None for non-roleplay modes.
     """
     prompt_out, sys_out = apply_mode_to_prompt(mode_id, prompt, system_prompt)
     if mode_id != MODE_ROLEPLAY:
-        return prompt_out, sys_out
+        return prompt_out, sys_out, None
 
+    # Try the layered composer first (Phase 5+)
+    try:
+        from glitch.auri_context import AuriContextComposer
+        composer = AuriContextComposer()
+        # Check if split files exist by seeing if core loads
+        if composer._load_core():
+            mode_context = await composer.compose(
+                session_id=session_id or "",
+                user_message=prompt,
+                active_members=active_members,
+            )
+            # Build sys_out from composed blocks for Mistral/LLaVA fallback
+            if mode_context:
+                sys_out = "\n\n".join(
+                    b.get("text", "") for b in mode_context if isinstance(b, dict) and "text" in b
+                ) or sys_out
+            return prompt_out, sys_out, mode_context or None
+    except Exception as e:
+        logger.warning("AuriContextComposer failed, falling back to legacy: %s", e)
+
+    # Fallback: legacy monolithic path with memory retrieval
     from glitch.auri_memory import retrieve_memories
 
     try:
@@ -126,4 +167,13 @@ async def apply_mode_with_memories(
     except Exception as e:
         logger.warning("auri_memory: non-fatal injection error: %s", e)
 
-    return prompt_out, sys_out
+    # Build mode_context blocks for GlitchAgent (Strands) system prompt injection.
+    mode_context = None
+    if sys_out:
+        try:
+            from strands.types.content import SystemContentBlock
+            mode_context = [SystemContentBlock(text=sys_out)]
+        except ImportError:
+            logger.debug("strands not available; mode_context will be None")
+
+    return prompt_out, sys_out, mode_context

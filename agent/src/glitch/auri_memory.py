@@ -114,3 +114,64 @@ async def retrieve_memories(pool, query_text: str, k: int = 8) -> list:
     if result.get("statusCode", 200) >= 400:
         raise RuntimeError(f"auri_memory_search error: {result.get('error', result)}")
     return result.get("memories", [])
+
+
+async def store_participant_profile(participant_id: str, content: str) -> None:
+    """Upsert a participant profile (replaces any existing profile for this participant).
+
+    Args:
+        participant_id: Unique ID for the participant (e.g. 'arc', 'user123').
+        content:        Profile text describing preferences, personality, etc.
+    """
+    embedding = await asyncio.to_thread(embed_text, content)
+    result = await asyncio.to_thread(
+        _invoke_auri_lambda,
+        "auri_participant_upsert",
+        {
+            "participant_id": participant_id,
+            "content": content,
+            "embedding": embedding,
+        },
+    )
+    if result.get("statusCode", 200) >= 400:
+        raise RuntimeError(f"auri_participant_upsert error: {result.get('error', result)}")
+    logger.info("auri_memory: upserted participant profile for %s", participant_id)
+
+
+async def retrieve_participant_profiles(
+    participant_ids: list, query_text: str = "", k: int = 3
+) -> list:
+    """Retrieve participant profiles by ID using filtered vector search.
+
+    Args:
+        participant_ids: List of participant IDs to retrieve profiles for.
+        query_text:      Optional query for relevance ranking (defaults to participant_ids joined).
+        k:               Max results per participant.
+
+    Returns:
+        List of profile content strings.
+    """
+    if not participant_ids:
+        return []
+    search_text = query_text or " ".join(participant_ids)
+    embedding = await asyncio.to_thread(embed_text, search_text)
+    profiles = []
+    for pid in participant_ids:
+        result = await asyncio.to_thread(
+            _invoke_auri_lambda,
+            "auri_memory_search_filtered",
+            {
+                "embedding": embedding,
+                "k": k,
+                "memory_type": "participant_profile",
+                "participant_id": pid,
+            },
+        )
+        if result.get("statusCode", 200) >= 400:
+            logger.warning("auri_memory: filtered search error for %s: %s", pid, result.get("error"))
+            continue
+        for mem in result.get("memories", []):
+            content = mem.get("content", mem) if isinstance(mem, dict) else mem
+            if content:
+                profiles.append(content)
+    return profiles

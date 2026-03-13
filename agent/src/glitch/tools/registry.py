@@ -34,10 +34,16 @@ from glitch.tools.telemetry_tools import (
 from glitch.tools.soul_tools import (
     update_soul,
     update_auri,
+    update_auri_core,
+    update_auri_rules,
     update_story_book,
     get_story_book,
     remember_auri,
     search_auri_memory,
+    update_auri_state,
+    update_scene,
+    update_participant_profile,
+    get_participant_profile,
 )
 from glitch.tools.ssh_tools import (
     ssh_list_hosts,
@@ -155,10 +161,16 @@ class ToolRegistry:
         self._groups["soul"] = [
             update_soul,
             update_auri,
+            update_auri_core,
+            update_auri_rules,
             update_story_book,
             get_story_book,
             remember_auri,
             search_auri_memory,
+            update_auri_state,
+            update_scene,
+            update_participant_profile,
+            get_participant_profile,
         ]
         self._groups["ssh"] = [
             ssh_list_hosts,

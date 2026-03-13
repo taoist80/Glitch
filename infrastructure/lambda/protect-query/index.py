@@ -132,6 +132,81 @@ def action_auri_memory_search(conn, event):
     return {"statusCode": 200, "memories": [r[0] for r in rows]}
 
 
+def action_auri_memory_search_filtered(conn, event):
+    """Search auri_memory with optional metadata filters (memory_type, participant_id)."""
+    embedding = event.get("embedding", [])
+    k = max(1, min(int(event.get("k", 5)), 20))
+    memory_type = event.get("memory_type", "")
+    participant_id = event.get("participant_id", "")
+    if not embedding:
+        return {"statusCode": 400, "error": "embedding required"}
+    vec_str = "[" + ",".join(str(float(x)) for x in embedding) + "]"
+
+    # Build WHERE clause based on provided filters
+    conditions = []
+    params = {"vec": vec_str, "k": k}
+    if memory_type:
+        conditions.append("metadata->>'memory_type' = :mtype")
+        params["mtype"] = memory_type
+    if participant_id:
+        conditions.append("metadata->>'participant_id' = :pid")
+        params["pid"] = participant_id
+
+    where = ""
+    if conditions:
+        where = "WHERE " + " AND ".join(conditions)
+
+    rows = conn.run(
+        f"SELECT content, metadata FROM auri_memory {where} ORDER BY embedding <=> :vec::vector LIMIT :k",
+        **params,
+    )
+    return {
+        "statusCode": 200,
+        "memories": [{"content": r[0], "metadata": r[1]} for r in rows],
+    }
+
+
+def action_auri_participant_upsert(conn, event):
+    """Upsert a participant profile — one canonical profile per participant_id.
+
+    Deletes any existing profile for this participant, then inserts the new one.
+    """
+    import uuid as _uuid
+    participant_id = event.get("participant_id", "")
+    content = event.get("content", "")
+    embedding = event.get("embedding", [])
+    if not participant_id or not content or not embedding:
+        return {"statusCode": 400, "error": "participant_id, content, and embedding required"}
+    vec_str = "[" + ",".join(str(float(x)) for x in embedding) + "]"
+    metadata = json.dumps({
+        "memory_type": "participant_profile",
+        "participant_id": participant_id,
+    })
+    # Delete existing profile(s) for this participant
+    conn.run(
+        """
+        DELETE FROM auri_memory
+        WHERE metadata->>'memory_type' = 'participant_profile'
+          AND metadata->>'participant_id' = :pid
+        """,
+        pid=participant_id,
+    )
+    # Insert new profile
+    conn.run(
+        """
+        INSERT INTO auri_memory
+            (memory_id, content, embedding, session_id, source, metadata)
+        VALUES (:mem_id, :content, :vec::vector, '', 'participant_profile', :metadata)
+        """,
+        mem_id=str(_uuid.uuid4()),
+        content=content,
+        vec=vec_str,
+        metadata=metadata,
+    )
+    logger.info("auri_memory: upserted participant profile for %s (%d chars)", participant_id, len(content))
+    return {"statusCode": 200, "result": "ok", "participant_id": participant_id}
+
+
 # ---------------------------------------------------------------------------
 # Query helpers
 # ---------------------------------------------------------------------------
@@ -414,6 +489,10 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 return action_auri_memory_store(conn, event)
             elif action == "auri_memory_search":
                 return action_auri_memory_search(conn, event)
+            elif action == "auri_memory_search_filtered":
+                return action_auri_memory_search_filtered(conn, event)
+            elif action == "auri_participant_upsert":
+                return action_auri_participant_upsert(conn, event)
             else:
                 return {"statusCode": 400, "error": f"Unknown action: {action}"}
         except Exception as exc:

@@ -405,7 +405,9 @@ async def invoke(payload: InvocationRequest, context: RequestContext) -> Invocat
                 memory_id="",
             )
 
-        prompt_out, system_prompt_out = await apply_mode_with_memories(mode_id, prompt, system_prompt=None)
+        prompt_out, system_prompt_out, mode_context = await apply_mode_with_memories(
+            mode_id, prompt, system_prompt=None, session_id=session_id,
+        )
         logger.info(
             "Invocation routed to agent",
             extra={
@@ -421,7 +423,7 @@ async def invoke(payload: InvocationRequest, context: RequestContext) -> Invocat
             if hasattr(agent, "process_message_stream"):
                 async def stream_events() -> AsyncIterator[dict]:
                     try:
-                        async for event in agent.process_message_stream(prompt_out):
+                        async for event in agent.process_message_stream(prompt_out, mode_context=mode_context):
                             yield event
                     except Exception as e:
                         logger.error("Error in streaming invocation: %s", e, exc_info=True)
@@ -434,6 +436,7 @@ async def invoke(payload: InvocationRequest, context: RequestContext) -> Invocat
             prompt_out,
             session_id=session_id,
             system_prompt=system_prompt_out,
+            mode_context=mode_context,
         )
 
         invoke_step = "log_done"

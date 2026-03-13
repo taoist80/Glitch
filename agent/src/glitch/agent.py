@@ -293,12 +293,17 @@ class GlitchAgent:
             self.mcp_manager.clients = {}
     
     
-    def _select_and_inject_skills(self, user_message: str, model_name: str) -> list[SystemContentBlock]:
+    def _select_and_inject_skills(
+        self,
+        user_message: str,
+        model_name: str,
+        mode_context: Optional[list[SystemContentBlock]] = None,
+    ) -> list[SystemContentBlock]:
         """Select skills and return a cache-aware system prompt block list.
 
-        Returns [base_prompt_block, cache_point, skill_block (if any match)].
+        Returns [base_prompt_block, cache_point, mode_context?, skill_block?].
         The cache point after the static base lets Bedrock reuse the cached base
-        across requests; only the small skill section is re-processed per call.
+        across requests; mode context (e.g. Auri persona) and skills vary per call.
         """
         skill_suffix = select_skills_for_message(user_message, self._skills_dir)
 
@@ -306,6 +311,8 @@ class GlitchAgent:
             SystemContentBlock(text=self._base_prompt),
             SystemContentBlock(cachePoint=CachePoint(type="default")),
         ]
+        if mode_context:
+            blocks.extend(mode_context)
         if skill_suffix.strip():
             blocks.append(SystemContentBlock(text=skill_suffix))
         return blocks
@@ -324,7 +331,9 @@ class GlitchAgent:
 
         Args:
             user_message: The user's input message
-            **kwargs: Ignored (session_id, system_prompt used by Mistral/LLaVA)
+            **kwargs: Optional keys: mode_context (list[SystemContentBlock] for
+                roleplay persona injection), session_id, system_prompt (used by
+                Mistral/LLaVA)
 
         Returns:
             InvocationResponse containing message, metrics, and session info
@@ -337,8 +346,9 @@ class GlitchAgent:
                 event_type=EventType.USER_MESSAGE.value,
             )
             step = "select_skills"
+            mode_context = kwargs.get("mode_context")
             prompt_with_skills = self._select_and_inject_skills(
-                user_message, self._current_model_name
+                user_message, self._current_model_name, mode_context=mode_context
             )
             
             step = "set_prompt"
@@ -405,7 +415,7 @@ class GlitchAgent:
                 memory_id=self.memory_id,
             )
 
-    async def process_message_stream(self, user_message: str) -> AsyncIterator[Dict[str, Any]]:
+    async def process_message_stream(self, user_message: str, **kwargs: Any) -> AsyncIterator[Dict[str, Any]]:
         """Process a user message with streaming events (AgentCore best practice).
 
         Yields Strands stream events (e.g. content deltas, tool use, final result).
@@ -426,8 +436,9 @@ class GlitchAgent:
                 event_type=EventType.USER_MESSAGE.value,
             )
 
+            mode_context = kwargs.get("mode_context")
             prompt_with_skills = self._select_and_inject_skills(
-                user_message, self._current_model_name
+                user_message, self._current_model_name, mode_context=mode_context
             )
             self.agent.system_prompt = prompt_with_skills
 

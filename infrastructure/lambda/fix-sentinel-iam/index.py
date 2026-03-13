@@ -111,6 +111,17 @@ def handler(event, context):
     results.append("Granted SELECT to glitch_iam")
     logger.info("Granted SELECT privileges to glitch_iam")
 
+    # auri_memory requires INSERT (store_memory) and DELETE (participant_upsert)
+    # from the protect-query Lambda (glitch_iam), since it is the VPC bridge for
+    # Auri memory writes from the PUBLIC-mode runtime.
+    try:
+        conn.run("GRANT INSERT, DELETE ON TABLE auri_memory TO glitch_iam")
+        results.append("Granted INSERT, DELETE on auri_memory to glitch_iam")
+        logger.info("Granted INSERT, DELETE on auri_memory to glitch_iam")
+    except Exception as e:
+        results.append(f"auri_memory grant skipped (table may not exist yet): {e}")
+        logger.warning("auri_memory grant: %s", e)
+
     rows = conn.run("SELECT rolname FROM pg_roles WHERE rolname = 'sentinel_iam'")
     results.append(f"Verification: sentinel_iam exists = {bool(rows)}")
     rows = conn.run("SELECT rolname FROM pg_roles WHERE rolname = 'glitch_iam'")

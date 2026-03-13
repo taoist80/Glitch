@@ -23,12 +23,18 @@ SSM_AURI_S3_KEY = "/glitch/soul/auri-s3-key"
 DEFAULT_AURI_KEY = "auri.md"
 SSM_STORY_BOOK_KEY = "/glitch/soul/story-book-s3-key"
 DEFAULT_STORY_BOOK_KEY = "story-book.md"
+SSM_AURI_CORE_S3_KEY = "/glitch/soul/auri-core-s3-key"
+DEFAULT_AURI_CORE_KEY = "auri-core.md"
+SSM_AURI_RULES_S3_KEY = "/glitch/soul/auri-rules-s3-key"
+DEFAULT_AURI_RULES_KEY = "auri-runtime-rules.md"
 
 # Cached SSM result so we don't call SSM on every get_soul_s3_config().
 _ssm_soul_config: Tuple[str | None, str] | None = None
 _ssm_poet_soul_key: str | None = None
 _ssm_auri_s3_key: str | None = None
 _ssm_story_book_key: str | None = None
+_ssm_auri_core_s3_key: str | None = None
+_ssm_auri_rules_s3_key: str | None = None
 
 
 def _is_placeholder_bucket(value: str | None) -> bool:
@@ -219,14 +225,145 @@ def save_auri_to_s3(content: str) -> Tuple[bool, str]:
         return False, str(e)
 
 
+def _get_auri_core_s3_key_from_ssm() -> str:
+    """Return auri-core S3 key from SSM; cache and fallback to default."""
+    global _ssm_auri_core_s3_key
+    if _ssm_auri_core_s3_key is not None:
+        return _ssm_auri_core_s3_key
+    try:
+        client = get_client("ssm")
+        resp = client.get_parameter(Name=SSM_AURI_CORE_S3_KEY, WithDecryption=False)
+        _ssm_auri_core_s3_key = (resp.get("Parameter", {}).get("Value") or DEFAULT_AURI_CORE_KEY).strip() or DEFAULT_AURI_CORE_KEY
+        return _ssm_auri_core_s3_key
+    except Exception:
+        _ssm_auri_core_s3_key = DEFAULT_AURI_CORE_KEY
+        return _ssm_auri_core_s3_key
+
+
+def get_auri_core_s3_config() -> Tuple[str | None, str]:
+    """Return (bucket, key) for auri-core.md in S3. Same bucket as SOUL."""
+    bucket, _ = get_soul_s3_config()
+    if not bucket:
+        return None, DEFAULT_AURI_CORE_KEY
+    key = os.environ.get("GLITCH_AURI_CORE_S3_KEY") or _get_auri_core_s3_key_from_ssm()
+    return bucket, (key or DEFAULT_AURI_CORE_KEY).strip() or DEFAULT_AURI_CORE_KEY
+
+
+def load_auri_core_from_s3() -> str:
+    """Load auri-core.md content from S3. Returns empty string on missing or error."""
+    bucket, key = get_auri_core_s3_config()
+    if not bucket:
+        return ""
+    try:
+        from botocore.exceptions import ClientError
+        client = get_client("s3")
+        resp = client.get_object(Bucket=bucket, Key=key)
+        return resp["Body"].read().decode("utf-8")
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") == "NoSuchKey":
+            logger.debug("auri-core key %s not found in bucket %s", key, bucket)
+        else:
+            logger.warning("Failed to load auri-core from S3 %s/%s: %s", bucket, key, e)
+        return ""
+    except Exception as e:
+        logger.warning("Failed to load auri-core from S3 %s/%s: %s", bucket, key, e)
+        return ""
+
+
+def save_auri_core_to_s3(content: str) -> Tuple[bool, str]:
+    """Write auri-core.md content to S3. Returns (True, '') on success, (False, error) on failure."""
+    bucket, key = get_auri_core_s3_config()
+    if not bucket:
+        return False, "no_bucket"
+    try:
+        from botocore.exceptions import ClientError
+        client = get_client("s3")
+        client.put_object(Bucket=bucket, Key=key, Body=content.encode("utf-8"), ContentType="text/markdown; charset=utf-8")
+        logger.info("Saved auri-core to s3://%s/%s", bucket, key)
+        return True, ""
+    except ClientError as e:
+        code = (e.response.get("Error") or {}).get("Code", "")
+        logger.exception("Failed to save auri-core to S3 %s/%s: %s", bucket, key, e)
+        return False, code or "S3Error"
+    except Exception as e:
+        logger.exception("Failed to save auri-core to S3 %s/%s: %s", bucket, key, e)
+        return False, str(e)
+
+
+def _get_auri_rules_s3_key_from_ssm() -> str:
+    """Return auri-runtime-rules S3 key from SSM; cache and fallback to default."""
+    global _ssm_auri_rules_s3_key
+    if _ssm_auri_rules_s3_key is not None:
+        return _ssm_auri_rules_s3_key
+    try:
+        client = get_client("ssm")
+        resp = client.get_parameter(Name=SSM_AURI_RULES_S3_KEY, WithDecryption=False)
+        _ssm_auri_rules_s3_key = (resp.get("Parameter", {}).get("Value") or DEFAULT_AURI_RULES_KEY).strip() or DEFAULT_AURI_RULES_KEY
+        return _ssm_auri_rules_s3_key
+    except Exception:
+        _ssm_auri_rules_s3_key = DEFAULT_AURI_RULES_KEY
+        return _ssm_auri_rules_s3_key
+
+
+def get_auri_rules_s3_config() -> Tuple[str | None, str]:
+    """Return (bucket, key) for auri-runtime-rules.md in S3. Same bucket as SOUL."""
+    bucket, _ = get_soul_s3_config()
+    if not bucket:
+        return None, DEFAULT_AURI_RULES_KEY
+    key = os.environ.get("GLITCH_AURI_RULES_S3_KEY") or _get_auri_rules_s3_key_from_ssm()
+    return bucket, (key or DEFAULT_AURI_RULES_KEY).strip() or DEFAULT_AURI_RULES_KEY
+
+
+def load_auri_rules_from_s3() -> str:
+    """Load auri-runtime-rules.md content from S3. Returns empty string on missing or error."""
+    bucket, key = get_auri_rules_s3_config()
+    if not bucket:
+        return ""
+    try:
+        from botocore.exceptions import ClientError
+        client = get_client("s3")
+        resp = client.get_object(Bucket=bucket, Key=key)
+        return resp["Body"].read().decode("utf-8")
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") == "NoSuchKey":
+            logger.debug("auri-rules key %s not found in bucket %s", key, bucket)
+        else:
+            logger.warning("Failed to load auri-rules from S3 %s/%s: %s", bucket, key, e)
+        return ""
+    except Exception as e:
+        logger.warning("Failed to load auri-rules from S3 %s/%s: %s", bucket, key, e)
+        return ""
+
+
+def save_auri_rules_to_s3(content: str) -> Tuple[bool, str]:
+    """Write auri-runtime-rules.md content to S3. Returns (True, '') on success, (False, error) on failure."""
+    bucket, key = get_auri_rules_s3_config()
+    if not bucket:
+        return False, "no_bucket"
+    try:
+        from botocore.exceptions import ClientError
+        client = get_client("s3")
+        client.put_object(Bucket=bucket, Key=key, Body=content.encode("utf-8"), ContentType="text/markdown; charset=utf-8")
+        logger.info("Saved auri-rules to s3://%s/%s", bucket, key)
+        return True, ""
+    except ClientError as e:
+        code = (e.response.get("Error") or {}).get("Code", "")
+        logger.exception("Failed to save auri-rules to S3 %s/%s: %s", bucket, key, e)
+        return False, code or "S3Error"
+    except Exception as e:
+        logger.exception("Failed to save auri-rules to S3 %s/%s: %s", bucket, key, e)
+        return False, str(e)
+
+
 @tool
 def update_auri(contents: str) -> str:
-    """Update the persistent auri.md (Auri persona definition) with new content.
+    """[DEPRECATED — prefer update_auri_core or update_auri_rules]
+    Update the monolithic auri.md (Auri persona definition) with new content.
 
-    Use this when you learn something during roleplay: preferences, personality details,
-    how someone likes to be talked to, or new interaction patterns. Update the Nursery
-    section with per-person or per-interaction-type notes. You can also adjust dynamic
-    sliders or character details. Write the full desired auri.md content (markdown).
+    This overwrites the entire auri.md file. Use update_auri_core for identity/voice
+    changes and update_auri_rules for behavioral rule tuning instead.
+
+    Do NOT use this to record individual memories — use remember_auri.
 
     Args:
         contents: Full new content for auri.md (markdown string).
@@ -234,13 +371,14 @@ def update_auri(contents: str) -> str:
     Returns:
         Success or error message.
     """
+    logger.warning("update_auri called — this tool is deprecated; prefer update_auri_core or update_auri_rules")
     if not contents or not contents.strip():
         return "Error: contents cannot be empty."
     ok, err = save_auri_to_s3(contents.strip())
     if ok:
         return (
-            "auri.md updated successfully in S3. New roleplay sessions will load "
-            "the updated Auri persona; this session continues with the previous prompt."
+            "auri.md updated successfully in S3. NOTE: update_auri is deprecated — "
+            "prefer update_auri_core (identity) or update_auri_rules (behavior)."
         )
     bucket, _ = get_auri_s3_config()
     if not bucket:
@@ -250,6 +388,62 @@ def update_auri(contents: str) -> str:
     if err == "AccessDenied":
         return "auri update failed: access denied to the S3 bucket."
     return f"auri update failed (S3 error: {err}). Check logs."
+
+
+@tool
+def update_auri_core(contents: str) -> str:
+    """Update auri-core.md — Auri's always-on identity and personality kernel.
+
+    Use this RARELY for structural identity changes: core personality traits, voice,
+    character sheet details, slider defaults, emotional support protocol. This file
+    is loaded on every roleplay turn (~600-900 tokens), so keep it compact.
+
+    Do NOT use this for behavioral rules (use update_auri_rules) or episodic memories
+    (use remember_auri).
+
+    Args:
+        contents: Full new content for auri-core.md (markdown string).
+
+    Returns:
+        Success or error message.
+    """
+    if not contents or not contents.strip():
+        return "Error: contents cannot be empty."
+    ok, err = save_auri_core_to_s3(contents.strip())
+    if ok:
+        return "auri-core.md updated in S3. New sessions will load the updated identity."
+    bucket, _ = get_auri_core_s3_config()
+    if not bucket:
+        return "auri-core update skipped: S3 not configured (no bucket found)."
+    return f"auri-core update failed (S3 error: {err}). Check logs."
+
+
+@tool
+def update_auri_rules(contents: str) -> str:
+    """Update auri-runtime-rules.md — Auri's behavioral rules, protocols, and tool instructions.
+
+    Use this for tuning behavioral rules: caretaking protocols, diaper duty, teasing style,
+    escalation/de-escalation ladder, naughty/erotic gating, growth & learning rules,
+    memory tool instructions, pride rules. Loaded every turn (~350-500 tokens).
+
+    Do NOT use this for identity/personality changes (use update_auri_core) or episodic
+    memories (use remember_auri).
+
+    Args:
+        contents: Full new content for auri-runtime-rules.md (markdown string).
+
+    Returns:
+        Success or error message.
+    """
+    if not contents or not contents.strip():
+        return "Error: contents cannot be empty."
+    ok, err = save_auri_rules_to_s3(contents.strip())
+    if ok:
+        return "auri-runtime-rules.md updated in S3. New sessions will load the updated rules."
+    bucket, _ = get_auri_rules_s3_config()
+    if not bucket:
+        return "auri-rules update skipped: S3 not configured (no bucket found)."
+    return f"auri-rules update failed (S3 error: {err}). Check logs."
 
 
 def _get_story_book_s3_key_from_ssm() -> str:
@@ -499,11 +693,14 @@ def update_story_book(contents: str) -> str:
 
 @tool
 async def remember_auri(content: str, source: str = "agent") -> str:
-    """Store a persistent Auri memory for semantic recall across future sessions.
+    """Store a specific episodic memory for semantic recall across future sessions.
 
-    Call this during roleplay to record important facts, preferences, story beats,
-    relationship details, or anything Auri should remember. Memories are embedded
-    with Bedrock Titan and stored in pgvector for semantic retrieval.
+    Use this to record individual facts, events, expressed preferences, story beats,
+    or things Arc says during roleplay. Each call stores ONE memory (1-3 sentences).
+    These are searchable later via search_auri_memory. Use this frequently — every
+    meaningful thing Arc shares is worth remembering here.
+
+    Do NOT use update_auri for this — that tool is for structural persona changes only.
 
     Args:
         content: The memory to store — 1 to 3 self-contained sentences work best.
@@ -555,3 +752,169 @@ async def search_auri_memory(query: str, k: int = 5) -> str:
     except Exception as e:
         logger.warning("search_auri_memory failed: %s", e)
         return f"Failed to search memories: {e}"
+
+
+# --- Session state tools (Phase 3) ---
+
+# Lazy-init singleton; avoids import-time boto3 calls.
+_state_manager = None
+
+
+def _get_state_manager():
+    global _state_manager
+    if _state_manager is None:
+        from glitch.auri_state import AuriStateManager
+        _state_manager = AuriStateManager()
+    return _state_manager
+
+
+@tool
+def update_auri_state(
+    session_id: str,
+    mode: str = "",
+    mood: str = "",
+    goal: str = "",
+    sliders: str = "",
+    dynamic_level: int = -1,
+) -> str:
+    """Update Auri's per-session dynamic state (mood, mode, sliders, escalation).
+
+    Call this when the scene shifts — e.g. mood changes from warm to playful,
+    or escalation level increases. Only provided fields are updated; omitted
+    fields keep their current values.
+
+    Args:
+        session_id: The current session ID.
+        mode: Scene mode (cozy, play, care, bratty, comfort, lore). Empty = no change.
+        mood: Current mood (warm, playful, firm, gentle, mischievous). Empty = no change.
+        goal: Current scene goal text. Empty = no change.
+        sliders: JSON string of slider overrides, e.g. '{"teasing": 5}'. Empty = no change.
+        dynamic_level: Escalation ladder 1-6. -1 = no change.
+
+    Returns:
+        Confirmation with updated state summary.
+    """
+    import json as _json
+    mgr = _get_state_manager()
+    state = mgr.load_state(session_id)
+    if mode:
+        state.mode = mode
+    if mood:
+        state.mood = mood
+    if goal:
+        state.goal = goal
+    if sliders:
+        try:
+            overrides = _json.loads(sliders) if isinstance(sliders, str) else sliders
+            state.sliders.update(overrides)
+        except Exception as e:
+            return f"Error parsing sliders JSON: {e}"
+    if dynamic_level >= 0:
+        state.dynamic_level = max(1, min(6, dynamic_level))
+    mgr.save_state(session_id, state)
+    return f"State updated: mode={state.mode}, mood={state.mood}, level={state.dynamic_level}"
+
+
+@tool
+def update_scene(
+    session_id: str,
+    energy: str = "",
+    recent_event: str = "",
+    open_loop: str = "",
+    resolve_loop: str = "",
+) -> str:
+    """Update Auri's per-session scene summary (energy, events, open threads).
+
+    Call this to track scene energy shifts, notable events, and open narrative
+    threads. Recent events are capped at 5 (oldest dropped). Resolving a loop
+    removes it from the open list.
+
+    Args:
+        session_id: The current session ID.
+        energy: Scene energy (calm, playful, high, tense). Empty = no change.
+        recent_event: A notable event to append (1 sentence). Empty = skip.
+        open_loop: An unresolved narrative thread to add. Empty = skip.
+        resolve_loop: Text of a loop to mark resolved (removed). Empty = skip.
+
+    Returns:
+        Confirmation with updated scene summary.
+    """
+    mgr = _get_state_manager()
+    scene = mgr.load_scene(session_id)
+    if energy:
+        scene.energy = energy
+    if recent_event:
+        scene.recent_events.append(recent_event)
+        scene.recent_events = scene.recent_events[-5:]  # keep last 5
+    if open_loop:
+        scene.open_loops.append(open_loop)
+    if resolve_loop:
+        scene.open_loops = [l for l in scene.open_loops if resolve_loop.lower() not in l.lower()]
+    mgr.save_scene(session_id, scene)
+    parts = [f"energy={scene.energy}"]
+    if scene.recent_events:
+        parts.append(f"events={len(scene.recent_events)}")
+    if scene.open_loops:
+        parts.append(f"loops={len(scene.open_loops)}")
+    return f"Scene updated: {', '.join(parts)}"
+
+
+# --- Participant profile tools (Phase 4) ---
+
+@tool
+async def update_participant_profile(participant_id: str, profile_content: str) -> str:
+    """Store or update a participant's profile (replaces the Nursery per-person notes).
+
+    Call this after learning preferences, personality traits, or behavioral patterns
+    about a specific person. One canonical profile per participant — calling this
+    replaces any previous profile for the same participant_id.
+
+    Args:
+        participant_id: Unique ID for the person (e.g. 'arc', 'user_12345').
+        profile_content: Profile text — preferences, personality, comfort levels,
+            boundaries, relationship dynamics. 2-5 sentences.
+
+    Returns:
+        Confirmation or error message.
+    """
+    from glitch.auri_memory import store_participant_profile
+
+    if not participant_id or not participant_id.strip():
+        return "Error: participant_id cannot be empty."
+    if not profile_content or not profile_content.strip():
+        return "Error: profile_content cannot be empty."
+
+    try:
+        await store_participant_profile(participant_id.strip(), profile_content.strip())
+        return f"Profile for '{participant_id}' updated ({len(profile_content)} chars)."
+    except Exception as e:
+        logger.warning("update_participant_profile failed: %s", e)
+        return f"Failed to update profile: {e}"
+
+
+@tool
+async def get_participant_profile(participant_id: str) -> str:
+    """Retrieve a participant's stored profile.
+
+    Use this at the start of a session or when you need to recall a person's
+    preferences, boundaries, or relationship dynamics.
+
+    Args:
+        participant_id: The person's unique ID (e.g. 'arc').
+
+    Returns:
+        The participant's profile text, or a message if none found.
+    """
+    from glitch.auri_memory import retrieve_participant_profiles
+
+    if not participant_id or not participant_id.strip():
+        return "Error: participant_id cannot be empty."
+
+    try:
+        profiles = await retrieve_participant_profiles([participant_id.strip()], k=1)
+        if not profiles:
+            return f"No profile found for '{participant_id}'."
+        return profiles[0]
+    except Exception as e:
+        logger.warning("get_participant_profile failed: %s", e)
+        return f"Failed to retrieve profile: {e}"

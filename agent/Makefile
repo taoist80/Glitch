@@ -1,4 +1,4 @@
-.PHONY: help deploy deploy-only configure verify check-logs telegram-troubleshoot test clean upload-auri
+.PHONY: help deploy deploy-only configure verify check-logs telegram-troubleshoot test clean upload-auri migrate-auri
 
 help:
 	@echo "AgentCore Deployment Targets:"
@@ -7,6 +7,7 @@ help:
 	@echo "  make deploy-only           - Deploy without pre-configure"
 	@echo "  make configure             - Configure environment from SSM and update .bedrock_agentcore.yaml"
 	@echo "  make upload-auri           - Upload agent/auri.md to S3 soul bucket only (no deploy)"
+	@echo "  make migrate-auri          - ONE-TIME: split auri.md into auri-core.md + auri-runtime-rules.md in S3"
 	@echo "  make verify                - Check agent runtime status"
 	@echo "  make check-logs            - Check AgentCore runtime logs in CloudWatch"
 	@echo "  make telegram-troubleshoot - Run Telegram webhook/runtime diagnostics"
@@ -24,6 +25,11 @@ deploy-only:
 configure:
 	@echo "Configuring environment from SSM..."
 	python3 scripts/pre-deploy-configure.py
+
+migrate-auri:
+	@echo "Migrating auri.md → auri-core.md + auri-runtime-rules.md in S3 (ONE-TIME)..."
+	@echo "WARNING: This overwrites any existing split files. Skip if already migrated."
+	python3 scripts/migrate_auri_split.py --upload
 
 upload-auri:
 	@echo "Uploading auri.md to S3 soul bucket..."
