@@ -63,6 +63,11 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 
+# Suppress Strands SDK internal logging (tool inputs/outputs, model turns) to
+# avoid logging conversation content to CloudWatch. Our own glitch.* loggers
+# remain at INFO. Strands warns/errors still surface.
+logging.getLogger("strands").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 

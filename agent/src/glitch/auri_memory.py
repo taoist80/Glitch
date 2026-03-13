@@ -123,6 +123,7 @@ async def store_participant_profile(participant_id: str, content: str) -> None:
         participant_id: Unique ID for the participant (e.g. 'arc', 'user123').
         content:        Profile text describing preferences, personality, etc.
     """
+    participant_id = participant_id.strip().lower()
     embedding = await asyncio.to_thread(embed_text, content)
     result = await asyncio.to_thread(
         _invoke_auri_lambda,
@@ -153,6 +154,7 @@ async def retrieve_participant_profiles(
     """
     if not participant_ids:
         return []
+    participant_ids = [p.strip().lower() for p in participant_ids]
     search_text = query_text or " ".join(participant_ids)
     embedding = await asyncio.to_thread(embed_text, search_text)
     profiles = []

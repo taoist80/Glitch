@@ -44,6 +44,7 @@ from glitch.tools.soul_tools import (
     update_scene,
     update_participant_profile,
     get_participant_profile,
+    store_session_moment,
 )
 from glitch.tools.ssh_tools import (
     ssh_list_hosts,
@@ -171,6 +172,7 @@ class ToolRegistry:
             update_scene,
             update_participant_profile,
             get_participant_profile,
+            store_session_moment,
         ]
         self._groups["ssh"] = [
             ssh_list_hosts,

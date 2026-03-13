@@ -429,6 +429,41 @@ Layer 2: AgentCore Memory (Persistent)
     Cross-session persistence, namespaced storage
 ```
 
+### Auri Roleplay Memory (Layered Architecture)
+
+The Auri persona uses a separate layered memory system optimised for token efficiency
+(~1200 tokens hot context vs ~3800 for the old monolithic auri.md).
+
+**Storage layers:**
+
+| Layer | Storage | Contents | TTL |
+|-------|---------|----------|-----|
+| Core persona | S3 (`auri-core.md`) | Identity, personality, voice — ~474 tokens | Permanent |
+| Behavioral rules | S3 (`auri-runtime-rules.md`) | Protocols, tool instructions, escalation rules — ~770 tokens | Permanent |
+| Session state | DynamoDB (`glitch-telegram-config`, pk=`AURI_STATE#<session>`) | Mode, mood, sliders, dynamic level | Session |
+| Scene summary | DynamoDB (`glitch-telegram-config`, pk=`AURI_SCENE#<session>`) | Energy, recent events, open narrative loops | Session |
+| Participant profiles | RDS `auri_memory` (pgvector, `memory_type=participant_profile`) | Per-person preferences, tone, boundaries | Permanent |
+| Episodic memories | RDS `auri_memory` (pgvector) | Memorable facts, story beats, reactions | Permanent |
+| Lore archive | S3 (`story-book.md`) | Origin backstory — loaded only on lore keywords | Permanent |
+
+**Soul tools (always-on, no skill keyword gating):**
+
+| Tool | When Auri uses it | What it does |
+|------|-------------------|--------------|
+| `remember_auri` | After something memorable happens | Stores episodic fact in pgvector |
+| `search_auri_memory` | Session start / needs past context | Retrieves relevant memories |
+| `update_participant_profile` | After learning a person's preferences | Upserts profile in pgvector |
+| `get_participant_profile` | Session start with a known person | Loads their stored profile |
+| `update_auri_state` | When mood/mode shifts | Updates DynamoDB session state |
+| `update_scene` | Noteworthy scene event | Updates scene summary in DynamoDB |
+| `update_auri_core` | Rare -- structural identity change | Overwrites `auri-core.md` in S3 |
+| `update_auri_rules` | Behavioral rule tuning | Overwrites `auri-runtime-rules.md` in S3 |
+
+**Migration:** `make migrate-auri` is a one-time operation (already run). Do not re-run it —
+it would overwrite any runtime persona edits Auri has made via `update_auri_core` /
+`update_auri_rules`. Participant profiles bootstrap automatically when Auri calls
+`update_participant_profile` during roleplay sessions.
+
 ---
 
 ## Observability

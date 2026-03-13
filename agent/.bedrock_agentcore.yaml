@@ -32,7 +32,7 @@ agents:
     bedrock_agentcore:
       agent_id: Glitch-tC207UDZC5
       agent_arn: arn:aws:bedrock-agentcore:us-west-2:999776382415:runtime/Glitch-tC207UDZC5
-      agent_session_id: null
+      agent_session_id: 900d671d-49d1-4744-a626-e8c4e91c89d8
     codebuild:
       project_name: bedrock-agentcore-glitch-builder
       execution_role: arn:aws:iam::999776382415:role/GlitchFoundationStack-CodeBuildRole728CBADE-8DrF3LumRzLY

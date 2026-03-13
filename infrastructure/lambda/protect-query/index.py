@@ -170,9 +170,10 @@ def action_auri_participant_upsert(conn, event):
     """Upsert a participant profile — one canonical profile per participant_id.
 
     Deletes any existing profile for this participant, then inserts the new one.
+    participant_id is always lowercased to avoid case-duplicate profiles.
     """
     import uuid as _uuid
-    participant_id = event.get("participant_id", "")
+    participant_id = (event.get("participant_id", "") or "").strip().lower()
     content = event.get("content", "")
     embedding = event.get("embedding", [])
     if not participant_id or not content or not embedding:
@@ -205,6 +206,45 @@ def action_auri_participant_upsert(conn, event):
     )
     logger.info("auri_memory: upserted participant profile for %s (%d chars)", participant_id, len(content))
     return {"statusCode": 200, "result": "ok", "participant_id": participant_id}
+
+
+def action_auri_cleanup_duplicate_profiles(conn, event):
+    """Delete participant profiles whose participant_id is not already lowercase.
+
+    Safe to run multiple times. After running, all profiles have lowercase IDs.
+    """
+    rows = conn.run(
+        "DELETE FROM auri_memory "
+        "WHERE metadata->>'memory_type' = 'participant_profile' "
+        "  AND metadata->>'participant_id' != lower(metadata->>'participant_id') "
+        "RETURNING metadata->>'participant_id' AS pid"
+    )
+    deleted_ids = [r[0] for r in rows]
+    logger.info("auri_cleanup: deleted %d mixed-case profile(s): %s", len(deleted_ids), deleted_ids)
+    return {"statusCode": 200, "deleted_count": len(deleted_ids), "deleted_ids": deleted_ids}
+
+
+def action_auri_debug_list_profiles(conn, event):
+    """List participant profiles without needing an embedding (diagnostic only).
+
+    Returns up to 20 profiles sorted by created_at DESC.
+    """
+    rows = conn.run(
+        "SELECT content, metadata FROM auri_memory "
+        "WHERE metadata->>'memory_type' = 'participant_profile' "
+        "ORDER BY created_at DESC LIMIT 20"
+    )
+    return {
+        "statusCode": 200,
+        "count": len(rows),
+        "profiles": [
+            {
+                "participant_id": (r[1] or {}).get("participant_id", "?"),
+                "content_preview": (r[0] or "")[:200],
+            }
+            for r in rows
+        ],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -493,6 +533,10 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 return action_auri_memory_search_filtered(conn, event)
             elif action == "auri_participant_upsert":
                 return action_auri_participant_upsert(conn, event)
+            elif action == "auri_cleanup_duplicate_profiles":
+                return action_auri_cleanup_duplicate_profiles(conn, event)
+            elif action == "auri_debug_list_profiles":
+                return action_auri_debug_list_profiles(conn, event)
             else:
                 return {"statusCode": 400, "error": f"Unknown action: {action}"}
         except Exception as exc:

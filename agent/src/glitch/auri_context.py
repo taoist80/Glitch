@@ -82,7 +82,7 @@ class AuriContextComposer:
             parts.append(state_text)
 
         # 4. Retrieve participant profiles for active members
-        members = active_members or ["Arc"]
+        members = active_members or ["arc"]
         profiles_text = await self._load_profiles(members)
         if profiles_text:
             parts.append(profiles_text)

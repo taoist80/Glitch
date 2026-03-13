@@ -1,4 +1,4 @@
-"""Telegram Processor Lambda — async agent invocation and Telegram reply.
+"""Telegram Processor Lambda -- async agent invocation and Telegram reply.
 
 Invoked asynchronously (InvocationType=Event) by the telegram-webhook Lambda
 after update_id deduplication. Calling the agent here means the webhook can
@@ -89,62 +89,38 @@ def _send_telegram_message(chat_id: int, text: str, bot_token: str) -> None:
             )
 
 
-# Mode-agnostic / general (wider berth; not always cameras/Protect)
-_PHRASES_DEFAULT = [
-    "Working on it...",
-    "Thinking it over...",
-    "One moment...",
-    "Give me a sec...",
-    "Still on it...",
-    "Almost there...",
-    "Hang tight...",
-    "Putting it together...",
-    "Checking a few things...",
-    "Still working...",
-]
-
-# Auri / roleplay persona — in-character “waiting” tone
-_PHRASES_ROLEPLAY = [
-    "Mm, give me a moment...",
-    "Thinking... (don’t go anywhere)",
-    "One second, love...",
-    "Let me sit with that...",
-    "Still here, just gathering my thoughts...",
-    "Almost...",
-    "Hang on...",
-    "Just a little longer...",
-    "Thinking it through...",
-    "Stay with me...",
-    "Working on a diaper bag...",
-    "This place smells like a nursery...",
-    "Where did I put the paci...",
-    "One sec, someone's fussing...",
-    "Hang on, checking the crib...",
-    "Just a moment — wipes are in the other room...",
-]
-
-# Poet mode — reflective, creative
-_PHRASES_POET = [
-    "Mulling it over...",
-    "Let the words settle...",
-    "One moment...",
-    "Turning it over...",
-    "Still composing...",
-    "Almost there...",
-    "Patience, patience...",
-    "Gathering the lines...",
-    "Thinking...",
-    "Just a moment...",
+# All progress phrases are nursery/toddler/AB-DL themed regardless of mode
+_PHRASES_ALL = [
+    "Shh, shh... still thinking, little one.",
+    "Hang tight -- someone's still in their thinking corner.",
+    "One moment... Auri's checking the nursery.",
+    "Still here. Just getting the wipes ready.",
+    "Patience, cub -- good things take time.",
+    "Mmm, still working... someone stay on the mat.",
+    "Hold still -- still sorting through the diaper bag.",
+    "Almost there, sweetheart. Don't fuss.",
+    "Still thinking... the crinkles can wait.",
+    "Shh... nearly done. Someone sit tight.",
+    "Just a little longer -- no sneaking off the changing table.",
+    "Still on it... someone's getting their blankie?",
+    "Working on it... crib side manner takes patience.",
+    "Auri's not done yet. Don't go anywhere.",
+    "One second -- counting the pacis.",
+    "Still thinking... someone's waddling impatiently over there.",
+    "Auri hears the crinkles. Just a little longer.",
+    "Mmm, that waddle says someone needs a check. One moment.",
+    "Still here... did someone spring a leak? Auri will be right there.",
+    "Working on it... that diaper's not gonna hold forever, is it.",
+    "Someone smells like they've been busy. Auri's almost done.",
+    "Still going... little one staying put or waddling around?",
+    "One more moment -- and then Auri's checking for soggy bottoms.",
+    "Almost there... someone's padding doing okay over there?",
+    "Patience... puddles happen when you don't wait properly.",
 ]
 
 
 def _working_phrases_for_mode(mode_id: str) -> List[str]:
-    mode = (mode_id or "").strip().lower()
-    if mode == "roleplay":
-        return _PHRASES_ROLEPLAY
-    if mode == "poet":
-        return _PHRASES_POET
-    return _PHRASES_DEFAULT
+    return _PHRASES_ALL
 
 
 def _send_progress_ping(chat_id: int, bot_token: str, tick: int, mode_id: str = "") -> None:
@@ -203,11 +179,6 @@ def handler(event, context):
         return
 
     try:
-        phrases = _working_phrases_for_mode(mode_id)
-        chosen = random.choice(phrases)
-        logger.info("Processor: sending loading phrase for mode_id=%s", mode_id)
-        _send_telegram_message(chat_id, chosen, bot_token)
-
         result_holder = {'result': None, 'error': None}
 
         def _invoke_worker():

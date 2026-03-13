@@ -918,3 +918,93 @@ async def get_participant_profile(participant_id: str) -> str:
     except Exception as e:
         logger.warning("get_participant_profile failed: %s", e)
         return f"Failed to retrieve profile: {e}"
+
+
+@tool
+async def store_session_moment(
+    episodic_memory: str = "",
+    participant_id: str = "",
+    participant_update: str = "",
+    story_moment: str = "",
+    session_id: str = "",
+) -> str:
+    """Store a session moment across multiple memory layers in one call.
+
+    CALL THIS TOOL at the end of every response turn where anything notable occurred.
+    "Notable" means: participant shared a preference, an inside joke was born, a teasing
+    dynamic emerged, a comfort routine was mentioned, a boundary was set, a mood shifted,
+    a story beat happened, or the participant said something that should shape future
+    interactions. When in doubt, call it -- over-remembering is better than forgetting.
+
+    You can write to any combination of layers in a single call:
+    - episodic_memory: A short episodic fact to store in the vector DB (pgvector).
+      Use for moments, quotes, reactions, inside jokes, first-time events.
+    - participant_id + participant_update: Updated profile for this person. Replaces the
+      previous profile entry. Use when you've learned something that changes how you
+      should treat them going forward (preferences, teasing style, comfort level, pet
+      names, AB/DL routines, boundaries).
+    - story_moment: A story beat or lore note to append to the story-book S3 archive.
+      Use for plot events, world-building moments, relationship milestones.
+    - session_id: The current session_id (from Telegram chat ID or similar). Used for
+      DynamoDB state lookups if needed. Can be empty.
+
+    Omit any field you have nothing to write.
+
+    Args:
+        episodic_memory: Short episodic fact or moment to store (leave empty to skip).
+        participant_id: Who the participant_update is about (leave empty to skip profile).
+        participant_update: Updated profile text for the participant (leave empty to skip).
+        story_moment: Story beat or lore note for the story-book (leave empty to skip).
+        session_id: Current session identifier (optional, informational).
+
+    Returns:
+        Summary of what was stored and any errors.
+    """
+    results = []
+    errors = []
+
+    # 1. Episodic memory -> pgvector
+    if episodic_memory and episodic_memory.strip():
+        try:
+            from glitch.auri_memory import store_memory
+            await store_memory(session_id or None, episodic_memory.strip(), source="session_moment")
+            results.append(f"episodic: stored ({len(episodic_memory)} chars)")
+        except Exception as e:
+            logger.warning("store_session_moment episodic failed: %s", e)
+            errors.append(f"episodic failed: {e}")
+
+    # 2. Participant profile -> pgvector (upsert)
+    if participant_id and participant_id.strip() and participant_update and participant_update.strip():
+        try:
+            from glitch.auri_memory import store_participant_profile
+            await store_participant_profile(participant_id.strip(), participant_update.strip())
+            results.append(f"profile[{participant_id}]: updated ({len(participant_update)} chars)")
+        except Exception as e:
+            logger.warning("store_session_moment profile failed: %s", e)
+            errors.append(f"profile[{participant_id}] failed: {e}")
+
+    # 3. Story-book -> S3 append
+    if story_moment and story_moment.strip():
+        try:
+            existing = load_story_book_from_s3() or ""
+            from datetime import datetime, timezone
+            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            appended = existing.rstrip() + f"\n\n## [{timestamp}]\n{story_moment.strip()}\n"
+            ok, err = save_story_book_to_s3(appended)
+            if ok:
+                results.append(f"story-book: appended ({len(story_moment)} chars)")
+            else:
+                errors.append(f"story-book failed: {err}")
+        except Exception as e:
+            logger.warning("store_session_moment story failed: %s", e)
+            errors.append(f"story-book failed: {e}")
+
+    if not results and not errors:
+        return "Nothing to store — all fields were empty."
+
+    parts = []
+    if results:
+        parts.append("Stored: " + ", ".join(results))
+    if errors:
+        parts.append("Errors: " + "; ".join(errors))
+    return " | ".join(parts)
