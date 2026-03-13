@@ -257,6 +257,55 @@ _protect_processors: dict = {}
 _protect_patrols: dict = {}
 _protect_camera_ids_by_site: dict = {}
 _protect_site_configs: dict = {}
+_protect_halted: bool = False  # Set by halt_protect(); prevents watchdog from restarting.
+
+
+async def halt_protect() -> dict:
+    """Stop all Protect subsystem components and prevent watchdog from restarting them.
+
+    Stops pollers, processors, patrols, and cancels all named background tasks
+    (watchdog, daily reports, patrol loops). Safe to call from any coroutine.
+
+    Returns a summary dict: {"pollers": [...], "processors": [...],
+                              "patrols": [...], "tasks": [...]}.
+    """
+    global _protect_halted
+    _protect_halted = True
+
+    stopped: dict = {"pollers": [], "processors": [], "patrols": [], "tasks": []}
+
+    for site_id, poller in list(_protect_pollers.items()):
+        poller.stop()
+        stopped["pollers"].append(site_id)
+
+    for site_id, processor in list(_protect_processors.items()):
+        try:
+            await asyncio.wait_for(processor.stop(), timeout=10.0)
+        except asyncio.TimeoutError:
+            logger.warning("halt_protect: processor %s stop timed out", site_id)
+        stopped["processors"].append(site_id)
+
+    for site_id, patrol in list(_protect_patrols.items()):
+        patrol.stop()
+        stopped["patrols"].append(site_id)
+
+    _protect_task_names = {
+        "protect-watchdog", "daily-report", "daily-briefing",
+        "weekly-fp-learning", "weekly-threshold-opt", "health-writer",
+    }
+    for task in asyncio.all_tasks():
+        if task.get_name() in _protect_task_names:
+            task.cancel()
+            stopped["tasks"].append(task.get_name())
+
+    _protect_health["protect_poller"] = "halted"
+    _protect_health["protect_processor"] = "halted"
+
+    logger.warning(
+        "halt_protect: subsystem halted — pollers=%s processors=%s patrols=%s tasks=%s",
+        stopped["pollers"], stopped["processors"], stopped["patrols"], stopped["tasks"],
+    )
+    return stopped
 
 
 async def _start_protect_site(site_cfg) -> None:
@@ -403,6 +452,10 @@ async def _protect_watchdog_loop() -> None:
 
     while True:
         await asyncio.sleep(_WATCHDOG_INTERVAL)
+
+        if _protect_halted:
+            logger.debug("protect-watchdog: halted — exiting")
+            return
 
         # Retry camera seed for sites that have 0 cameras (e.g. site2 when port forward wasn't ready).
         for site_id in list(_protect_pollers.keys()):

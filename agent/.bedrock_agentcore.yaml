@@ -29,10 +29,29 @@ agents:
       lifecycle_configuration:
         idle_runtime_session_timeout: 900
         max_lifetime: 28800
+      environment_variables:
+        GLITCH_OLLAMA_PROXY_HOST: home.awoo.agency
+        GLITCH_OLLAMA_API_KEY: 4aec03bb5cf0e33a311fa068b350b03ea91e0c206b74f63cf7d814a73789d644
+        GLITCH_OLLAMA_TIMEOUT: '180'
+        GLITCH_MISTRAL_TIMEOUT: '180'
+        GLITCH_TELEGRAM_WEBHOOK_URL: https://kurkpdnzfzixqfvdc3moozpy240ygrmn.lambda-url.us-west-2.on.aws/
+        GLITCH_CONFIG_TABLE: glitch-telegram-config
+        GLITCH_TELEGRAM_SECRET_NAME: glitch/telegram-bot-token
+        GLITCH_TELEMETRY_LOG_GROUP: /glitch/telemetry
+        GLITCH_DEFAULT_CHAT_AGENT: glitch
+        GLITCH_SSH_SECRET_NAME: glitch/ssh-key
+        GLITCH_SOUL_S3_BUCKET: placeholder
+        GLITCH_PROTECT_HOST: protect.awoo.agency
+        GLITCH_PROTECT_2_HOST: starbase80.awoo.agency
+        GLITCH_PROTECT_2_API_KEY: XYC2tEHpxqx9_kyZhRqfn7IJrdKKF6u8
+        GLITCH_PROTECT_DB_HOST: glitchprotectdbstack-protectdb4ebfe2a3-lyznvxhq7rtu.cwvagdoxywve.us-west-2.rds.amazonaws.com
+        GLITCH_PROTECT_DB_PORT: '5432'
+        GLITCH_PROTECT_DB_NAME: glitch_protect
+        GLITCH_PROTECT_DB_IAM_USER: sentinel_iam
     bedrock_agentcore:
       agent_id: Glitch-tC207UDZC5
       agent_arn: arn:aws:bedrock-agentcore:us-west-2:999776382415:runtime/Glitch-tC207UDZC5
-      agent_session_id: 900d671d-49d1-4744-a626-e8c4e91c89d8
+      agent_session_id: null
     codebuild:
       project_name: bedrock-agentcore-glitch-builder
       execution_role: arn:aws:iam::999776382415:role/GlitchFoundationStack-CodeBuildRole728CBADE-8DrF3LumRzLY

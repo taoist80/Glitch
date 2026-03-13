@@ -391,6 +391,16 @@ async def invoke(payload: InvocationRequest, context: RequestContext) -> Invocat
         from glitch.modes import apply_mode_with_memories, MODE_DEFAULT
         agent_id = (payload.get("agent_id") or "").strip().lower() or get_default_agent_id()
         mode_id = (payload.get("mode_id") or "").strip().lower() or MODE_DEFAULT
+        # Optional: caller can specify who's in the session for profile retrieval.
+        # Accepts "participant_id" (string) or "active_members" (list of strings).
+        participant_id = (payload.get("participant_id") or "").strip().lower()
+        active_members_raw = payload.get("active_members")
+        if participant_id:
+            active_members = [participant_id]
+        elif isinstance(active_members_raw, list):
+            active_members = [p.strip().lower() for p in active_members_raw if p]
+        else:
+            active_members = None
         agent = registry_get_agent(agent_id)
         if agent is None:
             agent = _agent
@@ -407,6 +417,7 @@ async def invoke(payload: InvocationRequest, context: RequestContext) -> Invocat
 
         prompt_out, system_prompt_out, mode_context = await apply_mode_with_memories(
             mode_id, prompt, system_prompt=None, session_id=session_id,
+            active_members=active_members,
         )
         logger.info(
             "Invocation routed to agent",

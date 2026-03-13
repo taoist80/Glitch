@@ -324,6 +324,7 @@ def query_cloudwatch_telemetry(
                             token_usage = data.get("token_usage") or {}
                             metrics: InvocationMetrics = {
                                 "duration_seconds": data.get("duration_seconds", 0),
+                                "model": data.get("model", "unknown"),
                                 "token_usage": {
                                     "input_tokens": token_usage.get("input_tokens", 0),
                                     "output_tokens": token_usage.get("output_tokens", 0),
@@ -659,6 +660,12 @@ def publish_hourly_metrics_to_cloudwatch(aggregates: PeriodAggregates) -> bool:
     now = datetime.now(timezone.utc)
     
     metric_data = []
+    billing_equivalent = (
+        aggregates.get("input_tokens", 0)
+        + aggregates.get("output_tokens", 0)
+        + aggregates.get("cache_read_tokens", 0)
+        + aggregates.get("cache_write_tokens", 0)
+    )
     metric_mappings = [
         ("InvocationCount", aggregates.get("invocation_count", 0), "Count"),
         ("InputTokens", aggregates.get("input_tokens", 0), "Count"),
@@ -666,6 +673,8 @@ def publish_hourly_metrics_to_cloudwatch(aggregates: PeriodAggregates) -> bool:
         ("TotalTokens", aggregates.get("total_tokens", 0), "Count"),
         ("CacheReadTokens", aggregates.get("cache_read_tokens", 0), "Count"),
         ("CacheWriteTokens", aggregates.get("cache_write_tokens", 0), "Count"),
+        # Sum of all token types that appear on the AWS invoice.
+        ("BillingEquivalentTokens", billing_equivalent, "Count"),
         ("DurationSeconds", aggregates.get("duration_seconds", 0), "Seconds"),
         ("LatencyMsTotal", aggregates.get("latency_ms_total", 0), "Milliseconds"),
     ]
@@ -895,10 +904,12 @@ def log_invocation_metrics(
         f"latency: {metrics.get('latency_ms', 0):.0f}ms"
     )
 
+    model = (extra or {}).get("model", "unknown") if extra else "unknown"
     structured_log: Dict[str, Any] = {
         "event_type": "invocation_metrics",
         "timestamp": time.time(),
         "session_id": session_id,
+        "model": model,
         "token_usage": {
             "input_tokens": token_usage.get("input_tokens", 0),
             "output_tokens": token_usage.get("output_tokens", 0),

@@ -384,7 +384,7 @@ class GlitchAgent:
                 user_message=user_message[:100],
                 response_preview=str(result)[:200],
                 session_id=self.session_id,
-                extra=skill_info,
+                extra={**(skill_info or {}), "model": self._current_model_name},
             )
             
             step = "create_event_agent"
@@ -475,7 +475,7 @@ class GlitchAgent:
                     user_message=user_message[:100],
                     response_preview=(accumulated_text or str(last_result))[:200],
                     session_id=self.session_id,
-                    extra=skill_info,
+                    extra={**(skill_info or {}), "model": self._current_model_name},
                 )
                 await self.memory_manager.create_event(
                     event_content=accumulated_text or str(last_result),

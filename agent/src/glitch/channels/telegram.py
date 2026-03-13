@@ -205,8 +205,10 @@ class TelegramChannel(ChannelAdapter):
         logger.info("Session mode selected", extra={"session_id": session_id, "mode_id": MODE_ROLEPLAY, "channel": "telegram"})
         if context.args:
             prompt = " ".join(context.args)
+            active_members = self._get_participant_ids(update)
             prompt_out, system_prompt_out, mode_context = await apply_mode_with_memories(
                 MODE_ROLEPLAY, prompt, system_prompt=None, session_id=session_id,
+                active_members=active_members,
             )
             agent = self._get_agent(session_id)
             if agent:
@@ -239,6 +241,29 @@ class TelegramChannel(ChannelAdapter):
         logger.info("Session mode selected", extra={"session_id": session_id, "mode_id": MODE_DEFAULT, "channel": "telegram"})
         await update.message.reply_text("Switched to default mode.")
 
+    async def _handle_haltprotect_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /haltprotect — immediately stop all Protect subsystem components."""
+        if not await self._check_access(update):
+            return
+        try:
+            import main as _main
+            stopped = await _main.halt_protect()
+            lines = ["🛑 Protect subsystem halted."]
+            if stopped["pollers"]:
+                lines.append(f"Pollers stopped: {', '.join(stopped['pollers'])}")
+            if stopped["processors"]:
+                lines.append(f"Processors stopped: {', '.join(stopped['processors'])}")
+            if stopped["patrols"]:
+                lines.append(f"Patrols stopped: {', '.join(stopped['patrols'])}")
+            if stopped["tasks"]:
+                lines.append(f"Tasks cancelled: {', '.join(stopped['tasks'])}")
+            if not any([stopped["pollers"], stopped["processors"], stopped["patrols"], stopped["tasks"]]):
+                lines.append("(Nothing was running.)")
+            await update.message.reply_text("\n".join(lines))
+        except Exception as e:
+            logger.error("haltprotect command error: %s", e, exc_info=True)
+            await update.message.reply_text(f"❌ Error halting Protect: {e}")
+
     def _register_handlers(self) -> None:
         """Register message and command handlers."""
         # Command handlers
@@ -254,6 +279,7 @@ class TelegramChannel(ChannelAdapter):
         self.application.add_handler(CommandHandler("llava", self._handle_llava_command))
         self.application.add_handler(CommandHandler("default", self._handle_default_command))
         self.application.add_handler(CommandHandler("normal", self._handle_default_command))
+        self.application.add_handler(CommandHandler("haltprotect", self._handle_haltprotect_command))
 
         # Message handlers
         self.application.add_handler(
@@ -408,7 +434,25 @@ class TelegramChannel(ChannelAdapter):
             return f"telegram:channel:{chat.id}"
         
         return f"telegram:unknown:{chat.id}"
-    
+
+    def _get_participant_ids(self, update: Update) -> list[str]:
+        """Derive participant_id list from the Telegram sender.
+
+        Uses first_name (lowercased, spaces stripped) as the participant_id, falling
+        back to username. This matches how profiles are stored via store_session_moment /
+        update_participant_profile (e.g. "rusty", "arc").
+        """
+        user = update.effective_user
+        if not user:
+            return []
+        # Prefer first_name (e.g. "Rusty") over username (e.g. "rusty_pup").
+        # Take only the first word so "Rusty Puppy" → "rusty" (matches stored profile key).
+        raw = (user.first_name or user.username or "").strip()
+        name = raw.split()[0].lower() if raw else ""
+        if not name:
+            return []
+        return [name]
+
     def _chunk_message(self, message: str) -> list[str]:
         """Split long message into chunks.
         
@@ -487,8 +531,10 @@ class TelegramChannel(ChannelAdapter):
         session_id = self.get_session_id(update)
         message_text = update.message.text
         mode_id = self._get_mode_id(session_id)
+        active_members = self._get_participant_ids(update)
         prompt_out, system_prompt_out, mode_context = await apply_mode_with_memories(
             mode_id, message_text, system_prompt=None, session_id=session_id,
+            active_members=active_members,
         )
 
         agent = self._get_agent(session_id)
@@ -626,8 +672,10 @@ class TelegramChannel(ChannelAdapter):
         else:
             prompt = "[Image attached] Please describe this image in detail."
         mode_id = self._get_mode_id(session_id)
+        active_members = self._get_participant_ids(update)
         prompt_out, system_prompt_out, mode_context = await apply_mode_with_memories(
             mode_id, prompt, system_prompt=None, session_id=session_id,
+            active_members=active_members,
         )
         image_urls = None
         if media.media_data:

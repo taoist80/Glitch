@@ -44,11 +44,21 @@ def _format_timestamp(ts: float) -> str:
 
 
 def _format_aggregate(agg: PeriodAggregates, label: str) -> str:
+    input_t = agg.get("input_tokens", 0)
+    output_t = agg.get("output_tokens", 0)
+    cache_read = agg.get("cache_read_tokens", 0)
+    cache_write = agg.get("cache_write_tokens", 0)
+    # total_tokens from Strands = input + output only (no cache).
+    # AWS bills cache read at ~10% and cache write at ~125% of input token rate.
+    # billing_equivalent = all tokens that appear on the AWS invoice.
+    billing_equivalent = input_t + output_t + cache_read + cache_write
     lines = [
         "  invocations: %s" % agg.get("invocation_count", 0),
-        "  input_tokens: %s" % agg.get("input_tokens", 0),
-        "  output_tokens: %s" % agg.get("output_tokens", 0),
-        "  total_tokens: %s" % agg.get("total_tokens", 0),
+        "  input_tokens: %s" % input_t,
+        "  output_tokens: %s" % output_t,
+        "  cache_read_tokens: %s" % cache_read,
+        "  cache_write_tokens: %s" % cache_write,
+        "  billing_equivalent_tokens: %s  (input+output+cache, matches AWS)" % billing_equivalent,
         "  duration_seconds: %s" % agg.get("duration_seconds", 0),
     ]
     custom = agg.get("custom_metrics")
