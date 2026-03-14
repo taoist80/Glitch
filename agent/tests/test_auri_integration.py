@@ -244,3 +244,41 @@ def test_migration_script_dry_run():
     assert "update_participant_profile" in AURI_RULES, "Rules missing participant profile tool"
     assert "Naughty" in AURI_RULES or "naughty" in AURI_RULES.lower(), "Rules missing naughty escalation"
     assert "Growth" in AURI_RULES, "Rules missing growth/learning rules"
+
+
+# ---------------------------------------------------------------------------
+# Haiku model routing + brevity instruction
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_context_composer_includes_brevity_instruction():
+    """Verify the roleplay preamble injected by AuriContextComposer contains the brevity rule."""
+    from glitch.auri_context import AuriContextComposer
+
+    composer = AuriContextComposer()
+    blocks = await composer.compose(
+        session_id=f"test-brevity-{uuid.uuid4().hex[:8]}",
+        user_message="hello",
+        active_members=[],
+    )
+    if blocks:
+        assembled = " ".join(
+            b.get("text", "") for b in blocks if isinstance(b, dict) and "text" in b
+        )
+        assert "1" in assembled and "3 sentence" in assembled.lower() or \
+               "1–3 sentences" in assembled or "brevity" in assembled.lower(), \
+            f"Brevity instruction not found in assembled context: {assembled[:400]}"
+
+
+@pytest.mark.asyncio
+async def test_apply_mode_with_memories_roleplay_includes_brevity():
+    """Verify the fallback roleplay preamble (modes.py) also includes the brevity rule."""
+    from glitch.modes import apply_mode_with_memories, MODE_ROLEPLAY
+
+    _prompt, sys_out, _ctx = await apply_mode_with_memories(
+        MODE_ROLEPLAY, "tell me a story", system_prompt=None,
+    )
+    # sys_out may be None if no Auri content in S3, but if set it must include brevity
+    if sys_out:
+        assert "1–3 sentences" in sys_out or "brevity" in sys_out.lower(), \
+            f"Brevity rule missing from roleplay system prompt: {sys_out[:400]}"

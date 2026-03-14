@@ -169,6 +169,15 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         max_context_tokens=200000,
         cost_per_million_tokens=5.0,
     ),
+    "haiku": ModelConfig(
+        name="haiku",
+        model_id="us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        tier=CognitiveTier.TIER_1,
+        supports_vision=True,
+        supports_tools=True,
+        max_context_tokens=200000,
+        cost_per_million_tokens=0.9,
+    ),
 }
 
 

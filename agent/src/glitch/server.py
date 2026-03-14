@@ -386,6 +386,54 @@ async def invoke(payload: InvocationRequest, context: RequestContext) -> Invocat
                 memory_id=getattr(fallback_agent, "memory_id", "") if fallback_agent else "",
             )
 
+        # System command interception — handle before mode/agent routing so the
+        # AI model never sees these. Matches both the raw Telegram command text
+        # ("/haltprotect") and the clean sentinel dispatched by the webhook Lambda.
+        invoke_step = "system_commands"
+        _cmd = prompt.strip().lower().split()[0] if prompt.strip() else ""
+        if _cmd in ("/haltprotect", "__system:halt_protect"):
+            try:
+                import main as _main
+                stopped = await _main.halt_protect()
+                lines = ["🛑 Protect subsystem halted."]
+                if stopped.get("pollers"):
+                    lines.append(f"Pollers stopped: {', '.join(stopped['pollers'])}")
+                if stopped.get("processors"):
+                    lines.append(f"Processors stopped: {', '.join(stopped['processors'])}")
+                if stopped.get("patrols"):
+                    lines.append(f"Patrols stopped: {', '.join(stopped['patrols'])}")
+                if stopped.get("tasks"):
+                    lines.append(f"Tasks cancelled: {', '.join(stopped['tasks'])}")
+                if not any(stopped.get(k) for k in ("pollers", "processors", "patrols", "tasks")):
+                    lines.append("(Nothing was running.)")
+                from glitch.types import InvocationResponse
+                from glitch.types import create_empty_metrics
+                return InvocationResponse(
+                    message="\n".join(lines),
+                    session_id=session_id,
+                    memory_id="",
+                    metrics=create_empty_metrics(),
+                )
+            except Exception as exc:
+                logger.error("system_command halt_protect failed: %s", exc, exc_info=True)
+                return create_error_response(
+                    error=f"halt_protect failed: {exc}", session_id=session_id, memory_id=""
+                )
+
+        if _cmd in ("/stop", "__system:shutdown"):
+            import signal
+            from glitch.types import InvocationResponse, create_empty_metrics
+            logger.warning("system_command: shutdown requested — sending SIGTERM in 1.5s")
+            # Schedule SIGTERM after response is returned and transmitted.
+            loop = asyncio.get_event_loop()
+            loop.call_later(1.5, lambda: os.kill(os.getpid(), signal.SIGTERM))
+            return InvocationResponse(
+                message="🔴 Glitch shutting down. AgentCore will restart the runtime automatically.",
+                session_id=session_id,
+                memory_id="",
+                metrics=create_empty_metrics(),
+            )
+
         invoke_step = "resolve_agent_and_mode"
         from glitch.agent_registry import get_agent as registry_get_agent, get_default_agent_id
         from glitch.modes import apply_mode_with_memories, MODE_DEFAULT
@@ -432,9 +480,11 @@ async def invoke(payload: InvocationRequest, context: RequestContext) -> Invocat
         invoke_step = "check_streaming"
         if payload.get("stream"):
             if hasattr(agent, "process_message_stream"):
+                from glitch.modes import MODE_ROLEPLAY as _MR
+                _stream_model_override = "haiku" if mode_id == _MR else None
                 async def stream_events() -> AsyncIterator[dict]:
                     try:
-                        async for event in agent.process_message_stream(prompt_out, mode_context=mode_context):
+                        async for event in agent.process_message_stream(prompt_out, mode_context=mode_context, model_override=_stream_model_override):
                             yield event
                     except Exception as e:
                         logger.error("Error in streaming invocation: %s", e, exc_info=True)
@@ -443,11 +493,16 @@ async def invoke(payload: InvocationRequest, context: RequestContext) -> Invocat
             # No streaming for this agent; fall through to non-stream
 
         invoke_step = "call_process_message"
+        from glitch.modes import MODE_ROLEPLAY
+        _model_override = "haiku" if mode_id == MODE_ROLEPLAY else None
+        _max_turns = 5 if mode_id == MODE_ROLEPLAY else None
         response = await agent.process_message(
             prompt_out,
             session_id=session_id,
             system_prompt=system_prompt_out,
             mode_context=mode_context,
+            model_override=_model_override,
+            max_turns=_max_turns,
         )
 
         invoke_step = "log_done"

@@ -34,7 +34,7 @@ from glitch.tools.code_interpreter_tools import (
     get_code_interpreter_tool,
     is_code_interpreter_available,
 )
-from glitch.routing.model_router import ModelRouter
+from glitch.routing.model_router import ModelRouter, MODEL_REGISTRY
 from glitch.memory.sliding_window import GlitchMemoryManager
 from glitch.mcp.manager import MCPServerManager
 from glitch.skills.skills import select_skills_for_message
@@ -221,6 +221,7 @@ class GlitchAgent:
             max_escalations_per_turn=1,
             max_escalations_per_session=2,
         )
+        self._alt_models: dict = {}  # Cache for alternate BedrockModel instances (e.g. haiku)
         
         # Initialize MCP servers
         self._init_mcp_servers(config.mcp_config_path)
@@ -305,7 +306,12 @@ class GlitchAgent:
         The cache point after the static base lets Bedrock reuse the cached base
         across requests; mode context (e.g. Auri persona) and skills vary per call.
         """
-        skill_suffix = select_skills_for_message(user_message, self._skills_dir)
+        # Skip skill injection in roleplay mode — skills are irrelevant ops instructions
+        # that waste tokens and can confuse the Auri persona context.
+        if mode_context:
+            skill_suffix = ""
+        else:
+            skill_suffix = select_skills_for_message(user_message, self._skills_dir)
 
         blocks: list[SystemContentBlock] = [
             SystemContentBlock(text=self._base_prompt),
@@ -339,6 +345,8 @@ class GlitchAgent:
             InvocationResponse containing message, metrics, and session info
         """
         step = "init"
+        _original_model = None
+        _original_model_name = None
         try:
             step = "create_event_user"
             await self.memory_manager.create_event(
@@ -362,10 +370,69 @@ class GlitchAgent:
             else:
                 enriched_message = user_message
             
+            # Swap model for roleplay mode (e.g. haiku for cost savings)
+            model_override = kwargs.get("model_override")
+            if model_override and model_override in MODEL_REGISTRY:
+                override_cfg = MODEL_REGISTRY[model_override]
+                if model_override not in self._alt_models:
+                    self._alt_models[model_override] = BedrockModel(
+                        model_id=override_cfg.model_id,
+                        region_name=self.region,
+                        cache_tools="default",
+                    )
+                _original_model = self.agent.model
+                _original_model_name = self._current_model_name
+                self.agent.model = self._alt_models[model_override]
+                self._current_model_name = model_override
+                logger.debug("process_message: model_override=%s (%s)", model_override, override_cfg.model_id)
+
             step = "invoke_agent"
-            max_turns = int(os.getenv("GLITCH_MAX_TURNS", "3"))
+            max_turns = kwargs.get("max_turns") or int(os.getenv("GLITCH_MAX_TURNS", "3"))
             run_kwargs = {} if max_turns <= 0 else {"max_turns": max_turns}
-            result = self.agent(enriched_message, **run_kwargs)
+            try:
+                result = self.agent(enriched_message, **run_kwargs)
+            except Exception as invoke_exc:
+                # Known ADOT/OTEL bug: the botocore Bedrock instrumentation crashes with
+                # KeyError('output') when the final post-tool-use model call returns a
+                # non-standard response (guardrail block, max-token truncation, etc.).
+                # The assistant's actual response was already generated and is in the
+                # conversation state — salvage it before giving up.
+                exc_str = str(invoke_exc)
+                is_otel_output_crash = (
+                    "'output'" in exc_str
+                    or isinstance(getattr(invoke_exc, "__cause__", None), KeyError)
+                )
+                salvaged = None
+                if is_otel_output_crash:
+                    try:
+                        mgr = getattr(self.agent, "conversation_manager", None)
+                        msgs = getattr(mgr, "messages", []) if mgr else []
+                        for msg in reversed(msgs):
+                            if isinstance(msg, dict) and msg.get("role") == "assistant":
+                                content = msg.get("content", [])
+                                text_parts = [
+                                    c.get("text", "") for c in content
+                                    if isinstance(c, dict) and "text" in c
+                                ]
+                                text = " ".join(text_parts).strip()
+                                if text:
+                                    salvaged = text
+                                    break
+                    except Exception as salvage_exc:
+                        logger.debug("Response salvage failed: %s", salvage_exc)
+                if salvaged:
+                    logger.warning(
+                        "OTEL 'output' crash after tool use — returning salvaged response (%d chars). "
+                        "Underlying error: %s",
+                        len(salvaged), invoke_exc,
+                    )
+                    return InvocationResponse(
+                        message=salvaged,
+                        session_id=self.session_id,
+                        memory_id=self.memory_id,
+                        metrics=create_empty_metrics(),
+                    )
+                raise
             step = "set_last_result"
             set_last_agent_result(result)
             
@@ -414,6 +481,10 @@ class GlitchAgent:
                 session_id=self.session_id,
                 memory_id=self.memory_id,
             )
+        finally:
+            if _original_model is not None:
+                self.agent.model = _original_model
+                self._current_model_name = _original_model_name
 
     async def process_message_stream(self, user_message: str, **kwargs: Any) -> AsyncIterator[Dict[str, Any]]:
         """Process a user message with streaming events (AgentCore best practice).

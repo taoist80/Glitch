@@ -13,6 +13,7 @@ Target: ~900-1200 tokens per turn (down from ~3000-3800 monolithic).
 
 import logging
 import time
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,33 @@ def _get_cached(key: str, loader) -> str:
     val = loader()
     _cache[key] = {"val": val, "ts": time.time()}
     return val
+
+
+def get_mountain_time_context() -> str:
+    """Return a one-line current time string in US Mountain Time."""
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo("America/Denver"))
+    except Exception:
+        # Fallback: approximate MST (UTC-7); ignores DST
+        now = datetime.now(timezone.utc) - timedelta(hours=7)
+
+    hour = now.hour
+    if 5 <= hour < 12:
+        period = "morning"
+    elif 12 <= hour < 17:
+        period = "afternoon"
+    elif 17 <= hour < 21:
+        period = "evening"
+    elif 21 <= hour < 24:
+        period = "late night"
+    else:
+        period = "late night"  # midnight–5am
+
+    time_str = now.strftime("%-I:%M %p").lstrip("0") or now.strftime("%I:%M %p")
+    return (
+        f"Current time: {now.strftime('%A, %B %-d, %Y')} — {time_str} Mountain Time ({period})"
+    )
 
 
 def invalidate_cache(key: Optional[str] = None):
@@ -106,6 +134,15 @@ class AuriContextComposer:
             "You are in Auri roleplay mode. The full persona definition is provided below. "
             "Do not use tools (SSH, read_file, etc.) to load or fetch auri.md — it is already in this context. "
             "Respond only as Auri using the definition below.\n\n"
+            "**Response length**: Keep replies to 1–3 sentences by default. "
+            "Only write longer responses when the user asks for a story, asks you to read something aloud, "
+            "asks about memories or backstory, requests lore or history, or the scene clearly calls for extended narration. "
+            "Brevity is in-character — Auri is attentive and warm, not verbose.\n\n"
+            "**Memory tools**: Your relevant memories and participant profiles are already loaded in this context above — "
+            "do NOT call search_auri_memory during a response. "
+            "Use remember_auri or store_session_moment at most once each, and only if the user explicitly shares "
+            "something important worth storing. Never loop or retry tool calls.\n\n"
+            f"{get_mountain_time_context()}\n\n"
         )
 
         assembled = preamble + "\n\n".join(parts)

@@ -480,6 +480,44 @@ def handler(event, context):
             allowed = list_allowed_dm_user_ids()
             send_telegram_message(chat_id, "Allowed to DM: " + (", ".join(str(u) for u in allowed) if allowed else "Only owner"), bot_token)
             return {'statusCode': 200, 'body': 'OK'}
+        elif cmd == '/haltprotect' and is_owner:
+            if not claim_update(update_id):
+                return {'statusCode': 200, 'body': 'OK'}
+            if not PROCESSOR_FUNCTION_NAME:
+                send_telegram_message(chat_id, "⚠️ Processor not configured.", bot_token)
+                return {'statusCode': 200, 'body': 'OK'}
+            lambda_client.invoke(
+                FunctionName=PROCESSOR_FUNCTION_NAME,
+                InvocationType='Event',
+                Payload=json.dumps({
+                    'chat_id': chat_id,
+                    'text': '__system:halt_protect',
+                    'session_id': session_id,
+                    'mode_id': 'default',
+                    'update_id': update_id,
+                }).encode(),
+            )
+            logger.info("haltprotect: dispatched to processor session_id=%s", session_id)
+            return {'statusCode': 200, 'body': 'OK'}
+        elif cmd == '/stop' and is_owner:
+            if not claim_update(update_id):
+                return {'statusCode': 200, 'body': 'OK'}
+            if not PROCESSOR_FUNCTION_NAME:
+                send_telegram_message(chat_id, "⚠️ Processor not configured.", bot_token)
+                return {'statusCode': 200, 'body': 'OK'}
+            lambda_client.invoke(
+                FunctionName=PROCESSOR_FUNCTION_NAME,
+                InvocationType='Event',
+                Payload=json.dumps({
+                    'chat_id': chat_id,
+                    'text': '__system:shutdown',
+                    'session_id': session_id,
+                    'mode_id': 'default',
+                    'update_id': update_id,
+                }).encode(),
+            )
+            logger.info("stop: dispatched shutdown to processor session_id=%s", session_id)
+            return {'statusCode': 200, 'body': 'OK'}
         elif cmd in ('/auri', '/default', '/normal', '/poet'):
             mode_map = {
                 '/auri': MODE_ROLEPLAY,
@@ -522,6 +560,11 @@ def handler(event, context):
         if not text:
             logger.info("Telegram webhook: group mention only, no text, ack update_id=%s", update_id)
             return {'statusCode': 200, 'body': 'OK'}
+        # Prepend sender name so Auri can tell speakers apart in group conversation history
+        from_user = message.get('from', {}) or {}
+        sender_first = (from_user.get('first_name') or from_user.get('username') or '').strip().split()[0]
+        if sender_first:
+            text = f"[{sender_first}]: {text}"
     elif is_private_chat(chat):
         if not is_user_allowed_dm(user_id, config):
             logger.info("Telegram webhook: user_id=%s not allowed to DM, ack update_id=%s", user_id, update_id)
@@ -533,6 +576,11 @@ def handler(event, context):
     if not PROCESSOR_FUNCTION_NAME:
         logger.error("Telegram webhook: PROCESSOR_FUNCTION_NAME not set update_id=%s", update_id)
         return {'statusCode': 200, 'body': 'OK'}
+    # Extract sender name for participant profile loading (Auri memory)
+    from_user = message.get('from', {}) or {}
+    sender_first = (from_user.get('first_name') or from_user.get('username') or '').strip().split()[0]
+    participant_id = sender_first.lower() if sender_first else ''
+
     try:
         lambda_client.invoke(
             FunctionName=PROCESSOR_FUNCTION_NAME,
@@ -543,6 +591,7 @@ def handler(event, context):
                 'session_id': session_id,
                 'mode_id': mode_id,
                 'update_id': update_id,
+                'participant_id': participant_id,
             }).encode(),
         )
         logger.info(

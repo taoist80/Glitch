@@ -82,6 +82,14 @@ _ROLEPLAY_PREAMBLE = (
     "You are in Auri roleplay mode. The full persona definition is provided below. "
     "Do not use tools (SSH, read_file, etc.) to load or fetch auri.md — it is already in this context. "
     "Respond only as Auri using the definition below.\n\n"
+    "**Response length**: Keep replies to 1–3 sentences by default. "
+    "Only write longer responses when the user asks for a story, asks you to read something aloud, "
+    "asks about memories or backstory, requests lore or history, or the scene clearly calls for extended narration. "
+    "Brevity is in-character — Auri is attentive and warm, not verbose.\n\n"
+    "**Memory tools**: Your relevant memories and participant profiles are already loaded in this context — "
+    "do NOT call search_auri_memory during a response. "
+    "Use remember_auri or store_session_moment at most once each, and only if the user explicitly shares "
+    "something important worth storing. Never loop or retry tool calls.\n\n"
 )
 # When auri.md could not be loaded (e.g. S3 missing), still enforce Auri mode and no tool use for fetching it.
 _ROLEPLAY_FALLBACK = (
@@ -103,11 +111,13 @@ def apply_mode_to_prompt(
     if mode_id == MODE_POET:
         return _inject_context(get_poet_context(), prompt, system_prompt)
     if mode_id == MODE_ROLEPLAY:
+        from glitch.auri_context import get_mountain_time_context
+        time_line = get_mountain_time_context() + "\n\n"
         context = get_roleplay_context()
         if context:
-            context = _ROLEPLAY_PREAMBLE + context
+            context = _ROLEPLAY_PREAMBLE + time_line + context
         else:
-            context = _ROLEPLAY_FALLBACK
+            context = _ROLEPLAY_FALLBACK + time_line
         return _inject_context(context, prompt, system_prompt)
     return prompt, system_prompt
 

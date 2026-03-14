@@ -129,7 +129,7 @@ def _send_progress_ping(chat_id: int, bot_token: str, tick: int, mode_id: str = 
     _send_telegram_message(chat_id, f"{phrase} ({tick * 30}s)", bot_token)
 
 
-def _invoke_agent(prompt: str, session_id: str, agent_id: str = "glitch", mode_id: str = ""):
+def _invoke_agent(prompt: str, session_id: str, agent_id: str = "glitch", mode_id: str = "", participant_id: str = ""):
     if not AGENTCORE_RUNTIME_ARN:
         logger.warning("AGENTCORE_RUNTIME_ARN not set")
         return "Agent runtime not configured."
@@ -144,6 +144,8 @@ def _invoke_agent(prompt: str, session_id: str, agent_id: str = "glitch", mode_i
     payload = {"prompt": prompt, "session_id": session_id, "agent_id": agent_id}
     if mode_id:
         payload["mode_id"] = mode_id
+    if participant_id:
+        payload["participant_id"] = participant_id
     body = json.dumps(payload).encode('utf-8')
     headers = {
         'Content-Type': 'application/json',
@@ -167,6 +169,7 @@ def handler(event, context):
     session_id = event['session_id']
     mode_id = (event.get('mode_id') or '').strip().lower() or 'default'
     agent_id = (event.get('agent_id') or 'glitch').strip().lower()
+    participant_id = (event.get('participant_id') or '').strip().lower()
     update_id = event.get('update_id', '?')
 
     logger.info("Processor: update_id=%s session_id=%s mode_id=%s text_len=%s",
@@ -188,6 +191,7 @@ def handler(event, context):
                     session_id,
                     agent_id=agent_id,
                     mode_id=mode_id,
+                    participant_id=participant_id,
                 )
             except Exception as exc:  # captured and handled in main thread
                 result_holder['error'] = exc
