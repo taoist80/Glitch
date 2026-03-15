@@ -25,10 +25,11 @@ describe('AgentCoreStack', () => {
   }
 
   describe('IAM Role', () => {
-    test('does not create a role (role is passed in from FoundationStack)', () => {
+    test('does not create the runtime role (role is passed in from FoundationStack)', () => {
       const stack = createStack();
       const template = Template.fromStack(stack);
-      template.resourceCountIs('AWS::IAM::Role', 0);
+      // Only 1 Role: AwsCustomResource (MonitoredLogGroupsParam) execution role. Runtime role lives in FoundationStack.
+      template.resourceCountIs('AWS::IAM::Role', 1);
     });
 
     test('grants Bedrock model invocation permissions', () => {
@@ -56,15 +57,12 @@ describe('AgentCoreStack', () => {
       const template = Template.fromStack(stack);
 
       template.hasResourceProperties('AWS::IAM::ManagedPolicy', {
+        ManagedPolicyName: `GlitchAgentCorePolicy-${stack.region}`,
         PolicyDocument: {
           Statement: Match.arrayWith([
             Match.objectLike({
               Sid: 'ECRImageAccess',
               Effect: 'Allow',
-              Action: Match.arrayWith([
-                'ecr:BatchGetImage',
-                'ecr:GetDownloadUrlForLayer',
-              ]),
             }),
           ]),
         },

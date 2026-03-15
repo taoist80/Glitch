@@ -8,7 +8,55 @@ export type Tab =
   | 'mcp'
   | 'skills'
   | 'protect'
+  | 'auri'
   | 'settings';
+
+// --- Auri persona + analytics ---
+
+export interface AuriChannel {
+  session_id: string;
+  agent_id: string;
+  mode_id: string;
+  updated_at?: number;
+}
+
+export interface AuriChannelsResponse {
+  channels: AuriChannel[];
+  count: number;
+}
+
+export interface AuriPersonaResponse {
+  content: string;
+}
+
+export interface AuriMemoryStats {
+  available: boolean;
+  memory_rows: number;
+  profile_rows: number;
+  total_rows: number;
+  error?: string;
+}
+
+export interface AuriDmUser {
+  user_id: string;
+  display_name?: string;
+}
+
+export interface AuriDmUsersResponse {
+  users: AuriDmUser[];
+  count: number;
+}
+
+export interface AuriProfile {
+  participant_id: string;
+  content: string;
+  created_at?: string;
+}
+
+export interface AuriProfilesResponse {
+  profiles: AuriProfile[];
+  count: number;
+}
 
 // --- UniFi Protect / Surveillance (entities, events, alerts, behaviours) ---
 export interface ProtectEntity {

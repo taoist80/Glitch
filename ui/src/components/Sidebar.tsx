@@ -14,6 +14,7 @@ import {
   Sun,
   Moon,
 } from 'lucide-react';
+import { LionIcon } from './LionIcon';
 import type { Tab } from '../types';
 import { useAppStore } from '../store/useAppStore';
 
@@ -34,6 +35,7 @@ const navItems: NavItem[] = [
   { id: 'mcp', label: 'MCP', icon: <Plug size={20} /> },
   { id: 'skills', label: 'Skills', icon: <Zap size={20} /> },
   { id: 'protect', label: 'Protect', icon: <Camera size={20} /> },
+  { id: 'auri', label: 'Auri', icon: <LionIcon size={20} /> },
   { id: 'settings', label: 'Settings', icon: <Settings size={20} /> },
 ];
 

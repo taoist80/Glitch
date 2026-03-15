@@ -129,7 +129,8 @@ def _send_progress_ping(chat_id: int, bot_token: str, tick: int, mode_id: str = 
     _send_telegram_message(chat_id, f"{phrase} ({tick * 30}s)", bot_token)
 
 
-def _invoke_agent(prompt: str, session_id: str, agent_id: str = "glitch", mode_id: str = "", participant_id: str = ""):
+def _invoke_agent(prompt: str, session_id: str, agent_id: str = "glitch", mode_id: str = "",
+                   participant_id: str = "", chat_id: int = 0, from_user_id: int = 0, message_id: int = 0):
     if not AGENTCORE_RUNTIME_ARN:
         logger.warning("AGENTCORE_RUNTIME_ARN not set")
         return "Agent runtime not configured."
@@ -146,6 +147,12 @@ def _invoke_agent(prompt: str, session_id: str, agent_id: str = "glitch", mode_i
         payload["mode_id"] = mode_id
     if participant_id:
         payload["participant_id"] = participant_id
+    if chat_id:
+        payload["chat_id"] = chat_id
+    if from_user_id:
+        payload["from_user_id"] = from_user_id
+    if message_id:
+        payload["message_id"] = message_id
     body = json.dumps(payload).encode('utf-8')
     headers = {
         'Content-Type': 'application/json',
@@ -170,6 +177,8 @@ def handler(event, context):
     mode_id = (event.get('mode_id') or '').strip().lower() or 'default'
     agent_id = (event.get('agent_id') or 'glitch').strip().lower()
     participant_id = (event.get('participant_id') or '').strip().lower()
+    from_user_id = int(event.get('from_user_id') or 0)
+    message_id = int(event.get('message_id') or 0)
     update_id = event.get('update_id', '?')
 
     logger.info("Processor: update_id=%s session_id=%s mode_id=%s text_len=%s",
@@ -192,6 +201,9 @@ def handler(event, context):
                     agent_id=agent_id,
                     mode_id=mode_id,
                     participant_id=participant_id,
+                    chat_id=chat_id,
+                    from_user_id=from_user_id,
+                    message_id=message_id,
                 )
             except Exception as exc:  # captured and handled in main thread
                 result_holder['error'] = exc
@@ -216,7 +228,8 @@ def handler(event, context):
         if isinstance(result, dict):
             if result.get('error'):
                 logger.warning("Processor: agent error update_id=%s: %s", update_id, result['error'])
-                _send_telegram_message(chat_id, "Sorry, I couldn't process that request. Please try again.", bot_token)
+                error_text = result.get('message') or f"Error: {result['error']}"
+                _send_telegram_message(chat_id, error_text, bot_token)
             else:
                 message_text = result.get('message') or result.get('response') or str(result)
                 _send_telegram_message(chat_id, message_text, bot_token)
@@ -227,5 +240,5 @@ def handler(event, context):
         logger.error("Processor: unhandled error update_id=%s: %s", update_id, e, exc_info=True)
         try:
             _send_telegram_message(chat_id, "Sorry, something went wrong. Please try again.", bot_token)
-        except Exception:
-            pass
+        except Exception as send_exc:
+            logger.error("Failed to send error message to chat_id=%s: %s", chat_id, send_exc)

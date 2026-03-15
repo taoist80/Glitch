@@ -90,6 +90,9 @@ _ROLEPLAY_PREAMBLE = (
     "do NOT call search_auri_memory during a response. "
     "Use remember_auri or store_session_moment at most once each, and only if the user explicitly shares "
     "something important worth storing. Never loop or retry tool calls.\n\n"
+    "**Group guardian**: When in a group chat, you are also the group guardian. "
+    "Evaluate each message against the group rules (loaded below if applicable). "
+    "Use at most one moderation action per message. Never moderate the group owner.\n\n"
 )
 # When auri.md could not be loaded (e.g. S3 missing), still enforce Auri mode and no tool use for fetching it.
 _ROLEPLAY_FALLBACK = (

@@ -204,6 +204,11 @@ class InvocationRequest(TypedDict, total=False):
 
     Sent to POST /invocations endpoint.
     Either prompt (normal chat) or _ui_api_request (proxy API) is present.
+
+    Telegram-specific fields (threaded from webhook → processor → here):
+        chat_id: Telegram chat ID (int). Used by invocation_context for moderation tools.
+        from_user_id: Telegram user ID (int). Used by invocation_context for moderation tools.
+        message_id: Telegram message ID (int). Used by invocation_context for delete_message.
     """
     prompt: str  # Required for chat invocations
     session_id: Optional[str]  # Optional: Override session ID
@@ -211,6 +216,11 @@ class InvocationRequest(TypedDict, total=False):
     mode_id: Optional[str]  # Optional: default | poet
     context: Optional[Dict[str, Any]]  # Optional: Additional context
     stream: bool  # Optional: Stream events instead of single response
+    participant_id: str  # Telegram: from.first_name lowercased
+    active_members: List[str]  # Telegram group: list of active participant IDs
+    chat_id: int  # Telegram: chat.id (raw int, not padded session_id)
+    from_user_id: int  # Telegram: from.id (user who sent the message)
+    message_id: int  # Telegram: message.message_id (for delete_message)
     _ui_api_request: UiApiRequest  # Optional: UI API proxy request
 
 

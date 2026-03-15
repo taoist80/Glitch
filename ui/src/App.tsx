@@ -9,6 +9,7 @@ import { TelemetryTab } from './tabs/TelemetryTab';
 import { MCPTab } from './tabs/MCPTab';
 import { SkillsTab } from './tabs/SkillsTab';
 import { ProtectTab } from './tabs/ProtectTab';
+import { AuriTab } from './tabs/AuriTab';
 import { SettingsTab } from './tabs/SettingsTab';
 import { useAppStore } from './store/useAppStore';
 
@@ -45,6 +46,8 @@ function App() {
         return <SkillsTab />;
       case 'protect':
         return <ProtectTab />;
+      case 'auri':
+        return <AuriTab />;
       case 'settings':
         return <SettingsTab />;
       default:

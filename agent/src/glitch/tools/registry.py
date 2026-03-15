@@ -74,6 +74,15 @@ from glitch.tools.cloudwatch_tools import (
     get_my_recent_logs,
 )
 from glitch.tools.ops_telegram_tools import send_telegram_alert, send_telegram_resolved
+from glitch.tools.moderation_tools import (
+    warn_user,
+    mute_user,
+    kick_user,
+    ban_user,
+    delete_message,
+    get_warnings,
+    get_group_rules,
+)
 from glitch.tools.github_tools import (
     github_get_file,
     github_create_branch,
@@ -202,6 +211,15 @@ class ToolRegistry:
             get_my_recent_logs,
         ]
         self._groups["ops_telegram"] = [send_telegram_alert, send_telegram_resolved]
+        self._groups["moderation"] = [
+            warn_user,
+            mute_user,
+            kick_user,
+            ban_user,
+            delete_message,
+            get_warnings,
+            get_group_rules,
+        ]
         self._groups["github"] = [
             github_get_file,
             github_create_branch,

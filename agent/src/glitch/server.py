@@ -94,6 +94,15 @@ async def _handle_ui_api_request(api_request: UiApiRequest) -> dict:
         get_protect_events,
         get_protect_alerts,
         get_protect_patterns,
+        get_auri_channels,
+        get_auri_dm_users,
+        get_auri_profiles,
+        get_auri_persona_core,
+        put_auri_persona_core,
+        get_auri_persona_rules,
+        put_auri_persona_rules,
+        get_auri_memory_stats,
+        get_auri_character_card,
     )
 
     path = (api_request.get("path") or "").rstrip("/")
@@ -192,6 +201,46 @@ async def _handle_ui_api_request(api_request: UiApiRequest) -> dict:
                     result = await put_session_mode(session_id, update)
                     return result.model_dump()
             return {"error": f"Invalid path: {path}"}
+
+        # --- Auri endpoints ---
+        elif path == "/auri/channels" and method == "GET":
+            result = await get_auri_channels()
+            return result.model_dump()
+
+        elif path == "/auri/dm-users" and method == "GET":
+            result = await get_auri_dm_users()
+            return result.model_dump()
+
+        elif path == "/auri/profiles" and method == "GET":
+            result = await get_auri_profiles()
+            return result.model_dump()
+
+        elif path == "/auri/persona/core" and method == "GET":
+            result = await get_auri_persona_core()
+            return result.model_dump()
+
+        elif path == "/auri/persona/core" and method == "PUT":
+            from glitch.api.auri_types import AuriPersonaUpdate
+            update = AuriPersonaUpdate(**(body or {}))
+            result = await put_auri_persona_core(update)
+            return result.model_dump()
+
+        elif path == "/auri/persona/rules" and method == "GET":
+            result = await get_auri_persona_rules()
+            return result.model_dump()
+
+        elif path == "/auri/persona/rules" and method == "PUT":
+            from glitch.api.auri_types import AuriPersonaUpdate
+            update = AuriPersonaUpdate(**(body or {}))
+            result = await put_auri_persona_rules(update)
+            return result.model_dump()
+
+        elif path == "/auri/memory-stats" and method == "GET":
+            result = await get_auri_memory_stats()
+            return result.model_dump()
+
+        elif path == "/auri/export/character-card" and method == "GET":
+            return await get_auri_character_card()
 
         elif path.startswith("/protect/") and method == "GET":
             def _int(name: str, default: int) -> int:
@@ -449,6 +498,23 @@ async def invoke(payload: InvocationRequest, context: RequestContext) -> Invocat
             active_members = [p.strip().lower() for p in active_members_raw if p]
         else:
             active_members = None
+
+        # Telegram moderation context: set per-invocation context for moderation tools
+        chat_id_raw = int(payload.get("chat_id") or 0)
+        from_user_id = int(payload.get("from_user_id") or 0)
+        message_id_raw = int(payload.get("message_id") or 0)
+        is_group = ":group:" in session_id if session_id else False
+
+        from glitch.invocation_context import set_context, clear_context
+        set_context(
+            chat_id=chat_id_raw,
+            from_user_id=from_user_id,
+            message_id=message_id_raw,
+            session_id=session_id,
+            participant_id=participant_id,
+            is_group=is_group,
+        )
+
         agent = registry_get_agent(agent_id)
         if agent is None:
             agent = _agent
@@ -530,6 +596,10 @@ async def invoke(payload: InvocationRequest, context: RequestContext) -> Invocat
             session_id=_agent.session_id if _agent else "",
             memory_id=_agent.memory_id if _agent else "",
         )
+    finally:
+        # Always clear invocation context after request completes
+        from glitch.invocation_context import clear_context
+        clear_context()
 
 
 def set_agent(agent: GlitchAgentType) -> None:

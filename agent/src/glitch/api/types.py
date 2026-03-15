@@ -370,3 +370,4 @@ class ProtectPatrolsResponse(BaseModel):
     """Response from GET /api/protect/patrols."""
     patrols: List[PatrolResultModel] = []
     total: int = 0
+

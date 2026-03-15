@@ -58,8 +58,8 @@ telegram-troubleshoot:
 	bash ../infrastructure/scripts/telegram-troubleshoot.sh
 
 test:
-	@echo "Running agent tests..."
-	pytest tests/ -v
+	@echo "Running agent tests (unit only; use 'pytest -m integration' for integration)..."
+	PYTHONPATH=src pytest tests/ -v
 
 clean:
 	@echo "Cleaning build artifacts..."

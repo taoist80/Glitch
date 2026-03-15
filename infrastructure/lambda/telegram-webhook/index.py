@@ -518,6 +518,33 @@ def handler(event, context):
             )
             logger.info("stop: dispatched shutdown to processor session_id=%s", session_id)
             return {'statusCode': 200, 'body': 'OK'}
+        elif cmd == '/rules' and is_owner:
+            # /rules Be respectful; No racism; No threats of violence
+            # Owner-only, group-only. Rules separated by semicolons.
+            if not is_group_chat(chat):
+                send_telegram_message(chat_id, "⚠️ /rules only works in group chats.", bot_token)
+                return {'statusCode': 200, 'body': 'OK'}
+            parts = text.split(maxsplit=1)
+            if len(parts) < 2 or not parts[1].strip():
+                send_telegram_message(chat_id, "Usage: /rules Rule 1; Rule 2; Rule 3", bot_token)
+                return {'statusCode': 200, 'body': 'OK'}
+            raw_rules = [r.strip() for r in parts[1].split(';') if r.strip()]
+            rules_list = [{"id": i + 1, "text": r, "severity": "medium"} for i, r in enumerate(raw_rules)]
+            try:
+                ddb_client = boto3.client('dynamodb')
+                ddb_client.put_item(
+                    TableName=CONFIG_TABLE_NAME,
+                    Item={
+                        'pk': {'S': f'MOD_RULES#{chat_id}'},
+                        'sk': {'S': 'rules'},
+                        'rules_json': {'S': json.dumps(rules_list)},
+                    },
+                )
+                send_telegram_message(chat_id, f"✅ Set {len(rules_list)} moderation rules.", bot_token)
+            except Exception as e:
+                logger.error("Failed to save moderation rules for chat %s: %s", chat_id, e)
+                send_telegram_message(chat_id, "⚠️ Failed to save rules. Try again.", bot_token)
+            return {'statusCode': 200, 'body': 'OK'}
         elif cmd in ('/auri', '/default', '/normal', '/poet'):
             mode_map = {
                 '/auri': MODE_ROLEPLAY,
@@ -581,6 +608,9 @@ def handler(event, context):
     sender_first = (from_user.get('first_name') or from_user.get('username') or '').strip().split()[0]
     participant_id = sender_first.lower() if sender_first else ''
 
+    from_user_id = (message.get('from', {}) or {}).get('id', 0)
+    message_id = message.get('message_id', 0)
+
     try:
         lambda_client.invoke(
             FunctionName=PROCESSOR_FUNCTION_NAME,
@@ -592,6 +622,8 @@ def handler(event, context):
                 'mode_id': mode_id,
                 'update_id': update_id,
                 'participant_id': participant_id,
+                'from_user_id': from_user_id,
+                'message_id': message_id,
             }).encode(),
         )
         logger.info(

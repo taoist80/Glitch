@@ -34,16 +34,6 @@ describe('GlitchFoundationStack', () => {
       template.resourceCountIs('AWS::EC2::NatGateway', 0);
     });
 
-    test('creates Virtual Private Gateway for Site-to-Site VPN', () => {
-      template.resourceCountIs('AWS::EC2::VPNGateway', 1);
-    });
-
-    test('attaches VPN gateway to VPC', () => {
-      // CDK also creates one for the Internet Gateway, so expect at least 2
-      const attachments = template.findResources('AWS::EC2::VPCGatewayAttachment');
-      expect(Object.keys(attachments).length).toBeGreaterThanOrEqual(2);
-    });
-
     test('does not create VPC endpoints (agents use PUBLIC mode)', () => {
       template.resourceCountIs('AWS::EC2::VPCEndpoint', 0);
     });

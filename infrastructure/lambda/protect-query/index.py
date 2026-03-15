@@ -247,6 +247,55 @@ def action_auri_debug_list_profiles(conn, event):
     }
 
 
+def action_auri_memory_count(conn, event):
+    """Return row counts for auri_memory split by type.
+
+    Returns:
+        memory_rows: episodic memory entries (non-profile)
+        profile_rows: participant profile entries
+        total_rows: all rows in the table
+    """
+    rows = conn.run("""
+        SELECT
+            COUNT(*) FILTER (WHERE metadata->>'memory_type' != 'participant_profile'
+                             OR metadata->>'memory_type' IS NULL) AS memory_rows,
+            COUNT(*) FILTER (WHERE metadata->>'memory_type' = 'participant_profile') AS profile_rows,
+            COUNT(*) AS total_rows
+        FROM auri_memory
+    """)
+    if rows:
+        return {
+            "statusCode": 200,
+            "memory_rows": int(rows[0][0] or 0),
+            "profile_rows": int(rows[0][1] or 0),
+            "total_rows": int(rows[0][2] or 0),
+        }
+    return {"statusCode": 200, "memory_rows": 0, "profile_rows": 0, "total_rows": 0}
+
+
+def action_auri_list_profiles(conn, event):
+    """List participant profiles for the UI (more detailed than debug version).
+
+    Returns up to 50 profiles with full content, sorted by participant_id.
+    """
+    limit = max(1, min(int(event.get("limit", 50)), 100))
+    rows = conn.run(
+        "SELECT content, metadata, created_at FROM auri_memory "
+        "WHERE metadata->>'memory_type' = 'participant_profile' "
+        "ORDER BY metadata->>'participant_id' ASC LIMIT :limit",
+        limit=limit,
+    )
+    profiles = []
+    for row in rows:
+        metadata = row[1] or {}
+        profiles.append({
+            "participant_id": metadata.get("participant_id", "?"),
+            "content": row[0] or "",
+            "created_at": _iso(row[2]),
+        })
+    return {"statusCode": 200, "count": len(profiles), "profiles": profiles}
+
+
 # ---------------------------------------------------------------------------
 # Query helpers
 # ---------------------------------------------------------------------------
@@ -537,6 +586,10 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 return action_auri_cleanup_duplicate_profiles(conn, event)
             elif action == "auri_debug_list_profiles":
                 return action_auri_debug_list_profiles(conn, event)
+            elif action == "auri_memory_count":
+                return action_auri_memory_count(conn, event)
+            elif action == "auri_list_profiles":
+                return action_auri_list_profiles(conn, event)
             else:
                 return {"statusCode": 400, "error": f"Unknown action: {action}"}
         except Exception as exc:

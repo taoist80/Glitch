@@ -4,6 +4,7 @@ Replaces the monolithic auri.md injection with a layered architecture:
   1. auri-core.md (always-on identity, ~600-900 tokens, S3 cached)
   2. auri-runtime-rules.md (behavioral rules, ~350-500 tokens, S3 cached)
   3. AuriState + SceneSummary (per-session dynamic state, ~100-250 tokens, DynamoDB)
+  3.5. Group moderation rules (group chats only, ~150-250 tokens, DynamoDB)
   4. Participant profiles (per-member, vector DB via Lambda)
   5. Episodic memories (vector search by user message, via Lambda)
   6. Storybook excerpt (cold archive, only when mode=lore or backstory keyword)
@@ -109,6 +110,11 @@ class AuriContextComposer:
         if state_text:
             parts.append(state_text)
 
+        # 3.5. Load group moderation rules (group chats only)
+        moderation_text = await self._load_moderation_context()
+        if moderation_text:
+            parts.append(moderation_text)
+
         # 4. Retrieve participant profiles for active members
         members = active_members or []
         profiles_text = await self._load_profiles(members) if members else ""
@@ -142,6 +148,9 @@ class AuriContextComposer:
             "do NOT call search_auri_memory during a response. "
             "Use remember_auri or store_session_moment at most once each, and only if the user explicitly shares "
             "something important worth storing. Never loop or retry tool calls.\n\n"
+            "**Group guardian**: When in a group chat, you are also the group guardian. "
+            "Evaluate each message against the group rules (loaded below if applicable). "
+            "Use at most one moderation action per message. Never moderate the group owner.\n\n"
             f"{get_mountain_time_context()}\n\n"
         )
 
@@ -175,6 +184,60 @@ class AuriContextComposer:
             return mgr.format_state_for_context(state, scene)
         except Exception as e:
             logger.warning("AuriContextComposer: state load failed: %s", e)
+            return ""
+
+    async def _load_moderation_context(self) -> str:
+        """Load group moderation rules when in a group chat.
+
+        Reads from invocation_context to determine if this is a group session,
+        then loads custom rules from DynamoDB or falls back to defaults.
+        Returns formatted rules with escalation instructions for the system prompt.
+        """
+        try:
+            from glitch.invocation_context import get_context
+            ctx = get_context()
+            if not ctx.is_group:
+                return ""
+
+            import json
+            from glitch.aws_utils import get_client
+            from glitch.tools.moderation_tools import DEFAULT_RULES
+            import os
+
+            config_table = os.environ.get("GLITCH_CONFIG_TABLE", "glitch-telegram-config")
+            rules = DEFAULT_RULES
+
+            if ctx.chat_id:
+                try:
+                    ddb = get_client("dynamodb")
+                    resp = ddb.get_item(
+                        TableName=config_table,
+                        Key={
+                            "pk": {"S": f"MOD_RULES#{ctx.chat_id}"},
+                            "sk": {"S": "rules"},
+                        },
+                    )
+                    item = resp.get("Item")
+                    if item and "rules_json" in item:
+                        rules = json.loads(item["rules_json"]["S"])
+                except Exception as e:
+                    logger.warning("AuriContextComposer: moderation rules load failed: %s", e)
+
+            lines = ["## Group Guardian Rules\n"]
+            lines.append("You are the group guardian. Evaluate each message against these rules:")
+            for r in rules:
+                severity = r.get("severity", "medium")
+                lines.append(f"- [{severity.upper()}] {r['text']}")
+
+            lines.append("")
+            lines.append("**Escalation:** warn → warn (with count) → mute 15min → kick → ban.")
+            lines.append("High-severity violations or suspected AI bots: ban immediately.")
+            lines.append("Use at most ONE moderation action per message. Give benefit of the doubt.")
+            lines.append("NEVER moderate the group owner.")
+
+            return "\n".join(lines)
+        except Exception as e:
+            logger.warning("AuriContextComposer: moderation context failed: %s", e)
             return ""
 
     async def _load_profiles(self, member_ids: list) -> str:

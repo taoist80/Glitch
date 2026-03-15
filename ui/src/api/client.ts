@@ -23,6 +23,11 @@ import type {
   ProtectPatrolsResponse,
   ProtectScanResult,
   ProtectBackfillResult,
+  AuriChannelsResponse,
+  AuriPersonaResponse,
+  AuriMemoryStats,
+  AuriDmUsersResponse,
+  AuriProfilesResponse,
 } from '../types';
 
 // API base URL: use environment variable for Lambda Function URL, or default to relative path
@@ -282,5 +287,49 @@ export const api = {
 
   getClientId(): string {
     return CLIENT_ID;
+  },
+
+  // --- Auri ---
+
+  async getAuriChannels(): Promise<AuriChannelsResponse> {
+    return fetchJson<AuriChannelsResponse>(`${API_BASE}/auri/channels`);
+  },
+
+  async getAuriPersonaCore(): Promise<AuriPersonaResponse> {
+    return fetchJson<AuriPersonaResponse>(`${API_BASE}/auri/persona/core`);
+  },
+
+  async putAuriPersonaCore(content: string): Promise<{ saved: boolean }> {
+    return fetchJson<{ saved: boolean }>(`${API_BASE}/auri/persona/core`, {
+      method: 'PUT',
+      body: JSON.stringify({ content }),
+    });
+  },
+
+  async getAuriPersonaRules(): Promise<AuriPersonaResponse> {
+    return fetchJson<AuriPersonaResponse>(`${API_BASE}/auri/persona/rules`);
+  },
+
+  async putAuriPersonaRules(content: string): Promise<{ saved: boolean }> {
+    return fetchJson<{ saved: boolean }>(`${API_BASE}/auri/persona/rules`, {
+      method: 'PUT',
+      body: JSON.stringify({ content }),
+    });
+  },
+
+  async getAuriDmUsers(): Promise<AuriDmUsersResponse> {
+    return fetchJson<AuriDmUsersResponse>(`${API_BASE}/auri/dm-users`);
+  },
+
+  async getAuriProfiles(): Promise<AuriProfilesResponse> {
+    return fetchJson<AuriProfilesResponse>(`${API_BASE}/auri/profiles`);
+  },
+
+  async getAuriMemoryStats(): Promise<AuriMemoryStats> {
+    return fetchJson<AuriMemoryStats>(`${API_BASE}/auri/memory-stats`);
+  },
+
+  async exportAuriCharacterCard(): Promise<Record<string, unknown>> {
+    return fetchJson<Record<string, unknown>>(`${API_BASE}/auri/export/character-card`);
   },
 };

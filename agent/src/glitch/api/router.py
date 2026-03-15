@@ -44,6 +44,18 @@ from glitch.api.types import (
     ProtectCamerasResponse,
     ProtectPatrolsResponse,
 )
+from glitch.api.auri_types import (
+    AuriChannelInfo,
+    AuriChannelsResponse,
+    AuriPersonaResponse,
+    AuriPersonaUpdate,
+    AuriPersonaSaveResponse,
+    AuriMemoryStatsResponse,
+    AuriDmUser,
+    AuriDmUsersResponse,
+    AuriProfileInfo,
+    AuriProfilesResponse,
+)
 
 if TYPE_CHECKING:
     from glitch.agent import GlitchAgent
@@ -895,6 +907,197 @@ async def trigger_protect_backfill(days: int = 7):
         return {"status": "complete", **result}
     except Exception as e:
         logger.error("protect backfill failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Auri — persona editor, channels, memory stats, character card export
+# ---------------------------------------------------------------------------
+
+
+def _invoke_protect_query_action(action: str, params: dict) -> dict:
+    """Invoke the protect-query Lambda with a direct action payload (not HTTP path-based)."""
+    import json as _json
+    import os as _os
+    from glitch.aws_utils import get_client as _get_client
+
+    fn = _os.environ.get("GLITCH_PROTECT_QUERY_LAMBDA", "glitch-protect-query")
+    client = _get_client("lambda")
+    payload = _json.dumps({"action": action, **params}).encode()
+    response = client.invoke(FunctionName=fn, InvocationType="RequestResponse", Payload=payload)
+    result = _json.loads(response["Payload"].read())
+    if result.get("statusCode", 200) >= 400:
+        raise HTTPException(status_code=result["statusCode"], detail=result.get("error", "Lambda error"))
+    return result
+
+
+@router.get("/auri/channels", response_model=AuriChannelsResponse)
+async def get_auri_channels() -> AuriChannelsResponse:
+    """List active Auri roleplay sessions (SESSION_AGENT entries with mode_id=roleplay)."""
+    table = _get_dynamodb_table()
+    if not table:
+        raise HTTPException(status_code=503, detail="DynamoDB not available")
+    try:
+        from boto3.dynamodb.conditions import Key as DKey, Attr
+        resp = table.query(
+            KeyConditionExpression=DKey("pk").eq("SESSION_AGENT"),
+            FilterExpression=Attr("mode_id").eq("roleplay"),
+        )
+        channels = [
+            AuriChannelInfo(
+                session_id=item.get("sk", ""),
+                agent_id=item.get("agent_id", ""),
+                mode_id=item.get("mode_id", ""),
+                updated_at=int(item["updated_at"]) if item.get("updated_at") else None,
+            )
+            for item in resp.get("Items", [])
+        ]
+        return AuriChannelsResponse(channels=channels, count=len(channels))
+    except Exception as e:
+        logger.error("get_auri_channels failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/auri/persona/core", response_model=AuriPersonaResponse)
+async def get_auri_persona_core() -> AuriPersonaResponse:
+    """Get auri-core.md content from S3."""
+    try:
+        from glitch.tools.soul_tools import load_auri_core_from_s3
+        content = load_auri_core_from_s3()
+        return AuriPersonaResponse(content=content)
+    except Exception as e:
+        logger.error("get_auri_persona_core failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/auri/persona/core", response_model=AuriPersonaSaveResponse)
+async def put_auri_persona_core(body: AuriPersonaUpdate) -> AuriPersonaSaveResponse:
+    """Save auri-core.md to S3 and invalidate in-process cache."""
+    try:
+        from glitch.tools.soul_tools import save_auri_core_to_s3
+        from glitch.auri_context import invalidate_cache
+        ok, err = save_auri_core_to_s3(body.content)
+        if not ok:
+            raise HTTPException(status_code=500, detail=err)
+        invalidate_cache("auri-core")
+        return AuriPersonaSaveResponse(saved=True)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("put_auri_persona_core failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/auri/persona/rules", response_model=AuriPersonaResponse)
+async def get_auri_persona_rules() -> AuriPersonaResponse:
+    """Get auri-runtime-rules.md content from S3."""
+    try:
+        from glitch.tools.soul_tools import load_auri_rules_from_s3
+        content = load_auri_rules_from_s3()
+        return AuriPersonaResponse(content=content)
+    except Exception as e:
+        logger.error("get_auri_persona_rules failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/auri/persona/rules", response_model=AuriPersonaSaveResponse)
+async def put_auri_persona_rules(body: AuriPersonaUpdate) -> AuriPersonaSaveResponse:
+    """Save auri-runtime-rules.md to S3 and invalidate in-process cache."""
+    try:
+        from glitch.tools.soul_tools import save_auri_rules_to_s3
+        from glitch.auri_context import invalidate_cache
+        ok, err = save_auri_rules_to_s3(body.content)
+        if not ok:
+            raise HTTPException(status_code=500, detail=err)
+        invalidate_cache("auri-rules")
+        return AuriPersonaSaveResponse(saved=True)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("put_auri_persona_rules failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/auri/dm-users", response_model=AuriDmUsersResponse)
+async def get_auri_dm_users() -> AuriDmUsersResponse:
+    """List Telegram users authorized for DM access with Auri."""
+    table = _get_dynamodb_table()
+    if not table:
+        raise HTTPException(status_code=503, detail="DynamoDB not available")
+    try:
+        response = table.get_item(Key={"pk": "CONFIG", "sk": "telegram"})
+        if "Item" not in response:
+            return AuriDmUsersResponse(users=[], count=0)
+        dm_allowlist = response["Item"].get("dm_allowlist", []) or []
+        users = [AuriDmUser(user_id=str(uid)) for uid in dm_allowlist]
+        return AuriDmUsersResponse(users=users, count=len(users))
+    except Exception as e:
+        logger.error("get_auri_dm_users failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/auri/profiles", response_model=AuriProfilesResponse)
+async def get_auri_profiles() -> AuriProfilesResponse:
+    """List participant profiles stored in auri_memory RDS table."""
+    try:
+        result = _invoke_protect_query_action("auri_list_profiles", {"limit": 50})
+        profiles = [
+            AuriProfileInfo(
+                participant_id=p["participant_id"],
+                content=p["content"],
+                created_at=p.get("created_at"),
+            )
+            for p in result.get("profiles", [])
+        ]
+        return AuriProfilesResponse(profiles=profiles, count=len(profiles))
+    except Exception as e:
+        logger.error("get_auri_profiles failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/auri/memory-stats", response_model=AuriMemoryStatsResponse)
+async def get_auri_memory_stats() -> AuriMemoryStatsResponse:
+    """Get Auri memory row counts from protect-query Lambda."""
+    try:
+        result = _invoke_protect_query_action("auri_memory_count", {})
+        return AuriMemoryStatsResponse(
+            available=True,
+            memory_rows=result.get("memory_rows", 0),
+            profile_rows=result.get("profile_rows", 0),
+            total_rows=result.get("total_rows", 0),
+        )
+    except Exception as e:
+        logger.warning("get_auri_memory_stats: %s", e)
+        return AuriMemoryStatsResponse(available=False, error=str(e))
+
+
+@router.get("/auri/export/character-card")
+async def get_auri_character_card() -> dict:
+    """Export Auri persona as a Character Card V2 JSON object."""
+    try:
+        from glitch.tools.soul_tools import load_auri_core_from_s3, load_auri_rules_from_s3
+        core = load_auri_core_from_s3()
+        rules = load_auri_rules_from_s3()
+        return {
+            "spec": "chara_card_v2",
+            "spec_version": "2.0",
+            "data": {
+                "name": "Auri",
+                "description": core,
+                "personality": "",
+                "scenario": "",
+                "first_mes": "",
+                "mes_example": "",
+                "system_prompt": rules,
+                "tags": ["android", "lion", "caretaker", "auri"],
+                "extensions": {
+                    "glitch_version": "1.0",
+                    "source": "auri-core.md + auri-runtime-rules.md",
+                },
+            },
+        }
+    except Exception as e:
+        logger.error("get_auri_character_card failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
